@@ -90,6 +90,36 @@ describe('buildLicenseArtifactPayload / parseLicenseArtifact — wire format', (
     }), 'utf8').toString('base64url');
     expect(parseLicenseArtifact(`${bad}.sig`)).toBeNull();
   });
+
+  it('Phase 5d: notes is entirely omitted from the payload when not provided (exact backward compatibility)', () => {
+    const now = Date.now();
+    const payloadB64 = buildLicenseArtifactPayload({ licenseId: 'lic_1', product: 'studix', installationId: 'inst-1', issuedAt: now });
+    const parsed = parseLicenseArtifact(`${payloadB64}.sig`);
+    expect('notes' in parsed.payload).toBe(false);
+  });
+
+  it('Phase 5d: notes round-trips when provided', () => {
+    const now = Date.now();
+    const payloadB64 = buildLicenseArtifactPayload({
+      licenseId: 'lic_1', product: 'studix', installationId: 'inst-1', issuedAt: now, notes: 'مركز النور للدروس الخصوصية',
+    });
+    const parsed = parseLicenseArtifact(`${payloadB64}.sig`);
+    expect(parsed.payload.notes).toBe('مركز النور للدروس الخصوصية');
+  });
+
+  it('Phase 5d: rejects a non-string, non-null/undefined notes value', () => {
+    const bad = Buffer.from(JSON.stringify({
+      v: 1, licenseId: 'l', product: 'studix', installationId: 'i', issuedAt: 1, expiresAt: null, features: null, notes: 12345,
+    }), 'utf8').toString('base64url');
+    expect(parseLicenseArtifact(`${bad}.sig`)).toBeNull();
+  });
+
+  it('Phase 5d: an explicit notes:null is accepted (tolerant, even though the builder never emits it)', () => {
+    const bad = Buffer.from(JSON.stringify({
+      v: 1, licenseId: 'l', product: 'studix', installationId: 'i', issuedAt: 1, expiresAt: null, features: null, notes: null,
+    }), 'utf8').toString('base64url');
+    expect(parseLicenseArtifact(`${bad}.sig`)).not.toBeNull();
+  });
 });
 
 describe('verifyLicenseArtifact — Ed25519 signature + binding + expiry (no DB)', () => {

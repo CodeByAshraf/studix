@@ -28,12 +28,18 @@ import crypto from 'crypto';
 // ترخيص مُصدَر لمنتج آخر افتراضي مستقبلي بنفس زوج المفاتيح، حتى لو تشابه كل شيء آخر.
 export const PRODUCT_ID = 'studix';
 
-export function buildLicenseArtifactPayload({ licenseId, product, installationId, issuedAt, expiresAt = null, features = null }) {
-  const payload = JSON.stringify({
+// notes: حقل معلوماتي بحت (مثال: اسم العميل) — غير مُتحقَّق منه أو مُنفَّذ في
+// verifyLicenseArtifact إطلاقاً (لا علاقة له بقرار السماح/الرفض)، يُحفَظ فقط لمرجعية
+// المالك لاحقاً (الأداة المُصدِرة — Phase 5d — تستخدمه، لا أي مسار تفعيل/تحقّق بالخادم).
+// اختياري تماماً: يُحذَف من الحمولة كلياً لو غائب/null، فلا يظهر مطلقاً في شهادات لا
+// تحمله — يحافظ هذا على التوافق الكامل مع كل شهادة/اختبار سابق لا يستخدم هذا الحقل.
+export function buildLicenseArtifactPayload({ licenseId, product, installationId, issuedAt, expiresAt = null, features = null, notes = null }) {
+  const payloadObj = {
     v: 1, licenseId, product, installationId, issuedAt,
     expiresAt: expiresAt ?? null, features: features ?? null,
-  });
-  return Buffer.from(payload, 'utf8').toString('base64url');
+  };
+  if (notes !== null && notes !== undefined) payloadObj.notes = notes;
+  return Buffer.from(JSON.stringify(payloadObj), 'utf8').toString('base64url');
 }
 
 // parseLicenseArtifact: يتحقق من الشكل الكامل بلا استثناء أبداً — أي انحراف (JSON تالف،
@@ -60,7 +66,8 @@ export function parseLicenseArtifact(artifact) {
     typeof payload.installationId !== 'string' || !payload.installationId ||
     typeof payload.issuedAt !== 'number' ||
     !(payload.expiresAt === null || typeof payload.expiresAt === 'number') ||
-    !(payload.features === null || Array.isArray(payload.features))
+    !(payload.features === null || Array.isArray(payload.features)) ||
+    !(payload.notes === undefined || payload.notes === null || typeof payload.notes === 'string')
   ) {
     return null;
   }

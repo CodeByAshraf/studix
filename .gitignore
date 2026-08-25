@@ -63,3 +63,9 @@ Thumbs.db
 tools/**/*.pem
 tools/**/*.key
 tools/StudixSupport/
+
+# Phase 5d — Licensing owner-side signing key. Completely separate keypair/directory from
+# Support Access above (StudixLicensing, not StudixSupport) — same reasoning, same narrow
+# scope (tools/**/*.pem and tools/**/*.key above already cover this directory name too;
+# this explicit line is redundant defense-in-depth, matching the Support Access entry).
+tools/StudixLicensing/
