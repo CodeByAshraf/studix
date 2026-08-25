@@ -37,10 +37,12 @@ import activityLogsInterceptor from './routes/activityLogs.js';
 import usersRouter from './routes/users.js';
 import rolesRouter from './routes/roles.js';
 import supportAccessRouter from './routes/supportAccess.js';
+import licenseRouter from './routes/license.js';
 import { COLLECTION_MODELS } from './routes/collections.js';
 import { notFound, errorHandler, asyncHandler } from './middleware/errorHandler.js';
 import { requireAuth, requireRole } from './middleware/auth.js';
 import { requirePermission } from './middleware/permissions.js';
+import { requireActivation } from './middleware/activation.js';
 import { prisma, checkDbConnection } from './prisma.js';
 import { runMigrations } from './db/migrationRunner.js';
 import { createPreMigrationBackup } from './db/backup.js';
@@ -115,6 +117,13 @@ const PRESERVE_CLIENT_ID_COLLECTIONS = new Set(['students', 'groups', 'admission
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'http://localhost:5173';
 app.use(cors({ origin: FRONTEND_ORIGIN, credentials: true }));
 app.use(express.json({ limit: '5mb' }));
+
+// ── Phase 5b: Licensing enforcement — عالمياً، مبكراً، قبل أي شيء آخر تحت /api/ ──
+// (الشرح الكامل + القائمة البيضاء في middleware/activation.js). يستثني تلقائياً أي طلب
+// ليس تحت /api/ (الملفات الثابتة أدناه، مسارات SPA، /health) — لا يؤثّر على تحميل
+// الصفحة نفسها إطلاقاً، فقط على استدعاءات API الفعلية. لا يعتمد على requireAuth، فترتيبه
+// بالنسبة له غير مهمّ.
+app.use(requireActivation);
 
 // ── تقديم الفرونت-إند المبنيّ (dist/) كملفات ثابتة — يشمل / تلقائياً (index.html) ──
 // الرد السابق هنا (JSON "معلومات خدمة") أصبح دون فائدة عمداً — لا واجهة/اختبار كان
@@ -248,6 +257,13 @@ app.use('/api/roles', requireAuth, requirePermission('users'), rolesRouter);
 // وتخدم هذا الغرض تماماً. لا صفحة/واجهة أمامية بعد تستخدم هذا المسار (Phase 4b
 // backend-only) — لا تأثير على أي مستخدم حتى الآن.
 app.use('/api/support-access', requireAuth, requireRole('admin'), supportAccessRouter);
+
+// ── Phase 5b: Licensing — backend core (schema من Phase 5a) ──
+// نفس حارس Support Access بالضبط (role === 'admin' حرفياً، لا requirePermission
+// القابلة للتفويض) — قدرة حسّاسة بنفس درجة حساسية Support Access على الأقل. مُستثنًى من
+// requireActivation أعلاه صراحة (بادئة '/api/license' في القائمة البيضاء) — بديهياً: لا
+// يمكن أن يتطلّب الوصول لمسار التفعيل نفسه تفعيلاً مسبقاً.
+app.use('/api/license', requireAuth, requireRole('admin'), licenseRouter);
 
 // ── تفعيل routes ديناميكياً (يتخطّى أي model ناقص بأمان) ──
 // كل /api/<collection> يتطلّب جلسة مصادَق عليها (requireAuth) — GET شاملاً — بالإضافة
