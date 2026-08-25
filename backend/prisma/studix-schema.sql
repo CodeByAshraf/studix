@@ -2,14 +2,14 @@
 -- تم توليده تلقائياً بواسطة backend/scripts/generateSchemaArtifact.js — لا تُعدِّله يدوياً.
 -- لإعادة التوليد بعد أي تغيير حقيقي في schema.prisma أو الـ triggers/constraints:
 --   node backend/scripts/generateSchemaArtifact.js
--- تاريخ التوليد: 2026-08-24T12:23:16.530Z
+-- تاريخ التوليد: 2026-08-25T09:00:19.727Z
 -- المصدر: قاعدة scratch معزولة (db push + DDL كامل)، وليس أي قاعدة تطوير حقيقية — لا بيانات إطلاقاً.
 
 --
 -- PostgreSQL database dump
 --
 
-\restrict eosKmk7XFecIQYzS1sVTW0RpRo0YyLcqcIVrcqqblJOogCAw9WxesMQ0gzEq2gU
+\restrict rUgglChlgnNFVXZBv2G0hNUftcVJqDhaWTmoyO2cgxweuHSnpeTUxW8PgRr5WmT
 
 -- Dumped from database version 18.6
 -- Dumped by pg_dump version 18.6
@@ -1721,5 +1721,5 @@ ALTER TABLE ONLY public.wa_report_log
 -- PostgreSQL database dump complete
 --
 
-\unrestrict eosKmk7XFecIQYzS1sVTW0RpRo0YyLcqcIVrcqqblJOogCAw9WxesMQ0gzEq2gU
+\unrestrict rUgglChlgnNFVXZBv2G0hNUftcVJqDhaWTmoyO2cgxweuHSnpeTUxW8PgRr5WmT
 

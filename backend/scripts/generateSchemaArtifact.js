@@ -4,15 +4,23 @@
 // أداة مطوّر تُشغَّل يدوياً (node scripts/generateSchemaArtifact.js) لإنتاج
 // backend/prisma/studix-schema.sql — ملف SQL واحد حتمي (deterministic) يُنشئ قاعدة Studix
 // فارغة كاملة (27 جدولاً + كل الـ FKs/الفهارس/unique constraints من schema.prisma، زائد
-// 13 trigger و4 functions و45 CHECK constraint التي لا يُمثّلها schema.prisma/db push
-// إطلاقاً) — بلا أي حاجة لـ Prisma CLI أو npm أو اتصال إنترنت على جهاز العميل وقت
-// التثبيت.
+// 13 trigger و4 functions و45 CHECK constraint وفهرسي unique جزئي التي لا يُمثّلها
+// schema.prisma/db push إطلاقاً) — بلا أي حاجة لـ Prisma CLI أو npm أو اتصال إنترنت على
+// جهاز العميل وقت التثبيت.
+//
+// Phase 2 (Schema Artifact single-source-of-truth refactor): مصدرا الحقيقة الوحيدان
+// لهذا الملف هما schema.prisma (عبر db push) وbackend/migrations/*.sql (بترتيب تصاعدي —
+// حالياً 001_baseline.sql فقط). applyFullSchemaDDL (من scratchDbFullSchema.js) لم يعد
+// يحمل أي DDL مكتوب يدوياً بنفسه — يقرأ نفس ملفات backend/migrations ويُطبِّقها حرفياً،
+// بنفس منطق التقسيم (splitSqlStatements) الذي يستخدمه migrationRunner.js فعلياً على
+// studix الحقيقية وقت الإقلاع. لا يوجد أي DDL منسوخ يدوياً في أي مكان ثانٍ.
 //
 // المنهجية (نفس منهجية scratchDb.js المُثبَتة فعلياً في MEDIUM-B1/B2، بلا أي تعديل
 // عليها):
 //   1. setupScratchDb('schema-artifact') — قاعدة scratch جديدة معزولة تماماً، db push.
-//   2. applyFullSchemaDDL(client) من scratchDbFullSchema.js (الملف الجديد المرافق) —
-//      يضيف الـ triggers/functions/CHECK constraints الـ45 كاملة.
+//   2. applyFullSchemaDDL(client) من scratchDbFullSchema.js — يقرأ backend/migrations/*.sql
+//      بترتيب تصاعدي ويطبِّق كل عباراتها (الـ triggers/functions/CHECK constraints/
+//      partial unique indexes الـ45+13+4+2 كاملة) على قاعدة scratch.
 //   3. pg_dump --schema-only --no-owner --no-privileges على قاعدة scratch (وليس على
 //      studix الحقيقية إطلاقاً) → studix-schema.sql.
 //   4. teardownScratchDb — حذف قاعدة scratch فوراً (نظيفة، لا تُترَك أبداً).
@@ -34,6 +42,7 @@ import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { checkPostgresReachable, setupScratchDb, teardownScratchDb } from '../src/test-helpers/scratchDb.js';
 import { applyFullSchemaDDL } from '../src/test-helpers/scratchDbFullSchema.js';
+import { discoverMigrationFiles } from '../src/db/migrationRunner.js';
 
 dotenv.config();
 
@@ -77,7 +86,12 @@ async function main() {
     scratch = await setupScratchDb('schemaartifact');
     console.log(`   قاعدة scratch: ${scratch.scratchDbName}`);
 
-    console.log('2) تطبيق الـ triggers/functions/CHECK constraints/partial unique indexes الكاملة (13/4/45/2)...');
+    const migrationsDir = path.join(BACKEND_ROOT, 'migrations');
+    const migrationFiles = discoverMigrationFiles(migrationsDir);
+    console.log(
+      `2) تطبيق backend/migrations/*.sql بترتيب تصاعدي (${migrationFiles.length} ملف: ` +
+      `${migrationFiles.map((f) => f.filename).join(', ')})...`
+    );
     await applyFullSchemaDDL(scratch.client);
 
     console.log('3) تشغيل pg_dump --schema-only --no-owner --no-privileges...');
