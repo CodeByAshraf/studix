@@ -1,0 +1,545 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model absence_followup {
+  id                  String     @id
+  attendance_id       String     @unique
+  absence_reason      String?
+  followed_by         String?
+  followed_at         DateTime?  @db.Timestamptz(6)
+  follow_status       String     @default("pending")
+  notes               String?
+  parent_contacted_us Boolean    @default(false)
+  attendance          attendance @relation(fields: [attendance_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model activity_logs {
+  id          String   @id
+  action      String?
+  module      String?
+  user_id     String?
+  user_name   String?
+  entity_type String?
+  entity_id   String?
+  details     String?
+  timestamp   DateTime @default(now()) @db.Timestamptz(6)
+  users       users?   @relation(fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([user_id], map: "idx_activity_user")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model admission_followups {
+  id           String     @id
+  admission_id String
+  type         String
+  note         String?
+  employee     String?
+  date         DateTime?  @db.Date
+  created_at   DateTime   @default(now()) @db.Timestamptz(6)
+  admissions   admissions @relation(fields: [admission_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([admission_id], map: "idx_adm_fu_adm")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model admission_payments {
+  id              String         @id
+  admission_id    String
+  type            String
+  amount          Decimal        @db.Decimal(12, 2)
+  date            DateTime       @db.Date
+  method          String         @default("cash")
+  notes           String?
+  treasury_txn_id String?
+  created_at      DateTime       @default(now()) @db.Timestamptz(6)
+  material_id     BigInt?
+  admissions      admissions     @relation(fields: [admission_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  treasury_txn    treasury_txn?  @relation(fields: [treasury_txn_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  inv_materials   inv_materials? @relation(fields: [material_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_admission_payments_material")
+
+  @@index([admission_id], map: "idx_adm_pay_adm")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model admission_system_log {
+  id            String     @id
+  admission_id  String
+  activity_type String
+  timestamp     DateTime   @default(now()) @db.Timestamptz(6)
+  by_user       String?
+  details       String?
+  admissions    admissions @relation(fields: [admission_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([admission_id], map: "idx_adm_log_adm")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model admissions {
+  id                                       String                 @id
+  number                                   String                 @unique
+  name                                     String
+  parent_id                                BigInt?
+  parent_name                              String?
+  phone                                    String?
+  parent_phone                             String?
+  grade                                    String?
+  school                                   String?
+  source                                   String?
+  notes                                    String?
+  stage                                    String                 @default("lead")
+  lead_status                              String?
+  reservation_status                       String?
+  reservation_date                         DateTime?              @db.Date
+  group_id                                 String?
+  student_id                               String?
+  course_fee                               Decimal?               @db.Decimal(12, 2)
+  created_at                               DateTime               @default(now()) @db.Timestamptz(6)
+  created_by                               String?
+  last_modified_at                         DateTime?              @db.Timestamptz(6)
+  last_modified_by                         String?
+  admission_followups                      admission_followups[]
+  admission_payments                       admission_payments[]
+  admission_system_log                     admission_system_log[]
+  users_admissions_created_byTousers       users?                 @relation("admissions_created_byTousers", fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  groups                                   groups?                @relation(fields: [group_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users_admissions_last_modified_byTousers users?                 @relation("admissions_last_modified_byTousers", fields: [last_modified_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  parents                                  parents?               @relation(fields: [parent_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  students                                 students?              @relation(fields: [student_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  communications                           communications[]
+  inventory_txn                            inventory_txn[]
+  treasury_txn                             treasury_txn[]
+
+  @@index([parent_id], map: "idx_adm_parent")
+  @@index([stage], map: "idx_adm_stage")
+  @@index([student_id], map: "idx_adm_student")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model attendance {
+  id               String            @id
+  student_id       String
+  group_id         String
+  date             DateTime          @db.Date
+  status           String
+  session_time     String?
+  created_at       DateTime          @default(now()) @db.Timestamptz(6)
+  absence_followup absence_followup?
+  groups           groups            @relation(fields: [group_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  students         students          @relation(fields: [student_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([student_id, date, group_id], map: "uq_attendance_student_date_group")
+  @@index([group_id, date], map: "idx_attendance_group_date")
+  @@index([student_id], map: "idx_attendance_student")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model cashboxes {
+  id              String         @id
+  name            String
+  type            String?
+  color           String?
+  icon            String?
+  opening_balance Decimal        @default(0) @db.Decimal(12, 2)
+  is_default      Boolean        @default(false)
+  active          Boolean        @default(true)
+  notes           String?
+  created_at      DateTime       @default(now()) @db.Timestamptz(6)
+  treasury_txn    treasury_txn[]
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model center_profile {
+  id            Int      @id @default(1) @db.SmallInt
+  name          String?
+  address       String?
+  phone1        String?
+  phone2        String?
+  logo_url      String?
+  teacher_name  String?
+  subject       String?
+  academic_year String?
+  updated_at    DateTime @default(now()) @db.Timestamptz(6)
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model comm_tasks {
+  id               String          @id
+  communication_id String?
+  title            String
+  due_date         DateTime?       @db.Date
+  due_time         String?
+  priority         String          @default("normal")
+  employee         String?
+  status           String          @default("pending")
+  created_at       DateTime        @default(now()) @db.Timestamptz(6)
+  communications   communications? @relation(fields: [communication_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([communication_id], map: "idx_comm_tasks_comm")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model communications {
+  id                 String       @id
+  number             String       @unique
+  parent_id          BigInt?
+  legacy_parent_name String?
+  type               String
+  reason             String?
+  result             String
+  employee           String?
+  student_name       String?
+  phone              String?
+  notes              String?
+  priority           String       @default("normal")
+  status             String       @default("open")
+  followup_date      DateTime?    @db.Date
+  followup_time      String?
+  student_id         String?
+  admission_id       String?
+  payment_id         String?
+  group_id           String?
+  created_at         DateTime     @default(now()) @db.Timestamptz(6)
+  created_by         String?
+  updated_at         DateTime     @default(now()) @db.Timestamptz(6)
+  comm_tasks         comm_tasks[]
+  admissions         admissions?  @relation(fields: [admission_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  groups             groups?      @relation(fields: [group_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  parents            parents?     @relation(fields: [parent_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  payments           payments?    @relation(fields: [payment_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  students           students?    @relation(fields: [student_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([followup_date], map: "idx_comm_followup")
+  @@index([parent_id], map: "idx_comm_parent")
+  @@index([status], map: "idx_comm_status")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model exams {
+  id         String   @id
+  name       String
+  group_id   String
+  subject    String?
+  date       DateTime @db.Date
+  total      Decimal  @db.Decimal(6, 2)
+  pass       Decimal  @default(50) @db.Decimal(6, 2)
+  created_at DateTime @default(now()) @db.Timestamptz(6)
+  type       String   @default("monthly")
+  teacher    String?
+  status     String   @default("upcoming")
+  groups     groups   @relation(fields: [group_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  grades     grades[]
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model grades {
+  id         String   @id
+  exam_id    String
+  student_id String
+  score      Decimal? @db.Decimal(6, 2)
+  absent     Boolean  @default(false)
+  created_at DateTime @default(now()) @db.Timestamptz(6)
+  exams      exams    @relation(fields: [exam_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  students   students @relation(fields: [student_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([exam_id, student_id], map: "uq_grade_exam_student")
+  @@index([exam_id], map: "idx_grades_exam")
+  @@index([student_id], map: "idx_grades_student")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model groups {
+  id             String           @id
+  name           String
+  subject        String?
+  grade          String?
+  teacher_id     BigInt?
+  teacher_name   String?
+  time           String?
+  days           Json?
+  price          Decimal          @default(0) @db.Decimal(12, 2)
+  created_at     DateTime         @default(now()) @db.Timestamptz(6)
+  max            Int?
+  color          String?
+  notes          String?
+  admissions     admissions[]
+  attendance     attendance[]
+  communications communications[]
+  exams          exams[]
+  teachers       teachers?        @relation(fields: [teacher_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  homeworks      homeworks[]
+  payments       payments[]
+  students       students[]
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model homeworks {
+  id             String           @id
+  title          String
+  description    String?
+  subject        String?
+  teacher        String?
+  group_id       String
+  total_score    Decimal          @default(10) @db.Decimal(6, 2)
+  due_date       DateTime         @db.Date
+  created_at     DateTime         @default(now()) @db.Timestamptz(6)
+  assigned_date  DateTime         @default(dbgenerated("CURRENT_DATE")) @db.Date
+  status         String           @default("active")
+  groups         groups           @relation(fields: [group_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  hw_submissions hw_submissions[]
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model hw_submissions {
+  id           String    @id
+  homework_id  String
+  student_id   String
+  status       String    @default("missing")
+  submitted_at DateTime? @db.Timestamptz(6)
+  score        Decimal?  @db.Decimal(6, 2)
+  notes        String?
+  homeworks    homeworks @relation(fields: [homework_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  students     students  @relation(fields: [student_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([homework_id, student_id], map: "uq_hwsub_hw_student")
+  @@index([student_id], map: "idx_hwsub_student")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model inv_materials {
+  id                 BigInt               @id @default(autoincrement())
+  code               String               @unique
+  name               String
+  subject            String?
+  grade              String?
+  price              Decimal              @default(0) @db.Decimal(12, 2)
+  cost               Decimal              @default(0) @db.Decimal(12, 2)
+  min_stock          Decimal              @default(0) @db.Decimal(12, 2)
+  status             String               @default("active")
+  barcode            String?
+  created_at         DateTime             @default(now()) @db.Timestamptz(6)
+  teacher            String?
+  description        String?
+  added_at           DateTime?            @db.Date
+  admission_payments admission_payments[]
+  inventory_txn      inventory_txn[]
+  payments           payments[]
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model inventory_settings {
+  id                      Int     @id @default(1) @db.SmallInt
+  default_min_stock       Decimal @default(10) @db.Decimal(12, 2)
+  allow_negative_stock    Boolean @default(false)
+  reservation_expiry_days Int     @default(7) @db.SmallInt
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model inventory_txn {
+  id              String        @id
+  number          String        @unique
+  material_id     BigInt
+  type            String
+  quantity        Decimal       @db.Decimal(12, 2)
+  batch_no        String?
+  unit_cost       Decimal?      @db.Decimal(12, 2)
+  recipient       String?
+  student_id      String?
+  admission_id    String?
+  payment_id      String?
+  status          String        @default("active")
+  legacy_metadata Json?
+  created_by      String?
+  created_by_name String?
+  created_at      DateTime      @default(now()) @db.Timestamptz(6)
+  admissions      admissions?   @relation(fields: [admission_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_inventory_admission")
+  users           users?        @relation(fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  inv_materials   inv_materials @relation(fields: [material_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  payments        payments?     @relation(fields: [payment_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  students        students?     @relation(fields: [student_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([material_id], map: "idx_inv_txn_material")
+  @@index([status], map: "idx_inv_txn_status")
+  @@index([student_id], map: "idx_inv_txn_student")
+  @@index([type], map: "idx_inv_txn_type")
+}
+
+model parents {
+  id               BigInt           @id @default(autoincrement())
+  full_name        String?
+  phone            String?          @unique
+  alt_phone        String?
+  preferred_method String?
+  preferred_time   String?
+  notes            String?
+  created_at       DateTime         @default(now()) @db.Timestamptz(6)
+  updated_at       DateTime         @default(now()) @db.Timestamptz(6)
+  admissions       admissions[]
+  communications   communications[]
+  students         students[]
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model payments {
+  id                                                  String           @id
+  student_id                                          String
+  group_id                                            String?
+  material_id                                         BigInt?
+  month                                               Int              @db.SmallInt
+  year                                                Int              @db.SmallInt
+  amount                                              Decimal          @db.Decimal(12, 2)
+  method                                              String           @default("cash")
+  pay_type                                            String           @default("subscription")
+  date                                                DateTime         @db.Date
+  status                                              String
+  notes                                               String?
+  treasury_txn_id                                     String?
+  created_at                                          DateTime         @default(now()) @db.Timestamptz(6)
+  communications                                      communications[]
+  inventory_txn                                       inventory_txn[]
+  inv_materials                                       inv_materials?   @relation(fields: [material_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_payments_material")
+  groups                                              groups?          @relation(fields: [group_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  students                                            students         @relation(fields: [student_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  treasury_txn_payments_treasury_txn_idTotreasury_txn treasury_txn?    @relation("payments_treasury_txn_idTotreasury_txn", fields: [treasury_txn_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  treasury_txn_treasury_txn_payment_idTopayments      treasury_txn[]   @relation("treasury_txn_payment_idTopayments")
+
+  @@index([material_id], map: "idx_payments_material")
+  @@index([student_id], map: "idx_payments_student")
+  @@index([treasury_txn_id], map: "idx_payments_treasury")
+}
+
+model roles {
+  id           String  @id
+  label        String
+  color        String?
+  is_system    Boolean @default(false)
+  permissions  Json?
+  description  String?
+  auth_version Int     @default(1)
+  users        users[]
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model students {
+  id             String           @id
+  code           String           @unique
+  name           String
+  phone          String?
+  parent_id      BigInt?
+  grade          String?
+  group_id       String?
+  school         String?
+  notes          String?
+  status         String           @default("active")
+  monthly_fee    Decimal?         @db.Decimal(12, 2)
+  enroll_date    DateTime         @default(dbgenerated("CURRENT_DATE")) @db.Date
+  created_at     DateTime         @default(now()) @db.Timestamptz(6)
+  updated_at     DateTime         @default(now()) @db.Timestamptz(6)
+  parent_phone   String?
+  admissions     admissions[]
+  attendance     attendance[]
+  communications communications[]
+  grades         grades[]
+  hw_submissions hw_submissions[]
+  inventory_txn  inventory_txn[]
+  payments       payments[]
+  groups         groups?          @relation(fields: [group_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  parents        parents?         @relation(fields: [parent_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  wa_report_log  wa_report_log[]
+
+  @@index([group_id], map: "idx_students_group")
+  @@index([parent_id], map: "idx_students_parent")
+  @@index([status], map: "idx_students_status")
+}
+
+model teachers {
+  id         BigInt   @id @default(autoincrement())
+  name       String
+  phone      String?
+  subject    String?
+  active     Boolean  @default(true)
+  created_at DateTime @default(now()) @db.Timestamptz(6)
+  groups     groups[]
+  users      users[]
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model treasury_txn {
+  id                                              String               @id
+  cashbox_id                                      String
+  date                                            DateTime             @db.Date
+  type                                            String
+  category                                        String
+  amount                                          Decimal              @db.Decimal(12, 2)
+  method                                          String               @default("cash")
+  party                                           String?
+  notes                                           String?
+  status                                          String               @default("active")
+  ref_type                                        String?
+  ref_id                                          String?
+  payment_id                                      String?
+  admission_id                                    String?
+  source_module                                   String?
+  source_doc_no                                   String?
+  created_by                                      String?
+  created_by_name                                 String?
+  created_at                                      DateTime             @default(now()) @db.Timestamptz(6)
+  admission_payments                              admission_payments[]
+  payments_payments_treasury_txn_idTotreasury_txn payments[]           @relation("payments_treasury_txn_idTotreasury_txn")
+  admissions                                      admissions?          @relation(fields: [admission_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_treasury_admission")
+  payments_treasury_txn_payment_idTopayments      payments?            @relation("treasury_txn_payment_idTopayments", fields: [payment_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_treasury_payment")
+  cashboxes                                       cashboxes            @relation(fields: [cashbox_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users                                           users?               @relation(fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([admission_id], map: "idx_treasury_admission")
+  @@index([cashbox_id], map: "idx_treasury_cashbox")
+  @@index([date], map: "idx_treasury_date")
+  @@index([payment_id], map: "idx_treasury_payment")
+  @@index([ref_type, ref_id], map: "idx_treasury_ref")
+  @@index([status], map: "idx_treasury_status")
+}
+
+model users {
+  id                                            String          @id
+  name                                          String
+  role_id                                       String?
+  teacher_id                                    BigInt?
+  password_hash                                 String?
+  is_admin                                      Boolean         @default(false)
+  active                                        Boolean         @default(true)
+  permissions                                   Json?
+  email                                         String?
+  last_login                                    DateTime?       @db.Timestamptz(6)
+  created_at                                    DateTime        @default(now()) @db.Timestamptz(6)
+  auth_version                                  Int             @default(1)
+  activity_logs                                 activity_logs[]
+  admissions_admissions_created_byTousers       admissions[]    @relation("admissions_created_byTousers")
+  admissions_admissions_last_modified_byTousers admissions[]    @relation("admissions_last_modified_byTousers")
+  inventory_txn                                 inventory_txn[]
+  treasury_txn                                  treasury_txn[]
+  roles                                         roles?          @relation(fields: [role_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  teachers                                      teachers?       @relation(fields: [teacher_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  wa_report_log                                 wa_report_log[]
+}
+
+model wa_report_log {
+  id           String    @id
+  student_id   String?
+  parent_phone String?
+  report_type  String?
+  message_type String?
+  status       String    @default("prepared")
+  created_by   String?
+  created_at   DateTime  @default(now()) @db.Timestamptz(6)
+  users        users?    @relation(fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  students     students? @relation(fields: [student_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([student_id], map: "idx_wa_student")
+}

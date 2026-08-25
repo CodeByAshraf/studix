@@ -1,0 +1,26 @@
+{
+  "name": "studix-backend",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Studix backend — Express + Prisma over PostgreSQL (Phase 0: infrastructure only)",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "db:pull": "prisma db pull",
+    "db:generate": "prisma generate",
+    "db:studio": "prisma studio",
+    "admin:create": "node scripts/adminCreate.js",
+    "test": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.js"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "express-rate-limit": "^8.6.2"
+  },
+  "devDependencies": {
+    "prisma": "^5.22.0"
+  }
+}
