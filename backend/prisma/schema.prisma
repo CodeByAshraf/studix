@@ -371,6 +371,20 @@ model inventory_txn {
   @@index([type], map: "idx_inv_txn_type")
 }
 
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model license_config {
+  id                    Int       @id @default(1) @db.SmallInt
+  licensing_public_key  String?
+  license_artifact      String?
+  license_id            String?
+  product               String?
+  expires_at            DateTime? @db.Timestamptz(6)
+  features              Json?
+  activated_at          DateTime? @db.Timestamptz(6)
+  created_at            DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at            DateTime  @default(now()) @db.Timestamptz(6)
+}
+
 model parents {
   id               BigInt           @id @default(autoincrement())
   full_name        String?

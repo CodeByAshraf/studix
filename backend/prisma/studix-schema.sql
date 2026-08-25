@@ -2,14 +2,14 @@
 -- تم توليده تلقائياً بواسطة backend/scripts/generateSchemaArtifact.js — لا تُعدِّله يدوياً.
 -- لإعادة التوليد بعد أي تغيير حقيقي في schema.prisma أو الـ triggers/constraints:
 --   node backend/scripts/generateSchemaArtifact.js
--- تاريخ التوليد: 2026-08-25T10:28:00.030Z
+-- تاريخ التوليد: 2026-08-25T11:44:57.636Z
 -- المصدر: قاعدة scratch معزولة (db push + DDL كامل)، وليس أي قاعدة تطوير حقيقية — لا بيانات إطلاقاً.
 
 --
 -- PostgreSQL database dump
 --
 
-\restrict iUbvr9S3qwS6PS2IEhAKYryXtEQFM4kcv7Gc6aZMjShtb7AwBiYhvDYebruXogp
+\restrict k0qsXRSIK2NbqNuuzyuQQzvR7g97ox3gm6jVUB5U5IT5TLNM6e84lhTeVyPxZw8
 
 -- Dumped from database version 18.6
 -- Dumped by pg_dump version 18.6
@@ -520,6 +520,26 @@ CREATE TABLE public.inventory_txn (
 
 
 --
+-- Name: license_config; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.license_config (
+    id smallint DEFAULT 1 NOT NULL,
+    licensing_public_key text,
+    license_artifact text,
+    license_id text,
+    product text,
+    expires_at timestamp(6) with time zone,
+    features jsonb,
+    activated_at timestamp(6) with time zone,
+    created_at timestamp(6) with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at timestamp(6) with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT chk_license_activation_consistency CHECK (((license_artifact IS NULL) = (activated_at IS NULL))),
+    CONSTRAINT license_config_single_row CHECK ((id = 1))
+);
+
+
+--
 -- Name: parents; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -906,6 +926,14 @@ ALTER TABLE ONLY public.inventory_settings
 
 ALTER TABLE ONLY public.inventory_txn
     ADD CONSTRAINT inventory_txn_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: license_config license_config_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_config
+    ADD CONSTRAINT license_config_pkey PRIMARY KEY (id);
 
 
 --
@@ -1321,6 +1349,13 @@ CREATE TRIGGER trg_center_updated BEFORE UPDATE ON public.center_profile FOR EAC
 --
 
 CREATE TRIGGER trg_communications_updated BEFORE UPDATE ON public.communications FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: license_config trg_license_config_updated; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_license_config_updated BEFORE UPDATE ON public.license_config FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 
 --
@@ -1772,5 +1807,5 @@ ALTER TABLE ONLY public.wa_report_log
 -- PostgreSQL database dump complete
 --
 
-\unrestrict iUbvr9S3qwS6PS2IEhAKYryXtEQFM4kcv7Gc6aZMjShtb7AwBiYhvDYebruXogp
+\unrestrict k0qsXRSIK2NbqNuuzyuQQzvR7g97ox3gm6jVUB5U5IT5TLNM6e84lhTeVyPxZw8
 

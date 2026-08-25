@@ -102,12 +102,12 @@ describe('support_access_config — Phase 4a schema-only migration (real scratch
     }, 60_000);
     afterAll(async () => { if (scratch) await teardownScratchDb(scratch); });
 
-    it('applies migrations 1 and 2 for real, creating the table', async () => {
+    it('applies all real pending migrations, creating the table', async () => {
       const result = await runMigrations(scratch.client, {
         migrationsDir: REAL_MIGRATIONS_DIR, databaseUrl: scratch.scratchUrl, backup: okBackup,
       });
       expect(result.action).toBe('migrated');
-      expect(result.versions).toEqual([1, 2]);
+      expect(result.versions).toContain(2); // exact set intentionally not pinned — grows as later phases add real migrations
     });
 
     it('table structure matches schema.prisma exactly (columns/nullability)', async () => {
