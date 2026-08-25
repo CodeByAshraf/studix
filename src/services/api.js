@@ -1489,3 +1489,61 @@ export async function pgRevokeSupportAccess() {
   if (!res.ok) throw new Error(json?.error || `PG POST /support-access/revoke → ${res.status}`);
   return json; // { ok, revokedChallenge, revokedSession }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 5c — Licensing/Activation (يستهلك مسارات Phase 5b الثلاثة كما هي، بلا أي تعديل
+// عليها). /api/license/status و/api/license/request-code admin-only حصراً بالخادم
+// (requireRole('admin') — نفس حارس Support Access بالضبط، انظر backend/src/server.js).
+// لا فحص/توليد توقيع من هذا الملف أو أي مكان آخر في الفرونت-إند — فقط استدعاءات HTTP
+// رقيقة، الخادم هو المرجع الوحيد المُعتمَد لحالة التفعيل دائماً.
+// ═══════════════════════════════════════════════════════════════════════════
+
+export async function pgGetLicenseStatus() {
+  const res = await fetch(`${PG_API_BASE}/api/license/status`, { credentials: 'include' });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG GET /license/status → ${res.status}`);
+  return json; // { ok, activated, reason, licenseId, product, expiresAt, features }
+}
+
+export async function pgRequestLicenseActivationCode() {
+  const res = await fetch(`${PG_API_BASE}/api/license/request-code`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG POST /license/request-code → ${res.status}`);
+  return json; // { ok, code, installationId, product }
+}
+
+export async function pgActivateLicense(artifact) {
+  const res = await fetch(`${PG_API_BASE}/api/license/activate`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ artifact }),
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG POST /license/activate → ${res.status}`);
+  return json; // { ok, licenseId, product, expiresAt, features }
+}
+
+// pgProbeActivation: للمستخدمين غير المديرين حصراً — /api/license/status محمي بـ
+// requireRole('admin')، فيرفض أي غير مدير بـ 403 بصرف النظر عن حالة التفعيل (غير مفيد
+// للكشف هنا، لا نستطيع تمييز "غير مدير" عن "غير مفعَّل" من رمز 403 وحده). نستكشف بدلاً
+// منه عبر أي مسار عادي غير مُستثنى من requireActivation — centerProfile هنا: بسيط وخفيف
+// وGET فقط. الترتيب الفعلي في server.js (requireActivation عالمياً، قبل أي فحص صلاحية
+// خاص بالمسار المُستهدَف) يضمن أن استجابة 402 منه صحيحة دائماً بصرف النظر عمّا إذا كان
+// هذا المستخدم يملك صلاحية 'settings' أصلاً أم لا — أي مسار API آخر غير مُستثنى كان
+// سيعطي نفس النتيجة، هذا الاختيار تحديداً بلا أي أهمية أمنية خاصة.
+export async function pgProbeActivation() {
+  try {
+    const res = await fetch(`${PG_API_BASE}/api/centerProfile`, {
+      credentials: 'include',
+      signal: AbortSignal.timeout(5000),
+    });
+    if (res.status === 402) return { blocked: true };
+    return { blocked: false }; // 200 (مُفعَّل) أو 403 (مُفعَّل لكن بلا صلاحية 'settings') — كلاهما "غير محجوب بالترخيص"
+  } catch {
+    return { blocked: null }; // تعذّر الوصول للخادم أصلاً — حالة مختلفة عن "محجوب"، تُعامَل بشكل منفصل
+  }
+}

@@ -28,6 +28,7 @@ import { UIProvider,   useUI   }              from './store/ui.context';
 import { DataProvider }                       from './store/data.context';
 import RouterNavigate                             from './components/RouterNavigate';
 import { useDB, DBStatusBadge }                   from './hooks/useDB';
+import ActivationGate                             from './modules/activation/ActivationGate';
 
 // ── Lazy imports ──────────────────────────────────────────────────────────────
 // كل صفحة لها دالة تحميل منفصلة حتى نتمكن من الـ prefetch في الخلفية.
@@ -281,7 +282,12 @@ export default function App() {
             <UIProvider canAccess={canAccess}>
               <DataProvider>
                 <ToastProvider>
-                  <DBInit><AppRoutes/></DBInit>
+                  {/* Phase 5c — gates the whole authenticated app shell (never the login
+                      screen itself) behind a fresh, backend-verified activation check on
+                      every mount/login/user-switch. See ActivationGate.jsx's own header. */}
+                  <ActivationGate>
+                    <DBInit><AppRoutes/></DBInit>
+                  </ActivationGate>
                 </ToastProvider>
               </DataProvider>
             </UIProvider>
