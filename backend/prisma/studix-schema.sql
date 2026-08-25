@@ -2,14 +2,14 @@
 -- تم توليده تلقائياً بواسطة backend/scripts/generateSchemaArtifact.js — لا تُعدِّله يدوياً.
 -- لإعادة التوليد بعد أي تغيير حقيقي في schema.prisma أو الـ triggers/constraints:
 --   node backend/scripts/generateSchemaArtifact.js
--- تاريخ التوليد: 2026-08-25T11:44:57.636Z
+-- تاريخ التوليد: 2026-08-25T12:39:48.850Z
 -- المصدر: قاعدة scratch معزولة (db push + DDL كامل)، وليس أي قاعدة تطوير حقيقية — لا بيانات إطلاقاً.
 
 --
 -- PostgreSQL database dump
 --
 
-\restrict k0qsXRSIK2NbqNuuzyuQQzvR7g97ox3gm6jVUB5U5IT5TLNM6e84lhTeVyPxZw8
+\restrict mIwcjFOUFHuFOhBmLoZUxMXIK0T517sVc0Nt3eAxValpky8ayH4OwYZZSoCZB7Y
 
 -- Dumped from database version 18.6
 -- Dumped by pg_dump version 18.6
@@ -534,6 +534,7 @@ CREATE TABLE public.license_config (
     activated_at timestamp(6) with time zone,
     created_at timestamp(6) with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     updated_at timestamp(6) with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    clock_high_water_mark_at timestamp(6) with time zone,
     CONSTRAINT chk_license_activation_consistency CHECK (((license_artifact IS NULL) = (activated_at IS NULL))),
     CONSTRAINT license_config_single_row CHECK ((id = 1))
 );
@@ -1807,5 +1808,5 @@ ALTER TABLE ONLY public.wa_report_log
 -- PostgreSQL database dump complete
 --
 
-\unrestrict k0qsXRSIK2NbqNuuzyuQQzvR7g97ox3gm6jVUB5U5IT5TLNM6e84lhTeVyPxZw8
+\unrestrict mIwcjFOUFHuFOhBmLoZUxMXIK0T517sVc0Nt3eAxValpky8ayH4OwYZZSoCZB7Y
 

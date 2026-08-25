@@ -48,6 +48,7 @@ function renderGate({ initialPath = '/' } = {}) {
 const ACTIVATED_STATUS = { ok: true, activated: true, reason: null, licenseId: 'lic_1', product: 'studix', expiresAt: null, features: null };
 const NOT_ACTIVATED_STATUS = { ok: true, activated: false, reason: 'not_activated' };
 const EXPIRED_STATUS = { ok: true, activated: false, reason: 'expired' };
+const CLOCK_ROLLBACK_STATUS = { ok: true, activated: false, reason: 'clock_rollback_detected' };
 
 describe('ActivationGate', () => {
   beforeEach(() => {
@@ -89,6 +90,14 @@ describe('ActivationGate', () => {
       renderGate();
       expect(await screen.findByText('تفعيل Studix')).toBeInTheDocument();
       expect(screen.getByText(/انتهت صلاحية الترخيص الحالي/)).toBeInTheDocument();
+    });
+
+    it('clock rollback detected: shows the activation gate with the clock_rollback_detected reason (Phase 5e)', async () => {
+      loginSession(ADMIN);
+      pgGetLicenseStatus.mockResolvedValue(CLOCK_ROLLBACK_STATUS);
+      renderGate();
+      expect(await screen.findByText('تفعيل Studix')).toBeInTheDocument();
+      expect(screen.getByText(/تراجع واضح في ساعة النظام/)).toBeInTheDocument();
     });
 
     it('non-admin: shows the restricted message, not the interactive form', async () => {

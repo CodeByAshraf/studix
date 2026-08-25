@@ -8,18 +8,66 @@
 //
 // This module never holds, stores, or transmits a licensing PRIVATE key. It only ever
 // reads a PUBLIC key (license_config.licensing_public_key) — left NULL by Phase 5a until
-// a real keypair exists (Phase 5d, not built yet). A NULL/missing key is treated as
-// "not activated" (fail-closed), never as "skip verification."
+// a real keypair exists (Phase 5d). A NULL/missing key is treated as "not activated"
+// (fail-closed), never as "skip verification."
+//
+// Phase 5e — clock-rollback mitigation (checkClockAndUpdateHighWaterMark). This is a
+// DETERRENT, not a cryptographic guarantee: a fully offline desktop app has no trusted
+// external time source, so a sufficiently determined local attacker with full control of
+// the machine can still defeat any purely local clock check. What this DOES catch: rolling
+// the system clock backward to make an already-expired TERM license appear valid again on
+// a SUBSEQUENT status check, without obtaining a genuine new artifact from the owner. It
+// deliberately does NOT gate perpetual (expiresAt: null) licenses or the activation
+// endpoint itself — see the function's own comment for the full reasoning on both points.
 // ─────────────────────────────────────────────────────────────
 import { prisma } from '../prisma.js';
 import { ensureInstallationConfig } from './supportAccess.js';
-import { PRODUCT_ID, buildActivationRequestCode, verifyLicenseArtifact } from './licenseArtifactFormat.js';
+import {
+  PRODUCT_ID, buildActivationRequestCode, verifyLicenseArtifact, parseLicenseArtifact,
+} from './licenseArtifactFormat.js';
 
 function conflict(message) {
   const err = new Error(message);
   err.status = 409;
   err.expose = true;
   return err;
+}
+
+// CLOCK_ROLLBACK_TOLERANCE_MS: كم يُسمَح للساعة بالتراجع قبل اعتباره "تراجعاً" لا مجرّد
+// تعديل شرعي — 6 ساعات تغطّي بسخاء أي انتقال DST حقيقي (ساعة واحدة كحدّ أقصى في كل
+// المناطق الزمنية المعروفة)، وأي تصحيح NTP/يدوي بسيط، بينما تبقى صغيرة بما يكفي لرصد أي
+// تراجع مقصود ذي معنى فعلي (تفعيل ترخيص منتهي عادة يحتاج تراجعاً بالأيام/الأسابيع/الأشهر،
+// لا الساعات، ليكون مفيداً للمهاجم أصلاً).
+export const CLOCK_ROLLBACK_TOLERANCE_MS = 6 * 60 * 60 * 1000;
+
+// لا تكتب علامة الحدّ الأعلى لكل فحص (يُستدعى مع كل طلب محجوب عبر requireActivation) —
+// فقط لو تقدَّم الوقت الحقيقي بما لا يقلّ عن دقيقة منذ آخر كتابة. لا يُضعِف الكشف عن
+// التراجع إطلاقاً (يبقى فحصاً قراءةً فقط في كل مرّة) — فقط يقلّل الكتابة غير الضرورية.
+const HIGH_WATER_MARK_WRITE_THROTTLE_MS = 60 * 1000;
+
+// checkClockAndUpdateHighWaterMark: يقرأ/يُنشئ الحدّ الأعلى المخزَّن، يقارنه بالوقت
+// الحالي. غياب حدّ سابق (NULL — تثبيت جديد، أو تثبيت قديم قبل هذا العمود) يُنشئ خط أساس
+// فقط، لا يُعامَل كتراجع أبداً. لا يُخفَّض الحدّ الأعلى أبداً حتى لو اكتُشف تراجع (لا
+// "مكافأة" لمحاولة التراجع بخفض خط الأساس المرجعي).
+export async function checkClockAndUpdateHighWaterMark() {
+  const config = await ensureLicenseConfig();
+  const now = Date.now();
+  const stored = config.clock_high_water_mark_at ? config.clock_high_water_mark_at.getTime() : null;
+
+  if (stored === null) {
+    await prisma.license_config.update({ where: { id: 1 }, data: { clock_high_water_mark_at: new Date(now) } });
+    return { rollbackDetected: false, now };
+  }
+
+  if (now < stored - CLOCK_ROLLBACK_TOLERANCE_MS) {
+    return { rollbackDetected: true, now };
+  }
+
+  if (now > stored + HIGH_WATER_MARK_WRITE_THROTTLE_MS) {
+    await prisma.license_config.update({ where: { id: 1 }, data: { clock_high_water_mark_at: new Date(now) } });
+  }
+
+  return { rollbackDetected: false, now };
 }
 
 // ensureLicenseConfig: يقرأ صفّ license_config الوحيد (id=1)، أو يُنشئه لو غائباً (تثبيت
@@ -56,11 +104,23 @@ export async function getLicenseStatus() {
   }
 
   const installation = await ensureInstallationConfig();
+
+  // فحص التراجع يحدث قبل التحقّق الكامل من التوقيع عمداً — لكن قرار الحجب يُطبَّق فقط لو
+  // كانت الشهادة المخزَّنة (لو أمكن تحليلها) ترخيصاً محدود المدّة فعلاً (expiresAt ليست
+  // null). ترخيص دائم لا يوجد فيه شيء يُلتَف عليه بتراجع الساعة أصلاً، فلا داعي لحجبه.
+  const parsedForClockCheck = parseLicenseArtifact(config.license_artifact);
+  const clockCheck = await checkClockAndUpdateHighWaterMark();
+
+  if (clockCheck.rollbackDetected && parsedForClockCheck && parsedForClockCheck.payload.expiresAt !== null) {
+    return { activated: false, reason: 'clock_rollback_detected', payload: parsedForClockCheck.payload };
+  }
+
   const check = verifyLicenseArtifact({
     artifact: config.license_artifact,
     installationId: installation.installation_id,
     product: PRODUCT_ID,
     publicKeyPem: config.licensing_public_key,
+    now: clockCheck.now,
   });
 
   if (!check.ok) {

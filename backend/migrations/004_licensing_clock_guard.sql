@@ -1,0 +1,36 @@
+-- backend/migrations/004_licensing_clock_guard.sql
+-- Studix — migration 004: Licensing clock-rollback mitigation (Phase 5e).
+--
+-- Adds ONE nullable column to the existing license_config singleton:
+-- clock_high_water_mark_at — the highest system clock reading (Date.now()) this
+-- installation has ever observed while checking license status. Used exclusively as an
+-- offline clock-rollback MITIGATION for expiring licenses (see
+-- backend/src/lib/license.js's checkClockAndUpdateHighWaterMark) — NEVER as proof a
+-- license is valid on its own, and NEVER consulted for perpetual (expiresAt: null)
+-- licenses, where rolling the clock back cannot bypass anything meaningful in the first
+-- place (there is no expiry to bypass).
+--
+-- This is a documented, explicit deterrent, not a cryptographic guarantee — a
+-- sufficiently determined local attacker with full control of the machine can still
+-- defeat any purely local time check; there is no trusted external clock available in a
+-- fully offline desktop app, and this migration does not pretend otherwise. See the
+-- Phase 5 investigation report and tools/LICENSING.md for the full, honest limitation
+-- statement.
+--
+-- Table/column definitions live in schema.prisma (source of truth), same split as every
+-- other table — the ALTER TABLE below only ADDS a column, guarded so it is a no-op
+-- wherever `prisma db push` already created it from the updated schema.prisma (every
+-- scratch/test database), while still being the actual real column-addition statement for
+-- existing production installations, where db push never runs.
+--
+-- Nullable, no backfill/default-value write to any existing row — the very first
+-- getLicenseStatus() call after this migration lazily establishes the initial baseline
+-- (NULL is treated as "no baseline yet", never as a rollback), exactly mirroring how
+-- support_access_config/license_config's own rows were never destructively re-seeded by
+-- earlier additive migrations either. An installation that was already legitimately
+-- activated before this migration ran keeps working immediately and without interruption
+-- — the NULL baseline is simply established on its next status check, same as a fresh
+-- install would.
+
+ALTER TABLE public.license_config
+  ADD COLUMN IF NOT EXISTS clock_high_water_mark_at TIMESTAMPTZ(6);

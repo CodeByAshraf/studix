@@ -23,6 +23,7 @@ const REASON_MESSAGES = {
   invalid_signature: 'توقيع شهادة الترخيص المخزَّنة غير صالح.',
   malformed_artifact: 'شهادة الترخيص المخزَّنة تالفة أو غير صالحة.',
   bad_public_key: 'تعذّر التحقّق من الترخيص — خطأ في إعداد المفتاح العام لهذا التثبيت.',
+  clock_rollback_detected: 'تراجع واضح في ساعة النظام منذ آخر تحقّق — يُرجى ضبط التاريخ/الوقت بشكل صحيح ثم إعادة المحاولة.',
 };
 
 function reasonMessage(reason) {

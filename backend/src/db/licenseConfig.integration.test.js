@@ -13,7 +13,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import path from 'path';
 import { checkPostgresReachable, setupScratchDb, teardownScratchDb } from '../test-helpers/scratchDb.js';
 import { applyFullSchemaDDL } from '../test-helpers/scratchDbFullSchema.js';
-import { runMigrations } from './migrationRunner.js';
+import { runMigrations, discoverMigrationFiles } from './migrationRunner.js';
 
 const dbCheck = await checkPostgresReachable();
 const REAL_MIGRATIONS_DIR = path.join(process.cwd(), 'migrations');
@@ -107,8 +107,8 @@ describe('license_config — Phase 5a schema-only migration (real scratch databa
         WHERE table_schema = 'public' AND table_name = 'license_config'`;
       const byName = Object.fromEntries(cols.map((c) => [c.column_name, c]));
       expect(Object.keys(byName).sort()).toEqual(
-        ['activated_at', 'created_at', 'expires_at', 'features', 'id', 'license_artifact',
-          'license_id', 'licensing_public_key', 'product', 'updated_at'].sort()
+        ['activated_at', 'clock_high_water_mark_at', 'created_at', 'expires_at', 'features', 'id',
+          'license_artifact', 'license_id', 'licensing_public_key', 'product', 'updated_at'].sort()
       );
     });
 
@@ -166,6 +166,61 @@ describe('license_config — Phase 5a schema-only migration (real scratch databa
       const updated = await scratch.client.license_config.findUnique({ where: { id: 1 } });
       expect(updated.product).toBe('studix-pro');
       expect(updated.updated_at.getTime()).toBeGreaterThan(created.updated_at.getTime());
+    });
+
+    it('a second run is a pure no-op (idempotent rerun)', async () => {
+      const result = await runMigrations(scratch.client, {
+        migrationsDir: REAL_MIGRATIONS_DIR, databaseUrl: scratch.scratchUrl, backup: okBackup,
+      });
+      expect(result).toEqual({ action: 'up-to-date', versions: [], backupPath: null });
+    });
+  });
+
+  describe('Phase 5e (migration 004) — existing installation with an already-activated license upgrades without disruption', () => {
+    let scratch;
+    beforeAll(async () => {
+      scratch = await setupScratchDb('licensecfg_upgrade5e');
+      // simulate a real production installation that reached its current state through the
+      // INCREMENTAL migration path (not the schema-artifact/installer path) and had already
+      // applied migrations 1-3 for real, before migration 004 existed — a genuine
+      // _studix_migrations history for versions 1-3 only, with real checksums matching the
+      // files on disk (checksum verification must pass, exactly as it would in production).
+      const realFiles = discoverMigrationFiles(REAL_MIGRATIONS_DIR).filter((f) => f.version <= 3);
+      await scratch.client.$executeRawUnsafe(`
+        CREATE TABLE IF NOT EXISTS _studix_migrations (
+          version INTEGER PRIMARY KEY, name TEXT NOT NULL, checksum TEXT NOT NULL,
+          applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
+      for (const f of realFiles) {
+        await scratch.client.$executeRaw`INSERT INTO _studix_migrations (version, name, checksum) VALUES (${f.version}, ${f.name}, ${f.checksum})`;
+      }
+      // db push (inside setupScratchDb) already created clock_high_water_mark_at from the
+      // current schema.prisma — drop it so this scratch DB genuinely matches a real
+      // pre-migration-004 installation, which does not have this column yet.
+      await scratch.client.$executeRawUnsafe(`ALTER TABLE public.license_config DROP COLUMN clock_high_water_mark_at`);
+      // raw SQL, not prisma.license_config.create() — the generated Prisma Client still
+      // expects the (just-dropped) column to exist on every query against this model, so a
+      // typed client call would fail here even though this is exactly the real shape a
+      // pre-Phase-5e production row has.
+      await scratch.client.$executeRawUnsafe(`
+        INSERT INTO license_config (id, licensing_public_key, license_artifact, license_id, product, expires_at, activated_at)
+        VALUES (1, '-----BEGIN PUBLIC KEY-----
+fake
+-----END PUBLIC KEY-----', 'fake.artifact', 'lic_pre_5e', 'studix', NULL, '2025-01-01T00:00:00Z')`);
+    }, 60_000);
+    afterAll(async () => { if (scratch) await teardownScratchDb(scratch); });
+
+    it('migration 004 is the only pending file and applies for real (not stamped), without touching the existing activated row', async () => {
+      const result = await runMigrations(scratch.client, {
+        migrationsDir: REAL_MIGRATIONS_DIR, databaseUrl: scratch.scratchUrl, backup: okBackup,
+      });
+      expect(result.action).toBe('migrated');
+      expect(result.versions).toEqual([4]);
+
+      const row = await scratch.client.license_config.findUnique({ where: { id: 1 } });
+      expect(row.license_id).toBe('lic_pre_5e');
+      expect(row.license_artifact).toBe('fake.artifact');
+      expect(row.activated_at).not.toBeNull();
+      expect(row.clock_high_water_mark_at).toBeNull(); // no backfill — lazily established on next status check
     });
 
     it('a second run is a pure no-op (idempotent rerun)', async () => {

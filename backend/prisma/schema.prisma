@@ -383,6 +383,12 @@ model license_config {
   activated_at          DateTime? @db.Timestamptz(6)
   created_at            DateTime  @default(now()) @db.Timestamptz(6)
   updated_at            DateTime  @default(now()) @db.Timestamptz(6)
+  // Phase 5e — clock-rollback mitigation only (never proof of validity on its own — see
+  // backend/migrations/004_licensing_clock_guard.sql and lib/license.js's
+  // checkClockAndUpdateHighWaterMark for the full explanation). NULL until the first
+  // getLicenseStatus() call after this column exists — a missing baseline is never treated
+  // as a rollback, only established.
+  clock_high_water_mark_at DateTime? @db.Timestamptz(6)
 }
 
 model parents {
