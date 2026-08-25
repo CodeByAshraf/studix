@@ -26,14 +26,19 @@ export default function Sidebar({
   mobileOpen,
   onMobileClose,
 }) {
-  const { currentUser, logout, canAccess } = useAuth();
+  const { currentUser, logout, canAccess, isAdmin } = useAuth();
   const { currentPage, navigate } = useUI();
   const rrNavigate = useNavigate();
 
+  // adminOnly (مثال: وصول الدعم الفني) يتحقّق من isAdmin مباشرة، لا من canAccess/مصفوفة
+  // الصلاحيات القابلة للتفويض — نفس السبب بالضبط الذي جعل الخادم يحرس ذلك المسار بـ
+  // requireRole('admin') بدل requirePermission العادي: قدرة حسّاسة لا يجوز أن تصبح
+  // قابلة للتفويض لدور غير admin بمجرّد تعديل صلاحيات ذلك الدور.
   const canSeeItem = useCallback((item) => {
+    if (item.adminOnly) return isAdmin;
     const pageId = PAGE_ID_OVERRIDES[item.id] ?? item.id;
     return canAccess(pageId);
-  }, [canAccess]);
+  }, [canAccess, isAdmin]);
 
   const handleNavigate = useCallback((pageId) => {
     navigate(pageId);

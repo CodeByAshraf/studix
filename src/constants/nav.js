@@ -33,6 +33,10 @@ export const NAV_ITEMS = [
   { id: ROUTES.ID_CARDS,       label: 'بطاقات الطلاب',          section: 'الإدارة',       icon: 'id_cards',       badge: null },
   { id: ROUTES.ACTIVITY_LOG,   label: 'سجل النشاط',             section: 'الإدارة',       icon: 'activitylog',    badge: null },
   { id: ROUTES.SETTINGS,       label: 'الإعدادات',               section: 'الإدارة',       icon: 'settings',       badge: null },
+  // adminOnly: true — يظهر لدور admin حصراً (isAdmin)، بلا مرور عبر canAccess/مصفوفة
+  // الصلاحيات القابلة للتفويض (نفس منطق requireRole('admin') بالخادم بالضبط — انظر
+  // Sidebar.jsx's canSeeItem وServer.js's app.use('/api/support-access', ...)).
+  { id: ROUTES.SUPPORT_ACCESS, label: 'وصول الدعم الفني',       section: 'الإدارة',       icon: 'staff',          badge: null, adminOnly: true },
 ];
 
 // Build sections map for sidebar rendering

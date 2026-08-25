@@ -1442,3 +1442,50 @@ export async function pgDeleteRole(id) {
   if (!res.ok) throw new Error(json?.error || `PG DELETE /roles/${id} → ${res.status}`);
   return true;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 4c — Support Access (يستهلك مسارات Phase 4b الأربعة كما هي، بلا أي تعديل عليها).
+// admin-only حصراً بالخادم (requireRole('admin') — أعمق من requirePermission العادي،
+// انظر backend/src/server.js) — لا فحص صلاحية إضافي هنا، الخادم هو المصدر المُعتمَد
+// الوحيد. لا يُرسَل/يُخزَّن أي مفتاح خاص أو سرّ توقيع من هذا الملف أو أي مكان آخر في
+// الفرونت-إند — فقط استدعاءات HTTP رقيقة، تماماً كبقية دوال pg* في هذا الملف.
+// ═══════════════════════════════════════════════════════════════════════════
+
+export async function pgGenerateSupportChallenge() {
+  const res = await fetch(`${PG_API_BASE}/api/support-access/challenge`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG POST /support-access/challenge → ${res.status}`);
+  return json; // { ok, challenge, installationId, expiresAt, ttlMs }
+}
+
+export async function pgVerifySupportChallenge(challenge, response) {
+  const res = await fetch(`${PG_API_BASE}/api/support-access/verify`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ challenge, response }),
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG POST /support-access/verify → ${res.status}`);
+  return json; // { ok, sessionId, issuedAt, expiresAt }
+}
+
+export async function pgGetSupportAccessStatus() {
+  const res = await fetch(`${PG_API_BASE}/api/support-access/status`, { credentials: 'include' });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG GET /support-access/status → ${res.status}`);
+  return json; // { ok, active, session }
+}
+
+export async function pgRevokeSupportAccess() {
+  const res = await fetch(`${PG_API_BASE}/api/support-access/revoke`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG POST /support-access/revoke → ${res.status}`);
+  return json; // { ok, revokedChallenge, revokedSession }
+}

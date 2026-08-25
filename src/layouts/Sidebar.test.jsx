@@ -56,3 +56,22 @@ describe('Sidebar — Communication/Inventory permission-mapped visibility', () 
     expect(screen.getByText('مخزون المواد')).toBeInTheDocument();
   });
 });
+
+// Phase 4c — Support Access nav item is adminOnly: true (constants/nav.js), gated on
+// isAdmin directly (Sidebar.jsx's canSeeItem), NOT on canAccess/the delegable permissions
+// array — same reason server.js guards /api/support-access with requireRole('admin')
+// instead of requirePermission. A permissions array containing 'support-access' must NOT
+// be sufficient on its own; only isAdmin decides.
+describe('Sidebar — Support Access nav item is admin-gated, not permission-array-gated', () => {
+  it('shows the item for role: admin even with an unrelated permissions array', () => {
+    loginSession({ id: 'a1', name: 'Admin', role: 'admin', active: true, permissions: ['dashboard'] });
+    renderSidebar();
+    expect(screen.getByText('وصول الدعم الفني')).toBeInTheDocument();
+  });
+
+  it('hides the item for a non-admin role even if "support-access" is explicitly in the permissions array', () => {
+    loginSession({ id: 'u4', name: 'Teacher', role: 'teacher', active: true, permissions: ['dashboard', 'support-access'] });
+    renderSidebar();
+    expect(screen.queryByText('وصول الدعم الفني')).not.toBeInTheDocument();
+  });
+});

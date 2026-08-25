@@ -21,6 +21,7 @@ export const ROUTES = {
   MATERIALS:     'materials',
   INVENTORY:     'inventory',
   COMMUNICATION: 'communication',
+  SUPPORT_ACCESS: 'support-access',
 };
 
 export const NAV_SECTIONS = [

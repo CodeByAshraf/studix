@@ -52,6 +52,7 @@ const loaders = {
   notifications: () => import('./modules/notifications/NotificationsPage'),
   activityLog:   () => import('./modules/activity-log/ActivityLogPage'),
   settings:      () => import('./modules/settings/SettingsPage'),
+  supportAccess: () => import('./modules/support-access/SupportAccessPage'),
 };
 
 // يُحمّل كل الصفحات في الخلفية بشكل تدريجي بعد جاهزية التطبيق، حتى يكون
@@ -88,6 +89,7 @@ const IDCardsPage       = lazy(loaders.idCards);
 const NotificationsPage = lazy(loaders.notifications);
 const ActivityLogPage   = lazy(loaders.activityLog);
 const SettingsPage      = lazy(loaders.settings);
+const SupportAccessPage = lazy(loaders.supportAccess);
 
 // ── Page Skeleton ─────────────────────────────────────────────────────────────
 function PageSkeleton() {
@@ -134,12 +136,20 @@ function RouterSync() {
 // ── Protected Routes ──────────────────────────────────────────────────────────
 // كل صفحة داخل التطبيق تمر عبر هذا الـ wrapper
 // إذا لم يكن المستخدم مسجلاً يُعاد توجيهه لـ /login
-function ProtectedRoute({ children, pageId }) {
-  const { isLoggedIn, canAccess } = useAuth();
+function ProtectedRoute({ children, pageId, adminOnly }) {
+  const { isLoggedIn, canAccess, isAdmin } = useAuth();
   const location = useLocation();
 
   if (!isLoggedIn) {
     return <Navigate to="/login" state={{ from: location }} replace />;
+  }
+
+  // adminOnly: يتحقّق من isAdmin مباشرة، لا من canAccess/مصفوفة الصلاحيات القابلة
+  // للتفويض — نفس منطق Sidebar.jsx's canSeeItem وserver.js's requireRole('admin')
+  // لمسار /api/support-access بالضبط (قدرة حسّاسة، غير قابلة للتفويض عبر شاشة الأدوار).
+  if (adminOnly) {
+    if (!isAdmin) return <Navigate to="/" replace />;
+    return children;
   }
 
   if (pageId && !canAccess(pageId)) {
@@ -202,6 +212,7 @@ function AppRoutes() {
         <Route path={ROUTES.NOTIFICATIONS}    element={<ProtectedRoute pageId="notifications"><PageShell><NotificationsPage/></PageShell></ProtectedRoute>}/>
         <Route path={ROUTES.ACTIVITY_LOG}     element={<ProtectedRoute pageId="activity-log"><PageShell><ActivityLogPage/></PageShell></ProtectedRoute>}/>
         <Route path={ROUTES.SETTINGS}         element={<ProtectedRoute pageId="settings"><PageShell><SettingsPage/></PageShell></ProtectedRoute>}/>
+        <Route path={ROUTES.SUPPORT_ACCESS}   element={<ProtectedRoute adminOnly><PageShell><SupportAccessPage/></PageShell></ProtectedRoute>}/>
         {/* 404 inside app */}
         <Route path="*" element={<Navigate to="/" replace />}/>
       </Route>
