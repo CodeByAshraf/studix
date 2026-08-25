@@ -75,12 +75,12 @@ describe('migrationRunner — Phase 3 hardening (real scratch databases)', () =>
     beforeAll(async () => { scratch = await setupScratchDb('migrunner_incremental'); }, 60_000);
     afterAll(async () => { if (scratch) await teardownScratchDb(scratch); });
 
-    it('applies 001_baseline.sql for real and tracks it', async () => {
+    it('applies all real pending migration files (001_baseline.sql onward) and tracks them', async () => {
       const result = await runMigrations(scratch.client, {
         migrationsDir: REAL_MIGRATIONS_DIR, databaseUrl: scratch.scratchUrl, backup: okBackup,
       });
       expect(result.action).toBe('migrated');
-      expect(result.versions).toEqual([1]);
+      expect(result.versions).toContain(1);
       expect(result.backupPath).toBe('C:\\fake\\pre-migration-test.dump');
 
       const fnRows = await scratch.client.$queryRaw`

@@ -2,14 +2,14 @@
 -- تم توليده تلقائياً بواسطة backend/scripts/generateSchemaArtifact.js — لا تُعدِّله يدوياً.
 -- لإعادة التوليد بعد أي تغيير حقيقي في schema.prisma أو الـ triggers/constraints:
 --   node backend/scripts/generateSchemaArtifact.js
--- تاريخ التوليد: 2026-08-25T09:00:19.727Z
+-- تاريخ التوليد: 2026-08-25T10:28:00.030Z
 -- المصدر: قاعدة scratch معزولة (db push + DDL كامل)، وليس أي قاعدة تطوير حقيقية — لا بيانات إطلاقاً.
 
 --
 -- PostgreSQL database dump
 --
 
-\restrict rUgglChlgnNFVXZBv2G0hNUftcVJqDhaWTmoyO2cgxweuHSnpeTUxW8PgRr5WmT
+\restrict iUbvr9S3qwS6PS2IEhAKYryXtEQFM4kcv7Gc6aZMjShtb7AwBiYhvDYebruXogp
 
 -- Dumped from database version 18.6
 -- Dumped by pg_dump version 18.6
@@ -74,6 +74,22 @@ CREATE FUNCTION public.prevent_delete() RETURNS trigger
     AS $$
 BEGIN
   RAISE EXCEPTION 'الحذف ممنوع على هذا الجدول (append-only). استخدم status = cancelled/archived.';
+END;
+$$;
+
+
+--
+-- Name: prevent_installation_id_change(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.prevent_installation_id_change() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF NEW.installation_id IS DISTINCT FROM OLD.installation_id THEN
+    RAISE EXCEPTION 'installation_id ثابت لهذا التثبيت — لا يمكن تعديله بعد إنشائه.';
+  END IF;
+  RETURN NEW;
 END;
 $$;
 
@@ -607,6 +623,19 @@ CREATE TABLE public.students (
 
 
 --
+-- Name: support_access_config; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.support_access_config (
+    id smallint DEFAULT 1 NOT NULL,
+    installation_id text DEFAULT (gen_random_uuid())::text NOT NULL,
+    support_public_key text,
+    created_at timestamp(6) with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT support_access_config_single_row CHECK ((id = 1))
+);
+
+
+--
 -- Name: teachers; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -909,6 +938,14 @@ ALTER TABLE ONLY public.roles
 
 ALTER TABLE ONLY public.students
     ADD CONSTRAINT students_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: support_access_config support_access_config_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.support_access_config
+    ADD CONSTRAINT support_access_config_pkey PRIMARY KEY (id);
 
 
 --
@@ -1224,6 +1261,13 @@ CREATE UNIQUE INDEX students_code_key ON public.students USING btree (code);
 
 
 --
+-- Name: support_access_config_installation_id_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX support_access_config_installation_id_key ON public.support_access_config USING btree (installation_id);
+
+
+--
 -- Name: uq_attendance_student_date_group; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1347,6 +1391,13 @@ CREATE TRIGGER trg_payment_needs_treasury BEFORE INSERT ON public.payments FOR E
 --
 
 CREATE TRIGGER trg_students_updated BEFORE UPDATE ON public.students FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: support_access_config trg_support_config_installation_immutable; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_support_config_installation_immutable BEFORE UPDATE ON public.support_access_config FOR EACH ROW EXECUTE FUNCTION public.prevent_installation_id_change();
 
 
 --
@@ -1721,5 +1772,5 @@ ALTER TABLE ONLY public.wa_report_log
 -- PostgreSQL database dump complete
 --
 
-\unrestrict rUgglChlgnNFVXZBv2G0hNUftcVJqDhaWTmoyO2cgxweuHSnpeTUxW8PgRr5WmT
+\unrestrict iUbvr9S3qwS6PS2IEhAKYryXtEQFM4kcv7Gc6aZMjShtb7AwBiYhvDYebruXogp
 
