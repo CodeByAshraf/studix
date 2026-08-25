@@ -49,3 +49,17 @@ temp/
 .idea/
 .DS_Store
 Thumbs.db
+
+# =========================
+# Support Access — owner-side signing key (Phase 4d)
+# =========================
+# The private key's default location is entirely outside this repository (see
+# tools/README.md — os.homedir()/StudixSupport by default). These narrow rules guard only
+# against it accidentally ending up inside tools/ (e.g. a misconfigured
+# STUDIX_SUPPORT_KEY_DIR pointing into the repo) — scoped to tools/ specifically, not a
+# blanket *.pem/*.key rule, so a legitimately-committed public artifact elsewhere in the
+# repo is never silently hidden. Nothing under tools/ is ever meant to hold a real key file
+# either way — support-keygen.js only ever writes to the external owner-controlled directory.
+tools/**/*.pem
+tools/**/*.key
+tools/StudixSupport/

@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:tools": "vitest run --config tools/vitest.config.js",
     "test:coverage": "vitest run --coverage",
     "test:ui": "vitest --ui",
     "lint": "eslint src --ext .js,.jsx --report-unused-disable-directives --max-warnings 0",

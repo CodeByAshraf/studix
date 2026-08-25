@@ -3,10 +3,15 @@
 // Phase 4b — Support Access core: challenge generation + Ed25519 signature verification.
 // Asymmetric offline challenge-response (approved architecture report) — this application
 // never holds, stores, or transmits a private key. It only ever reads a PUBLIC key
-// (support_access_config.support_public_key, Phase 4a column, still empty until the
-// owner-side signer tool — Phase 4d, not built yet — generates a real keypair). Verifying
-// a signature with a public key can never leak or reconstruct the private key; that is
-// the entire point of asymmetric crypto here.
+// (support_access_config.support_public_key, Phase 4a column). Verifying a signature with
+// a public key can never leak or reconstruct the private key; that is the entire point of
+// asymmetric crypto here. The private key lives only on the owner's own machine — signed
+// offline by tools/support-signer.js (Phase 4d), never inside this application.
+//
+// Phase 4d: buildChallengeString/parseChallengeString/verifyChallengeSignature moved to
+// supportChallengeFormat.js (pure, no prisma import) so the offline owner-side signer tool
+// can import the exact same wire-format/verification code with zero database coupling —
+// re-exported here unchanged so every existing import site keeps working as before.
 //
 // crypto.sign/verify(null, data, key, signature) is Node's built-in calling convention for
 // Ed25519/Ed448 specifically (no separate digest algorithm — the curve has its own
@@ -23,6 +28,9 @@
 // ─────────────────────────────────────────────────────────────
 import crypto from 'crypto';
 import { prisma } from '../prisma.js';
+import { buildChallengeString, parseChallengeString, verifyChallengeSignature } from './supportChallengeFormat.js';
+
+export { buildChallengeString, parseChallengeString, verifyChallengeSignature };
 
 export const CHALLENGE_TTL_MS = 15 * 60 * 1000; // 15 دقيقة — قصير عمداً، يُقرأ/يُرسَل يدوياً بين الطرفين
 
@@ -52,32 +60,6 @@ export async function ensureInstallationConfig() {
   }
 }
 
-export function buildChallengeString({ installationId, nonce, iat, exp }) {
-  const payload = JSON.stringify({ v: 1, installationId, nonce, iat, exp });
-  return Buffer.from(payload, 'utf8').toString('base64url');
-}
-
-// parseChallengeString: يتحقق من الشكل الكامل (كل الحقول موجودة وبالنوع الصحيح) — أي
-// انحراف (JSON تالف، base64url غير صالح، حقل ناقص/بنوع خاطئ) يُعيد null صراحةً، لا يرمي.
-export function parseChallengeString(challenge) {
-  if (typeof challenge !== 'string' || !challenge) return null;
-  let parsed;
-  try {
-    parsed = JSON.parse(Buffer.from(challenge, 'base64url').toString('utf8'));
-  } catch {
-    return null;
-  }
-  if (
-    !parsed || parsed.v !== 1 ||
-    typeof parsed.installationId !== 'string' || !parsed.installationId ||
-    typeof parsed.nonce !== 'string' || !parsed.nonce ||
-    typeof parsed.iat !== 'number' || typeof parsed.exp !== 'number'
-  ) {
-    return null;
-  }
-  return parsed;
-}
-
 // generateChallenge: يقرأ/يضمن صفّ التثبيت، يرفض (409) لو لا مفتاح عام مُهيَّأ بعد (فشل
 // مغلَق — لا شفرة تُصدَر أبداً لا يمكن التحقق منها لاحقاً إطلاقاً)، وإلا يُنشئ nonce عشوائياً
 // (crypto.randomBytes، لا Math.random إطلاقاً) ويبنيها شفرة مُرتبطة بهذا التثبيت تحديداً.
@@ -91,46 +73,6 @@ export async function generateChallenge() {
   const exp = iat + CHALLENGE_TTL_MS;
   const challenge = buildChallengeString({ installationId: config.installation_id, nonce, iat, exp });
   return { challenge, nonce, installationId: config.installation_id, iat, exp };
-}
-
-// verifyChallengeSignature: دالة نقية بالكامل (بلا I/O) — تستقبل installationId/
-// publicKeyPem الفعليين (من القاعدة) بدل قراءتهما بنفسها، لتبقى قابلة للاختبار مباشرة
-// بلا Prisma/DB إطلاقاً. أي سبب رفض يُعاد بوضوح في reason (لا استثناء لحالات الرفض
-// المتوقَّعة — فقط لأخطاء غير متوقّعة حقاً).
-export function verifyChallengeSignature({ challenge, response, installationId, publicKeyPem }) {
-  const parsed = parseChallengeString(challenge);
-  if (!parsed) return { ok: false, reason: 'malformed_challenge', nonce: null };
-  if (parsed.installationId !== installationId) return { ok: false, reason: 'wrong_installation', nonce: parsed.nonce };
-  if (parsed.exp < Date.now()) return { ok: false, reason: 'expired', nonce: parsed.nonce };
-
-  if (typeof response !== 'string' || !response) {
-    return { ok: false, reason: 'malformed_response', nonce: parsed.nonce };
-  }
-
-  let publicKey;
-  try {
-    publicKey = crypto.createPublicKey(publicKeyPem);
-  } catch {
-    return { ok: false, reason: 'bad_public_key', nonce: parsed.nonce };
-  }
-
-  let signatureBuf;
-  try {
-    signatureBuf = Buffer.from(response, 'base64url');
-  } catch {
-    return { ok: false, reason: 'malformed_response', nonce: parsed.nonce };
-  }
-
-  let valid = false;
-  try {
-    // Ed25519: أول وسيط (algorithm) يجب أن يكون null دائماً — لا خوارزمية هضم منفصلة.
-    valid = crypto.verify(null, Buffer.from(challenge, 'utf8'), publicKey, signatureBuf);
-  } catch {
-    valid = false;
-  }
-  if (!valid) return { ok: false, reason: 'invalid_signature', nonce: parsed.nonce };
-
-  return { ok: true, reason: null, nonce: parsed.nonce, installationId: parsed.installationId };
 }
 
 // verifySupportChallenge: الغلاف المتصل بقاعدة البيانات — يقرأ installation_id/المفتاح
