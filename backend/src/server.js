@@ -36,9 +36,10 @@ import admissionCancellationRouter from './routes/admissionCancellation.js';
 import activityLogsInterceptor from './routes/activityLogs.js';
 import usersRouter from './routes/users.js';
 import rolesRouter from './routes/roles.js';
+import supportAccessRouter from './routes/supportAccess.js';
 import { COLLECTION_MODELS } from './routes/collections.js';
 import { notFound, errorHandler, asyncHandler } from './middleware/errorHandler.js';
-import { requireAuth } from './middleware/auth.js';
+import { requireAuth, requireRole } from './middleware/auth.js';
 import { requirePermission } from './middleware/permissions.js';
 import { prisma, checkDbConnection } from './prisma.js';
 import { runMigrations } from './db/migrationRunner.js';
@@ -238,6 +239,15 @@ app.use('/api/activityLogs', requireAuth, requirePermission('activity-log'), asy
 // الأربعة الحالي — لا Teachers domain migration هنا، جدول teachers يبقى فارغاً.
 app.use('/api/users', requireAuth, requirePermission('users'), usersRouter);
 app.use('/api/roles', requireAuth, requirePermission('users'), rolesRouter);
+
+// ── Phase 4b: Support Access — backend core (schema من Phase 4a) ──
+// حارس أقوى عمداً من requirePermission العام: role === 'admin' حرفياً، لا مصفوفة
+// صلاحيات قابلة للتفويض عبر شاشة الأدوار (على عكس users/roles أعلاه). هذه القدرة حسّاسة
+// جداً (منح وصول دعم عن بُعد) بحيث لا يجوز أن تصبح قابلة للتفويض لدور غير admin بمجرّد
+// تعديل صلاحيات ذلك الدور — requireRole (middleware/auth.js، غير مُعدَّلة) موجودة بالفعل
+// وتخدم هذا الغرض تماماً. لا صفحة/واجهة أمامية بعد تستخدم هذا المسار (Phase 4b
+// backend-only) — لا تأثير على أي مستخدم حتى الآن.
+app.use('/api/support-access', requireAuth, requireRole('admin'), supportAccessRouter);
 
 // ── تفعيل routes ديناميكياً (يتخطّى أي model ناقص بأمان) ──
 // كل /api/<collection> يتطلّب جلسة مصادَق عليها (requireAuth) — GET شاملاً — بالإضافة
