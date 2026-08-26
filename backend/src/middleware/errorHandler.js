@@ -2,6 +2,7 @@
 // ─────────────────────────────────────────────────────────────
 // معالجة الأخطاء المركزية — تحوّل أخطاء Prisma/عامة إلى استجابات JSON نظيفة.
 // ─────────────────────────────────────────────────────────────
+import logger from '../lib/logger.js';
 
 // أخطاء Prisma الشائعة → رسائل مفهومة
 function mapPrismaError(err) {
@@ -62,8 +63,10 @@ export function errorHandler(err, req, res, _next) {
     return res.status(err.status).json({ ok: false, error: err.message });
   }
 
-  // خطأ غير متوقّع — لا نسرّب التفاصيل الحساسة
-  console.error('[ERROR]', err);
+  // خطأ غير متوقّع — لا نسرّب التفاصيل الحساسة في استجابة HTTP. Phase 6b: يُسجَّل أيضاً في
+  // ملف السجلّ الدائم (logger.js) لتشخيص أعطال وقت التشغيل بعد إغلاق نافذة الطرفية — نفس
+  // معلومات console.error السابقة بالضبط، بلا أي تغيير على الاستجابة المُعادة للعميل.
+  logger.error(`خطأ غير متوقّع: ${err.message}`, { path: req.path, method: req.method, stack: err.stack });
   res.status(500).json({ ok: false, error: 'خطأ داخلي في الخادم.' });
 }
 

@@ -12,9 +12,20 @@
 // حقن created_by؛ العكس/التحويل عبر مسارين ذرّيين مخصّصين (treasuryTxn.js). payments/
 // admissionPayments تبقيان read-only — خارج نطاق 3B-14B، مرحلتا 3B-14C/D القادمتان.
 // ═══════════════════════════════════════════════════════════════════════════
+// Phase 6b — MUST stay the very first import in this file. lib/config.js's job is to load
+// environment variables (production config path if present, else backend/.env as before) —
+// its side effect must run before anything else in this file's import graph, because
+// lib/session.js and lib/supportSession.js (imported transitively below, via
+// middleware/auth.js) read process.env.SESSION_SECRET at their own module top level. ES
+// module imports fully evaluate a module before the importing module's own subsequent
+// statements run, so the previous `dotenv.config()` call further down this file (after those
+// imports) always ran too late for those two modules — verified and fixed here, see
+// lib/config.js's own header comment for the full explanation. No signing/verification logic
+// changed anywhere; only when the secret becomes available.
+import './lib/config.js';
+
 import express from 'express';
 import cors from 'cors';
-import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -46,8 +57,9 @@ import { requireActivation } from './middleware/activation.js';
 import { prisma, checkDbConnection } from './prisma.js';
 import { runMigrations } from './db/migrationRunner.js';
 import { createPreMigrationBackup } from './db/backup.js';
-
-dotenv.config();
+import logger from './lib/logger.js';
+import { validateDatabaseUrl, describeStartupFailure } from './lib/startupErrors.js';
+import { createGracefulShutdown, registerShutdownHandlers } from './lib/shutdown.js';
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -299,28 +311,44 @@ app.get('*', (req, res, next) => {
 app.use(notFound);
 app.use(errorHandler);
 
+// ── Phase 6b — فحص إعداد مبكر وواضح قبل أي محاولة اتصال بقاعدة البيانات: DATABASE_URL
+// غائب أو تالف الشكل كان يُنتج سابقاً استثناء Node/URL خام غير مفهوم من داخل
+// migrationRunner.js (new URL(undefined))؛ الآن يُرفَض هنا فوراً برسالة تشغيلية واضحة، دون
+// طباعة قيمة DATABASE_URL نفسها (قد تحتوي كلمة مرور) في أي مكان. لا تغيير على منطق
+// migrationRunner.js نفسه أو سلوك fail-closed الحالي — هذا فحص إضافي قبله فقط. ──
+try {
+  validateDatabaseUrl(process.env.DATABASE_URL);
+} catch (err) {
+  logger.error(describeStartupFailure(err));
+  logger.error('تم إيقاف بدء التشغيل — لم يُشغَّل الخادم.');
+  process.exit(1);
+}
+
 // ── Database Update/Migration System (Phase 1) — يُشغَّل قبل app.listen() مباشرة، دائماً،
 // كل إقلاع (idempotent — no-op سريع لو لا ترحيلات معلَّقة). runMigrations يرمي استثناءً
-// عند أي فشل (نسخة احتياطية فاشلة، checksum متعارض، ترحيل فشل ورجع بالكامل) — الخادم لا
-// يستدعي app.listen() أبداً في هذه الحالة، فلا يخدم أي طلب فوق قاعدة في حالة غير معروفة. ──
+// عند أي فشل (نسخة احتياطية فاشلة، checksum متعارض، ترحيل فشل ورجع بالكامل، أو تعذّر الوصول
+// لخادم PostgreSQL نفسه) — الخادم لا يستدعي app.listen() أبداً في هذه الحالة، فلا يخدم أي
+// طلب فوق قاعدة في حالة غير معروفة. سلوك fail-closed هذا محفوظ حرفياً بلا أي تعديل —
+// Phase 6b فقط يُمرِّر الرسالة عبر logger (يُبقيها في ملف السجلّ لا الطرفية وحدها) ويُلخِّص
+// أخطاء PostgreSQL الشائعة عبر describeStartupFailure بدل رسالة Prisma الخام كسطر أساسي. ──
 try {
   const migrationResult = await runMigrations(prisma, { backup: createPreMigrationBackup });
   if (migrationResult.action === 'stamped') {
-    console.log(`✅ تثبيت جديد — سُجِّلت الإصدارات [${migrationResult.versions.join(', ')}] كمُطبَّقة (بلا تنفيذ SQL).`);
+    logger.info(`تثبيت جديد — سُجِّلت الإصدارات [${migrationResult.versions.join(', ')}] كمُطبَّقة (بلا تنفيذ SQL).`);
   } else if (migrationResult.action === 'migrated') {
-    console.log(`✅ تم تطبيق ترحيلات جديدة: [${migrationResult.versions.join(', ')}] (نسخة احتياطية: ${migrationResult.backupPath})`);
+    logger.info(`تم تطبيق ترحيلات جديدة: [${migrationResult.versions.join(', ')}] (نسخة احتياطية: ${migrationResult.backupPath})`);
   } else {
-    console.log('✅ قاعدة البيانات محدَّثة بالفعل — لا ترحيلات معلَّقة.');
+    logger.info('قاعدة البيانات محدَّثة بالفعل — لا ترحيلات معلَّقة.');
   }
 } catch (err) {
-  console.error(`\n❌ فشل نظام الترحيل: ${err.message}`);
-  console.error('تم إيقاف بدء التشغيل — لم يُشغَّل الخادم.\n');
+  logger.error(`فشل نظام الترحيل: ${describeStartupFailure(err)}`, { rawError: err.message });
+  logger.error('تم إيقاف بدء التشغيل — لم يُشغَّل الخادم.');
   process.exit(1);
 }
 
 // Desktop runtime preparation — ربط صريح بـ 127.0.0.1 فقط (لا 0.0.0.0 الافتراضي) —
 // تطبيق محلي بحت لكل جهاز معلّم، لا وصول شبكي من أي جهاز آخر مطلوباً أو مرغوباً إطلاقاً.
-app.listen(PORT, '127.0.0.1', async () => {
+const server = app.listen(PORT, '127.0.0.1', async () => {
   console.log(`\n🚀 Studix backend (Phase 2 — ${activated.filter((a) => !a.includes('read-only')).length} writable + ${activated.filter((a) => a.includes('read-only')).length} read-only) على http://localhost:${PORT}`);
   console.log(`   Health: http://localhost:${PORT}/health`);
   console.log(`   ✅ routes مفعّلة (${activated.length}): ${activated.join(', ')}`);
@@ -334,3 +362,21 @@ app.listen(PORT, '127.0.0.1', async () => {
     ? '✅ الاتصال بقاعدة PostgreSQL (studix) ناجح.\n'
     : `⚠️  تعذّر الاتصال بقاعدة البيانات: ${db.error}\n`);
 });
+
+// Phase 6b — أخطاء الاستماع نفسها (مثل EADDRINUSE) تصل عبر حدث 'error' على كائن الخادم، لا
+// عبر رجوع callback النجاح أعلاه ولا عبر استثناء عادي — بلا هذا المُستمِع كانت Node ستطبع
+// stack trace خام غير مفهوم لعميل غير تقني وتُسقِط العملية بصمت نسبي. الرسالة التشغيلية
+// الواضحة (describeStartupFailure) تُسجَّل أولاً، ثم إنهاء نظيف بنفس رمز الخروج المعتمَد
+// لفشل بدء التشغيل (1) — لا محاولة إعادة استماع تلقائية.
+server.on('error', (err) => {
+  logger.error(describeStartupFailure(err), { port: PORT, code: err.code });
+  process.exit(1);
+});
+
+// Phase 6b — إيقاف تشغيل آمن (Phase 6a §9): يوقف قبول اتصالات جديدة، يسمح للطلبات الجارية
+// بالانتهاء، يُغلق اتصال Prisma بنظافة، ثم يُنهي العملية — لازم لتشغيل هذا كـ Windows
+// Service مستقبلاً (لا نافذة طرفية لإغلاقها يدوياً، وإعادة تشغيل الخدمة/الجهاز تُرسِل
+// SIGTERM/SIGINT، لا Ctrl+C تفاعلياً). idempotent بالتصميم (createGracefulShutdown) — إشارة
+// ثانية أثناء إيقاف جارٍ بالفعل تُسجَّل وتُتجاهَل، لا تُعيد المحاولة.
+const shutdown = createGracefulShutdown({ server, prisma, logger });
+registerShutdownHandlers(shutdown);
