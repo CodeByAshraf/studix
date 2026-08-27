@@ -177,11 +177,17 @@ function studentCardHTML(student, group) {
 }
 
 function summaryHTML(d) {
+  // BUG-02 (بيان مطبوع — NEEDS BUSINESS DECISION مُغلَق): إجمالي المدفوع هنا يبقى خاماً
+  // (Gross) مطابقاً لمجموع جدول المدفوعات أدناه؛ عند وجود استرداد فعلي، تُستبدَل هذه
+  // الخانة بالصافي (Net) صراحةً بدل ترك رقم خام يُقرأ كأنه الوضع المالي الحالي.
+  const moneyKpi = d.refundedTotal > 0
+    ? kpi('صافي المدفوع', fmtMoney(d.netPaid), '#10b981', `${fmtMoney(d.totalPaid)} إجمالي − ${fmtMoney(d.refundedTotal)} مسترد`)
+    : kpi('إجمالي المدفوع', fmtMoney(d.totalPaid), '#10b981', `${d.paidCount} دفعة`);
   return `
     <div class="kpi-row">
       ${kpi('نسبة الحضور', d.attPct != null ? d.attPct + '%' : '—', pctColor(d.attPct), `${d.attPresent} من ${d.attAll.length} حصة`)}
       ${kpi('متوسط الدرجات', d.avgExamPct != null ? d.avgExamPct + '%' : '—', pctColor(d.avgExamPct), `تقدير ${grade(d.avgExamPct)}`)}
-      ${kpi('إجمالي المدفوع', fmtMoney(d.totalPaid), '#10b981', `${d.paidCount} دفعة`)}
+      ${moneyKpi}
       ${kpi('الواجبات المُسلَّمة', `${d.hwSubmitted}/${d.hwRows.length}`, '#8b5cf6', `${d.hwMissing} غير مُسلَّم`)}
     </div>`;
 }
@@ -302,12 +308,17 @@ function paymentsHTML(d) {
     </tr>`;
   }).join('');
 
+  // نفس مبدأ summaryHTML أعلاه: الجدول أدناه يعرض المبالغ الأصلية التاريخية كما هي —
+  // "إجمالي المدفوع" يبقى خاماً مطابقاً له، والمسترد/الصافي يظهران كبندين منفصلين فقط
+  // عند وجود استرداد فعلي (Net = Gross − Refunded).
+  const moneyKpis = d.refundedTotal > 0
+    ? `${kpi('إجمالي المدفوع', fmtMoney(d.totalPaid), '#10b981')}${kpi('المسترد', fmtMoney(d.refundedTotal), '#ef4444')}${kpi('الصافي', fmtMoney(d.netPaid), '#0d9488')}${kpi('عدد الدفعات', d.paidCount, '#0d9488')}`
+    : `${kpi('إجمالي المدفوع', fmtMoney(d.totalPaid), '#10b981')}${kpi('عدد الدفعات', d.paidCount, '#0d9488')}`;
   return `
     <div class="section avoid-break">
       ${sectionTitle('💰', 'المدفوعات', d.payRows.length)}
       <div class="mini-kpis">
-        ${kpi('إجمالي المدفوع', fmtMoney(d.totalPaid), '#10b981')}
-        ${kpi('عدد الدفعات', d.paidCount, '#0d9488')}
+        ${moneyKpis}
       </div>
       <table class="report-table">
         <thead><tr><th>التاريخ</th><th>عن شهر</th><th class="num">المبلغ</th><th>الطريقة</th><th class="num">الحالة</th></tr></thead>

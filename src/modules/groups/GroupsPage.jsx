@@ -9,15 +9,18 @@ import { useToast }         from '../../components/Toast';
 import { useErrorHandler }  from '../../hooks/useErrorHandler';
 import { createGroup, updateGroup, getGroupStats, formatDays, GROUP_COLORS } from '../../services/groupService';
 import { pgCreateGroup, pgUpdateGroup, pgDeleteGroup } from '../../services/api';
+import { getNetRevenue } from '../../services/paymentService';
 import { formatCurrency }   from '../../utils/helpers';
 import GroupForm             from './GroupForm';
 import GroupCard             from './components/GroupCard';
 import GroupStudents, { TransferModal } from './GroupStudents';
 
 // ── Overview stats bar ───────────────────────────────────────
-function OverviewBar({ groups, students, payments, attendance }) {
+function OverviewBar({ groups, students, payments, attendance, treasuryTxn }) {
   const totalStudents = students.filter(s => s.status === 'active').length;
-  const totalRevenue  = payments.reduce((s, p) => s + p.amount, 0);
+  // BUG-02: كانت تجمع payments.amount الخام — دفعة استُرِدَّت جزئياً/كلياً تبقى محسوبة
+  // بكامل مبلغها إلى الأبد. getNetRevenue تطرح الاسترداد الفعّال عبر treasury_txn.
+  const totalRevenue  = getNetRevenue(payments, treasuryTxn);
   const fullGroups    = groups.filter(g => {
     const count = students.filter(s => s.groupId === g.id && s.status === 'active').length;
     return count >= g.max;
@@ -58,6 +61,7 @@ export default function GroupsPage() {
   const payments             = useAppStore((s) => s.payments);
   const setGroups            = useAppStore((s) => s.setGroups);
   const students             = useAppStore((s) => s.students);
+  const treasuryTxn          = useAppStore((s) => s.treasuryTxn);
   const { currentUser } = useAuth();
   const toast = useToast();
   const { loading, run } = useErrorHandler(toast);
@@ -215,7 +219,7 @@ export default function GroupsPage() {
 
       {/* ── Overview stats ──────────────────── */}
       <SectionBoundary label="Overview Stats">
-        <OverviewBar groups={groups} students={students} payments={payments} attendance={attendance}/>
+        <OverviewBar groups={groups} students={students} payments={payments} attendance={attendance} treasuryTxn={treasuryTxn}/>
       </SectionBoundary>
 
       {/* ── Filters ─────────────────────────── */}
@@ -273,7 +277,8 @@ export default function GroupsPage() {
                 const count   = students.filter(s => s.groupId === group.id && s.status === 'active').length;
                 const fillPct = group.max > 0 ? Math.round(count / group.max * 100) : 0;
                 const isFull  = count >= group.max;
-                const revenue = payments.filter(p => p.groupId === group.id).reduce((s, p) => s + p.amount, 0);
+                // BUG-02: صافي بعد طرح الاسترداد الفعّال (getNetRevenue) — نفس منطق OverviewBar أعلاه.
+                const revenue = getNetRevenue(payments.filter(p => p.groupId === group.id), treasuryTxn);
 
                 return (
                   <div key={group.id} style={{

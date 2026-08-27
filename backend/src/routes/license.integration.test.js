@@ -42,6 +42,7 @@ describe('Licensing — Phase 5b backend core (real scratch database)', () => {
   let requireActivation, isActivationExempt;
   let requireRole;
   let verifySession, signSession;
+  let clearAuthCache;
 
   function signPayload(privateKeyPem, payloadB64) {
     return crypto.sign(null, Buffer.from(payloadB64, 'utf8'), crypto.createPrivateKey(privateKeyPem)).toString('base64url');
@@ -73,6 +74,7 @@ describe('Licensing — Phase 5b backend core (real scratch database)', () => {
     ({ requireActivation, isActivationExempt } = await import('../middleware/activation.js'));
     ({ requireRole } = await import('../middleware/auth.js'));
     ({ verifySession, signSession } = await import('../lib/session.js'));
+    ({ clearAll: clearAuthCache } = await import('../lib/authCache.js'));
   }, 60_000);
 
   afterAll(async () => {
@@ -85,6 +87,10 @@ describe('Licensing — Phase 5b backend core (real scratch database)', () => {
     await client.$executeRawUnsafe('DELETE FROM support_access_config');
     await client.$executeRawUnsafe('DELETE FROM activity_logs');
     await client.$executeRawUnsafe('DELETE FROM users');
+    // BUG-03 fix: requireRole now consults authCache (getAuthState) — clear it too, or a
+    // user id reused across tests (e.g. 'admin1') could resolve against a stale cached
+    // entry from a previous test's now-deleted row instead of a real, fresh DB lookup.
+    clearAuthCache();
   });
 
   async function seedInstallation() {
@@ -407,20 +413,32 @@ describe('Licensing — Phase 5b backend core (real scratch database)', () => {
   });
 
   describe('authorization — activateLicense/status/request-code have no built-in auth check; the router guard (requireRole(\'admin\')) is the real gate', () => {
-    it('a non-admin role is rejected by requireRole(\'admin\') — the exact guard server.js mounts', () => {
-      const { req, res, next } = mockReqRes({ role: 'teacher' });
-      requireRole('admin')(req, res, next);
+    // BUG-03 fix: requireRole now consults the live auth state (authCache/Postgres), not
+    // just the token's own frozen claims — these two tests need a real matching user row
+    // (with real version numbers) instead of the old bare-token mock, or they'd now
+    // legitimately fail closed (401, "session no longer valid") regardless of the role
+    // string in the mock token. This is the correct, intended new behavior — see
+    // middleware/auth.integration.test.js for the dedicated stale-privilege coverage.
+    it('a non-admin role is rejected by requireRole(\'admin\') — the exact guard server.js mounts', async () => {
+      const teacher = await client.users.create({ data: { id: 'license-teacher-1', name: 'Teacher', is_admin: false, active: true, role_id: null } });
+      const req = { user: { id: teacher.id, role: 'user', userAuthVersion: teacher.auth_version, roleAuthVersion: null }, path: '/api/license/status' };
+      const res = { statusCode: null, status(c) { this.statusCode = c; return this; }, json() { return this; } };
+      const next = vi.fn();
+      await requireRole('admin')(req, res, next);
       expect(next).not.toHaveBeenCalled();
       expect(res.statusCode).toBe(403);
     });
 
-    it('an admin role passes requireRole(\'admin\')', () => {
-      const { req, res, next } = mockReqRes({ role: 'admin' });
-      requireRole('admin')(req, res, next);
+    it('an admin role passes requireRole(\'admin\')', async () => {
+      const admin = await seedAdminUser('license-admin-pass-1');
+      const req = { user: { id: admin.id, role: 'admin', userAuthVersion: admin.auth_version, roleAuthVersion: null }, path: '/api/license/status' };
+      const res = { statusCode: null, status(c) { this.statusCode = c; return this; }, json() { return this; } };
+      const next = vi.fn();
+      await requireRole('admin')(req, res, next);
       expect(next).toHaveBeenCalledOnce();
     });
 
-    it('a support session (no req.user at all) cannot satisfy requireRole(\'admin\') and therefore cannot reach activateLicense via the router', () => {
+    it('a support session (no req.user at all) cannot satisfy requireRole(\'admin\') and therefore cannot reach activateLicense via the router', async () => {
       // A support session never populates req.user (see requireSupportSession in auth.js —
       // it sets req.supportSession, never req.user). requireAuth (which populates req.user)
       // is a completely separate, unrelated check that a support session token cannot pass
@@ -432,7 +450,7 @@ describe('Licensing — Phase 5b backend core (real scratch database)', () => {
       const req = { user: null, supportSession: { purpose: 'support', sessionId: 'sess-1', installationId: 'inst-1' }, path: '/api/license/activate' };
       const res = { statusCode: null, status(c) { this.statusCode = c; return this; }, json() { return this; } };
       const next = vi.fn();
-      requireRole('admin')(req, res, next);
+      await requireRole('admin')(req, res, next);
       expect(next).not.toHaveBeenCalled();
       expect(res.statusCode).toBe(403);
     });

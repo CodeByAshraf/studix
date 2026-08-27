@@ -9,7 +9,7 @@ import { useToast }  from '../../components/Toast';
 import { useErrorHandler } from '../../hooks/useErrorHandler';
 import {
   MONTHS_AR, getMonthlyRevenue, getUnpaidStudents,
-  getRefundedAmount, getRemainingRefundable,
+  getRefundedAmount, getRemainingRefundable, getNetRevenue,
 } from '../../services/paymentService';
 import { pgCreatePayment, pgRefundPayment } from '../../services/api';
 import { formatCurrency }  from '../../utils/helpers';
@@ -78,14 +78,14 @@ export default function PaymentsPage() {
 
   // ── KPI data ──────────────────────────────────────────────
   const kpi = useMemo(() => {
-    const monthRevenue = getMonthlyRevenue(payments, currentMonth, currentYear);
-    const totalRevenue = payments.reduce((s, p) => s + p.amount, 0);
+    const monthRevenue = getMonthlyRevenue(payments, currentMonth, currentYear, treasuryTxn);
+    const totalRevenue = getNetRevenue(payments, treasuryTxn);
     const unpaidCount  = getUnpaidStudents(students, payments, currentMonth, currentYear).length;
     const todayStr     = new Date().toISOString().split('T')[0];
-    const todayRevenue = payments.filter(p => p.date === todayStr).reduce((s, p) => s + p.amount, 0);
+    const todayRevenue = getNetRevenue(payments.filter(p => p.date === todayStr), treasuryTxn);
     const thisMonthCount = payments.filter(p => p.month === currentMonth && p.year === currentYear).length;
     return { monthRevenue, totalRevenue, unpaidCount, todayRevenue, thisMonthCount };
-  }, [payments, students, currentMonth, currentYear]);
+  }, [payments, students, currentMonth, currentYear, treasuryTxn]);
 
   // ── Add payment ───────────────────────────────────────────
   const openAdd = useCallback((studentId = '') => {

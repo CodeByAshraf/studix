@@ -25,6 +25,7 @@
 // payment_id/admission_id يبقيان null دائماً — لا علاقة مالية حقيقية تُخترَع هنا.
 // ─────────────────────────────────────────────────────────────────────────────
 import { Router } from 'express';
+import crypto from 'crypto';
 import { runInTransaction } from '../lib/transaction.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 

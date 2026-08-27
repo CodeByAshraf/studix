@@ -11,10 +11,11 @@ export default function GroupStatistics() {
   const groups               = useAppStore((s) => s.groups);
   const payments             = useAppStore((s) => s.payments);
   const students             = useAppStore((s) => s.students);
+  const treasuryTxn          = useAppStore((s) => s.treasuryTxn);
 
   const allGroupStats = useMemo(() =>
-    groups.map(g => ({ ...g, stats: getGroupStats(g, students, payments, attendance) })),
-  [groups, students, payments, attendance]);
+    groups.map(g => ({ ...g, stats: getGroupStats(g, students, payments, attendance, treasuryTxn) })),
+  [groups, students, payments, attendance, treasuryTxn]);
 
   const globalStats = useMemo(() => {
     const totalGroups    = groups.length;

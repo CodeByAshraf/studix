@@ -24,6 +24,7 @@ import {
   pgCreateAdmissionPayment, pgCancelAdmissionWithRefund,
 } from '../../services/api';
 import { normalizeParentPhone } from '../communication/parentService';
+import { getAdmissionTreasuryTotals } from '../../services/treasuryService';
 import { openAdmissionReport } from './buildAdmissionReport';
 
 // Product Completion Phase 1 — Issue 3: نفس findOrCreateParentId المستخدَم في
@@ -445,7 +446,7 @@ export default function AdmissionsPage() {
         {/* محتوى التبويب */}
         <div style={{ animation: 'fadeIn .18s ease' }}>
           {tab === 'leads'    && <LeadsTab records={leadRecords} onSelect={setSelectedId} selectedId={selectedId} onConvert={convertToReservation} onAdd={(rec) => addRecord(rec, 'تمت إضافة العميل المحتمل')}/>}
-          {tab === 'reserved' && <ReservedTab records={reservedRecords} onSelect={setSelectedId} onConfirm={confirmReservation} onCancel={cancelReservation} onWaiting={moveToWaiting} onFromWaiting={moveFromWaiting} onFirstLesson={attendFirstLesson} onAdd={addReservation} onAddPayment={addPayment} materials={realMaterials} cashboxes={cashboxes}/>}
+          {tab === 'reserved' && <ReservedTab records={reservedRecords} onSelect={setSelectedId} onConfirm={confirmReservation} onCancel={cancelReservation} onWaiting={moveToWaiting} onFromWaiting={moveFromWaiting} onFirstLesson={attendFirstLesson} onAdd={addReservation} onAddPayment={addPayment} materials={realMaterials} cashboxes={cashboxes} treasuryTxn={treasuryTxn}/>}
           {tab === 'followup' && <FollowupTab records={followupRecords} allRecords={records} onSelect={setSelectedId} selectedId={selectedId} onAddFollowup={addFollowup}/>}
           {tab === 'active'   && <ActiveTab records={activeRecords} onSelect={setSelectedId}/>}
         </div>
@@ -579,7 +580,7 @@ function LeadsTab({ records, onSelect, selectedId, onConvert, onAdd }) {
 // ═══════════════════════════════════════════════════════════════════════════
 // تبويب 2: الحجز — كروت
 // ═══════════════════════════════════════════════════════════════════════════
-function ReservedTab({ records, onSelect, onConfirm, onCancel, onWaiting, onFromWaiting, onFirstLesson, onAdd, onAddPayment, materials, cashboxes }) {
+function ReservedTab({ records, onSelect, onConfirm, onCancel, onWaiting, onFromWaiting, onFirstLesson, onAdd, onAddPayment, materials, cashboxes, treasuryTxn }) {
   const toast = useToast();
   const [showForm, setShowForm] = useState(false);
   const [payFor, setPayFor] = useState(null); // الطالب اللي بنسجّل له دفعة
@@ -656,14 +657,20 @@ function ReservedTab({ records, onSelect, onConfirm, onCancel, onWaiting, onFrom
                 <Row label="المجموعة" value={r.group || '—'}/>
                 <Row label="تاريخ الحجز" value={r.reservationDate || '—'}/>
                 <Row label="الموظف" value={r.secretary}/>
-                {(r.payments || []).length > 0 && (
-                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, paddingTop: 6, borderTop: '1px dashed var(--border)' }}>
-                    <span style={{ color: 'var(--text3)' }}>المدفوع</span>
-                    <span style={{ fontWeight: 800, color: 'var(--green)' }}>
-                      {(r.payments || []).reduce((s, p) => s + (Number(p.amount) || 0), 0)} ج.م
-                    </span>
-                  </div>
-                )}
+                {(r.payments || []).length > 0 && (() => {
+                  // BUG-02: كانت تجمع r.payments.amount الخام مباشرة — مدفوعة قبول
+                  // استُرِدَّت (إلغاء الحجز) تبقى محسوبة وكأنها لا تزال محصَّلة. مصدر
+                  // الحقيقة الوحيد هو treasury_txn عبر admissionId (نفس مرجع DetailsPanel).
+                  const { net } = getAdmissionTreasuryTotals(r.id, treasuryTxn);
+                  return (
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, paddingTop: 6, borderTop: '1px dashed var(--border)' }}>
+                      <span style={{ color: 'var(--text3)' }}>المدفوع</span>
+                      <span style={{ fontWeight: 800, color: 'var(--green)' }}>
+                        {net} ج.م
+                      </span>
+                    </div>
+                  );
+                })()}
               </div>
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }} onClick={e => e.stopPropagation()}>
                 {isWaiting ? (
@@ -901,9 +908,7 @@ function DetailsPanel({ record, onClose, profile, treasuryTxn }) {
 
   // الملخص المالي — يُقرأ من حركات الخزنة الفعلية (المصدر الوحيد) عبر admissionId
   const linkedTxns = (treasuryTxn || []).filter(t => t.admissionId === record.id && t.status === 'active');
-  const finIncome  = linkedTxns.filter(t => t.type === 'income').reduce((s, t) => s + (Number(t.amount) || 0), 0);
-  const finRefund  = linkedTxns.filter(t => t.type === 'expense').reduce((s, t) => s + (Number(t.amount) || 0), 0);
-  const finNet     = finIncome - finRefund;
+  const { income: finIncome, refund: finRefund, net: finNet } = getAdmissionTreasuryTotals(record.id, treasuryTxn);
 
   return (
     <div style={{ width: 320, flexShrink: 0, background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 14, position: 'sticky', top: 16, maxHeight: 'calc(100vh - 32px)', overflowY: 'auto' }}>
@@ -920,7 +925,7 @@ function DetailsPanel({ record, onClose, profile, treasuryTxn }) {
             <div style={{ fontSize: '0.78rem', color: 'var(--text3)', marginTop: 2 }}>{record.grade}</div>
           </div>
           <Badge label={`${stage.icon} ${stage.label}`} color={stage.color}/>
-          <button onClick={() => openAdmissionReport({ record, profile })} style={{
+          <button onClick={() => openAdmissionReport({ record, profile, treasuryTxn })} style={{
             marginTop: 4, padding: '8px 16px', borderRadius: 9, border: '1px solid var(--accent)',
             background: 'transparent', color: 'var(--accent)', fontFamily: 'Cairo,sans-serif',
             fontSize: '0.8rem', fontWeight: 700, cursor: 'pointer',

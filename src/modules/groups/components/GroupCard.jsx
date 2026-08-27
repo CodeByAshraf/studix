@@ -39,10 +39,11 @@ const GroupCard = memo(function GroupCard({ group, onEdit, onDelete, onViewStude
   const students   = useAppStore(s => s.students);
   const payments   = useAppStore(s => s.payments);
   const attendance = useAppStore(s => s.attendance);
+  const treasuryTxn = useAppStore(s => s.treasuryTxn);
 
   const stats = useMemo(
-    () => getGroupStats(group, students, payments, attendance),
-    [group, students, payments, attendance]
+    () => getGroupStats(group, students, payments, attendance, treasuryTxn),
+    [group, students, payments, attendance, treasuryTxn]
   );
 
   const capacityPct     = stats.activeCount > 0 ? Math.round(stats.activeCount / group.max * 100) : 0;

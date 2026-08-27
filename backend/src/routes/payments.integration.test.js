@@ -8,6 +8,7 @@
 // لو PostgreSQL غير متاح أو الصلاحية ناقصة، تُسجَّل حالة "SKIPPED" واحدة واضحة بدل فشل
 // صامت أو تخطٍّ غير مُعلَن.
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import crypto from 'crypto';
 import { checkPostgresReachable, setupScratchDb, teardownScratchDb } from '../test-helpers/scratchDb.js';
 
 const dbCheck = await checkPostgresReachable();
@@ -124,7 +125,12 @@ describe('payments.js — real PostgreSQL integration (MEDIUM-B1)', () => {
       // createPayment يستدعي crypto.randomUUID() لِـ paymentId أولاً في كود المصدر، ثم
       // treasuryTxnId ثانياً (رغم أن treasury_txn هو الذي يُكتَب فعلياً أولاً في الخطوة 1) —
       // ترتيب الاستدعاءات هنا يجب أن يطابق ترتيب التعريف في payments.js، لا ترتيب الكتابة.
-      const spy = vi.spyOn(globalThis.crypto, 'randomUUID')
+      // BUG-01 fix: payments.js now does `import crypto from 'crypto'` explicitly (previously
+      // relied on globalThis.crypto — the exact gap that bug fixed) — this test's spy target
+      // must be the same imported node:crypto module object, not globalThis.crypto, or it no
+      // longer intercepts payments.js's calls at all (Node caches 'crypto' as a singleton, so
+      // this import resolves to the identical object payments.js itself imports).
+      const spy = vi.spyOn(crypto, 'randomUUID')
         .mockImplementationOnce(() => collidingPaymentId)   // 1st call: paymentId — يتصادم عند الكتابة في الخطوة 2
         .mockImplementationOnce(() => freshTreasuryTxnId);  // 2nd call: treasuryTxnId — يُكتَب بنجاح في الخطوة 1
 

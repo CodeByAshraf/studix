@@ -7,6 +7,7 @@ import Button            from '../../components/ui/Button';
 import StatusBadge       from './components/StatusBadge';
 import StudentAvatar     from './components/StudentAvatar';
 import { formatDate, formatCurrency } from '../../utils/helpers';
+import { getNetRevenue } from '../../services/paymentService';
 
 // MEDIUM-A Finding 6: نفس قيم preferredMethod الثلاث المستخدَمة في نموذج تعديل ولي
 // الأمر (ParentEditModal.jsx بموديول communication) — نسخة محلية صغيرة هنا بدل استيراد
@@ -140,12 +141,14 @@ function AttendanceTab({ student, attendance }) {
 // ════════════════════════════════════════════════════════════
 // TAB: Payments
 // ════════════════════════════════════════════════════════════
-function PaymentsTab({ student, payments }) {
+function PaymentsTab({ student, payments, treasuryTxn }) {
   const records = useMemo(() =>
     payments.filter(p => p.studentId === student.id).sort((a, b) => b.date.localeCompare(a.date)),
   [payments, student.id]);
 
-  const totalPaid = records.filter(p => p.status !== 'unpaid').reduce((s, p) => s + p.amount, 0);
+  // BUG-02: صافي بعد طرح أي استرداد فعّال (getNetRevenue) — هذا الرقم مؤشر أعلى الجدول
+  // (ليس تذييلاً يجمع صفوف الجدول الظاهرة)، فلا خطر مطابقة يمنع عرضه صافياً.
+  const totalPaid = getNetRevenue(records.filter(p => p.status !== 'unpaid'), treasuryTxn);
 
   const MONTH_NAMES = ['','يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
   const METHOD_LABELS = { cash:'نقدي', transfer:'تحويل', instapay:'إنستاباي', visa:'فيزا' };
@@ -391,6 +394,7 @@ export default function StudentProfile({ studentId, onBack, onEdit }) {
   const groups               = useAppStore((s) => s.groups);
   const parents               = useAppStore((s) => s.parents);
   const payments             = useAppStore((s) => s.payments);
+  const treasuryTxn          = useAppStore((s) => s.treasuryTxn);
   const setStudents          = useAppStore((s) => s.setStudents);
   const students             = useAppStore((s) => s.students);
   const [activeTab, setActiveTab] = useState('attendance');
@@ -413,8 +417,10 @@ export default function StudentProfile({ studentId, onBack, onEdit }) {
     ? Math.round(attRecs.filter(a => a.status === 'present').length / attRecs.length * 100)
     : null;
 
+  // BUG-02: صافي بعد طرح أي استرداد فعّال (getNetRevenue) — مؤشر رأس الملف، بلا جدول
+  // خام مجاور، فلا خطر مطابقة يمنع عرضه صافياً.
   const payRecs = payments.filter(p => p.studentId === studentId);
-  const totalPaid = payRecs.reduce((s, p) => s + p.amount, 0);
+  const totalPaid = getNetRevenue(payRecs, treasuryTxn);
 
   const CARD = {
     background:'var(--surface)', border:'1px solid var(--border)',
@@ -555,7 +561,7 @@ export default function StudentProfile({ studentId, onBack, onEdit }) {
               <AttendanceTab student={student} attendance={attendance}/>
             )}
             {activeTab === 'payments' && (
-              <PaymentsTab student={student} payments={payments}/>
+              <PaymentsTab student={student} payments={payments} treasuryTxn={treasuryTxn}/>
             )}
             {activeTab === 'exams' && (
               <ExamsTab student={student} exams={exams} grades={grades}/>

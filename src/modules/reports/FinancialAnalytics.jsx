@@ -3,29 +3,30 @@ import { useMemo } from 'react';
 import { useAppStore } from '../../store/app.store';
 import { formatCurrency, formatDate } from '../../utils/helpers';
 import { MetricCard, BarChart, DonutChart, AnalyticsCard, SparkLine, StatRow } from './components/ChartComponents';
-import { MONTHS_AR, PAYMENT_METHODS, PAYMENT_STATUS } from '../../services/paymentService';
+import { MONTHS_AR, PAYMENT_METHODS, PAYMENT_STATUS, getNetRevenue } from '../../services/paymentService';
 
 export default function FinancialAnalytics() {
   const groups               = useAppStore((s) => s.groups);
   const payments             = useAppStore((s) => s.payments);
   const students             = useAppStore((s) => s.students);
+  const treasuryTxn          = useAppStore((s) => s.treasuryTxn);
 
   const stats = useMemo(() => {
-    const total       = payments.reduce((s,p) => s+p.amount, 0);
+    const total       = getNetRevenue(payments, treasuryTxn);
     const currentMonth= new Date().getMonth()+1;
     const currentYear = new Date().getFullYear();
-    const monthRev    = payments.filter(p=>p.month===currentMonth&&(!p.year||p.year===currentYear)).reduce((s,p)=>s+p.amount,0);
+    const monthRev    = getNetRevenue(payments.filter(p=>p.month===currentMonth&&(!p.year||p.year===currentYear)), treasuryTxn);
     // MEDIUM-A Finding 1: نفس شهر ديسمبر/يناير عبر تغيير السنة — الشهر السابق قد يقع في
     // سنة مختلفة (لو currentMonth === يناير، الشهر السابق هو ديسمبر السنة الماضية).
     const lastMonthNum = currentMonth-1||12;
     const lastMonthYear= currentMonth===1 ? currentYear-1 : currentYear;
-    const lastMonthRev= payments.filter(p=>p.month===lastMonthNum&&(!p.year||p.year===lastMonthYear)).reduce((s,p)=>s+p.amount,0);
+    const lastMonthRev= getNetRevenue(payments.filter(p=>p.month===lastMonthNum&&(!p.year||p.year===lastMonthYear)), treasuryTxn);
     const growth      = lastMonthRev>0 ? Math.round(((monthRev-lastMonthRev)/lastMonthRev)*100) : null;
 
     // Monthly breakdown (12 months)
     const monthly = Array.from({length:12},(_,i) => {
       const m = i+1;
-      const rev = payments.filter(p=>p.month===m&&(!p.year||p.year===currentYear)).reduce((s,p)=>s+p.amount,0);
+      const rev = getNetRevenue(payments.filter(p=>p.month===m&&(!p.year||p.year===currentYear)), treasuryTxn);
       return { label:MONTHS_AR[m].substring(0,5), value:rev, color: m===currentMonth?'var(--accent)':'#3b82f6' };
     });
 
@@ -46,13 +47,13 @@ export default function FinancialAnalytics() {
     // By group
     const byGroup = groups.map(g => ({
       label:   g.name.split('—')[0].trim().substring(0,14),
-      value:   payments.filter(p=>p.groupId===g.id).reduce((s,p)=>s+p.amount,0),
+      value:   getNetRevenue(payments.filter(p=>p.groupId===g.id), treasuryTxn),
       color:   g.color||'#3b82f6',
     })).sort((a,b)=>b.value-a.value).filter(d=>d.value>0);
 
     // Daily this month
     const todayStr = new Date().toISOString().split('T')[0];
-    const todayRev = payments.filter(p=>p.date===todayStr).reduce((s,p)=>s+p.amount,0);
+    const todayRev = getNetRevenue(payments.filter(p=>p.date===todayStr), treasuryTxn);
 
     // Recent payments
     const recent = [...payments].sort((a,b)=>b.date.localeCompare(a.date)).slice(0,8);
@@ -64,7 +65,7 @@ export default function FinancialAnalytics() {
     const collectRate    = activeStudents.length ? Math.round((activeStudents.length-unpaidCount)/activeStudents.length*100) : null;
 
     return { total, monthRev, lastMonthRev, growth, monthly, byMethod, byStatus, byGroup, todayRev, recent, unpaidCount, collectRate };
-  }, [payments, students, groups]);
+  }, [payments, students, groups, treasuryTxn]);
 
   const PALETTE = [
     {bg:'rgba(59,130,246,.18)',color:'#3b82f6'},{bg:'rgba(16,185,129,.18)',color:'#10b981'},

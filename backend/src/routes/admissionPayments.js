@@ -18,6 +18,7 @@
 // examGrades.js الحالي في هذا الكود).
 // ─────────────────────────────────────────────────────────────────────────────
 import { Router } from 'express';
+import crypto from 'crypto';
 import { runInTransaction } from '../lib/transaction.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { snakeToCamel } from '../lib/caseMapper.js';

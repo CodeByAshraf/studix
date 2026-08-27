@@ -17,6 +17,7 @@
 //   - كل ذلك داخل معاملة واحدة (runInTransaction).
 // ─────────────────────────────────────────────────────────────────────────────
 import { Router } from 'express';
+import crypto from 'crypto';
 import { prisma } from '../prisma.js';
 import { runInTransaction } from '../lib/transaction.js';
 import { asyncHandler } from '../middleware/errorHandler.js';

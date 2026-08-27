@@ -72,34 +72,53 @@ export function createPayment(data, student, group) {
 }
 
 // ── Revenue helpers ───────────────────────────────────────────────────────────
-export function getMonthlyRevenue(payments, month, year) {
+// treasuryTxn (اختياري، افتراضياً []) يُستخدَم لطرح الاسترداد الفعلي لكل دفعة (عبر
+// getRefundedAmount أدناه) من إيرادها — بدون هذا، دفعة استُرِدَّت جزئياً أو كلياً كانت
+// تُحسَب بكامل مبلغها الأصلي إلى الأبد، فتُضخِّم كل رقم إيراد يعتمد على هذه الدوال. غياب
+// treasuryTxn (استدعاء قديم لم يُحدَّث بعد) يُعيد بالضبط السلوك السابق لدفعات بلا أي
+// استرداد — لا تغيير لأي رقم في غياب استرداد حقيقي.
+export function getMonthlyRevenue(payments, month, year, treasuryTxn = []) {
   return payments
     .filter((p) => p.month === month && (!year || p.year === year || p.date?.startsWith(`${year}`)))
-    .reduce((sum, p) => sum + p.amount, 0);
+    .reduce((sum, p) => sum + (p.amount - getRefundedAmount(p.id, treasuryTxn)), 0);
 }
 
-export function getDailyRevenue(payments, date) {
-  return payments.filter((p) => p.date === date).reduce((sum, p) => sum + p.amount, 0);
+export function getDailyRevenue(payments, date, treasuryTxn = []) {
+  return payments
+    .filter((p) => p.date === date)
+    .reduce((sum, p) => sum + (p.amount - getRefundedAmount(p.id, treasuryTxn)), 0);
 }
 
-export function getRevenueByGroup(payments, groups) {
+export function getRevenueByGroup(payments, groups, treasuryTxn = []) {
   return groups.map((g) => ({
     id:      g.id,
     name:    g.name,
     color:   g.color,
-    revenue: payments.filter((p) => p.groupId === g.id).reduce((s, p) => s + p.amount, 0),
+    revenue: payments
+      .filter((p) => p.groupId === g.id)
+      .reduce((s, p) => s + (p.amount - getRefundedAmount(p.id, treasuryTxn)), 0),
   })).sort((a, b) => b.revenue - a.revenue);
 }
 
-export function getMonthlyBreakdown(payments, year = new Date().getFullYear()) {
+export function getMonthlyBreakdown(payments, year = new Date().getFullYear(), treasuryTxn = []) {
   return Array.from({ length: 12 }, (_, i) => {
     const month = i + 1;
     return {
       month,
       label:   MONTHS_AR[month],
-      revenue: getMonthlyRevenue(payments, month, year),
+      revenue: getMonthlyRevenue(payments, month, year, treasuryTxn),
     };
   });
+}
+
+// getNetRevenue: نفس منطق الخصم المُستخدَم داخل الدوال الأربع أعلاه بالضبط (مبلغ الدفعة -
+// getRefundedAmount)، لكن كبنية لبنة عامة تقبل أي مجموعة دفعات مُفلترَة مسبقاً من جهة
+// الاستدعاء (يوم واحد، شهر، مجموعة، إلخ) — مصدر الحقيقة الوحيد لأي مجموع إيراد جديد في
+// الواجهة، بدل أن يُعيد كل مكوّن كتابة `p.amount - getRefundedAmount(...)` بنفسه. الدوال
+// الأربع أعلاه لم تُعَد كتابتها لتستخدمها (سلوكها الحالي مُختبَر بالفعل ولم يتغيّر) — هذه
+// إضافة لبنة جديدة فقط لنقاط استدعاء جديدة (KPIs/رسوم بيانية) لم تكن تستخدم أياً منها.
+export function getNetRevenue(payments, treasuryTxn = []) {
+  return payments.reduce((sum, p) => sum + (p.amount - getRefundedAmount(p.id, treasuryTxn)), 0);
 }
 
 export function getUnpaidStudents(students, payments, month, year = new Date().getFullYear()) {

@@ -6,7 +6,7 @@
 
 import { getAttendanceStats } from '../../services/attendanceService';
 import { scorePercent, gradeStatus } from '../../services/examService';
-import { getStudentFee } from '../../services/paymentService';
+import { getStudentFee, getRefundedAmount } from '../../services/paymentService';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // تجميع كل بيانات الطالب من الـ store
@@ -98,9 +98,14 @@ export function gatherStudentData(studentId, store) {
   }
 
   // ── المدفوعات ──
+  // BUG-02 (منطق كشف استرداد ميت): كان يبحث عن payment.type === 'refund' — لكن الدفعة لا
+  // تحمل هذا الحقل بهذه القيمة إطلاقاً في نموذج البيانات الفعلي (immutable، لا نوع
+  // "استرداد" عليها). الاسترداد الحقيقي الوحيد يُشتقّ من treasury_txn (ref_type:'refund'،
+  // status:'active') عبر getRefundedAmount — نفس مصدر الحقيقة المُستخدَم في كل مكان آخر.
   const payments = (store.payments || []).filter((p) => p.studentId === studentId);
-  const paidTotal = payments.filter((p) => p.type !== 'refund').reduce((s, p) => s + (Number(p.amount) || 0), 0);
-  const refundTotal = payments.filter((p) => p.type === 'refund').reduce((s, p) => s + Math.abs(Number(p.amount) || 0), 0);
+  const treasuryTxn = store.treasuryTxn || [];
+  const paidTotal = payments.reduce((s, p) => s + (Number(p.amount) || 0), 0);
+  const refundTotal = payments.reduce((s, p) => s + getRefundedAmount(p.id, treasuryTxn), 0);
   const monthlyFee = getStudentFee(student, group);
 
   // ── التواصل (إن وُجد) ──

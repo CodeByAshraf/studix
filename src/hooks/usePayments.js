@@ -15,6 +15,7 @@ export default function usePayments() {
   const payments    = useAppStore((s) => s.payments);
   const students    = useAppStore((s) => s.students);
   const groups      = useAppStore((s) => s.groups);
+  const treasuryTxn = useAppStore((s) => s.treasuryTxn);
   const setPayments = useAppStore((s) => s.setPayments);
   const addLog      = useAppStore((s) => s.addLog);
 
@@ -40,8 +41,8 @@ export default function usePayments() {
   }, [students, groups, setPayments, run, toast, addLog, currentUser]);
 
   const getRevenue = useCallback(
-    (month) => getMonthlyRevenue(payments, month),
-    [payments],
+    (month) => getMonthlyRevenue(payments, month, undefined, treasuryTxn),
+    [payments, treasuryTxn],
   );
 
   const getUnpaid = useCallback(

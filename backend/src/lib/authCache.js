@@ -26,13 +26,13 @@
 // ─────────────────────────────────────────────────────────────
 import { prisma } from '../prisma.js';
 
-// userId -> { roleId, roleFound, userPermissions, rolePermissions, userAuthVersion, roleAuthVersion, active }
+// userId -> { roleId, roleFound, userPermissions, rolePermissions, userAuthVersion, roleAuthVersion, active, isAdmin }
 const cache = new Map();
 
 async function loadFromDb(userId) {
   const user = await prisma.users.findUnique({
     where: { id: userId },
-    select: { id: true, role_id: true, permissions: true, auth_version: true, active: true },
+    select: { id: true, role_id: true, permissions: true, auth_version: true, active: true, is_admin: true },
   });
   if (!user) return null;
 
@@ -51,6 +51,11 @@ async function loadFromDb(userId) {
     userAuthVersion: user.auth_version,
     roleAuthVersion: role ? role.auth_version : null,
     active: user.active,
+    // BUG-03 fix: requireRole (middleware/auth.js) needs the LIVE is_admin flag to
+    // re-derive the current role string exactly as session.js's signSession does at login
+    // (role = is_admin ? 'admin' : (role_id || 'user')) — without this, requireRole had no
+    // way to detect a deactivated/demoted admin independent of requirePermission's own path.
+    isAdmin: user.is_admin,
   };
   cache.set(userId, entry);
   return entry;

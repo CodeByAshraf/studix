@@ -107,6 +107,17 @@ export function validateTxn(data, type) {
   return errors;
 }
 
+// ── Admission financials (derived from treasury_txn — single source of truth) ──
+// BUG-02: مصدر الحقيقة الوحيد لصافي مدفوعات القبول — نفس منطق DetailsPanel في
+// AdmissionsPage.jsx بالضبط (لا نسخة ثانية من الخوارزمية). دفعة قبول تُسترَد (جزئياً أو
+// كلياً) تُسجَّل كحركة خزنة type:'expense' مرتبطة بنفس admissionId، فتُطرَح هنا تلقائياً.
+export function getAdmissionTreasuryTotals(admissionId, treasuryTxn = []) {
+  const linked = (treasuryTxn || []).filter(t => t.admissionId === admissionId && t.status === 'active');
+  const income  = linked.filter(t => t.type === 'income').reduce((s, t) => s + (Number(t.amount) || 0), 0);
+  const refund  = linked.filter(t => t.type === 'expense').reduce((s, t) => s + (Number(t.amount) || 0), 0);
+  return { income, refund, net: income - refund };
+}
+
 // ── Build txn from payment (auto-sync) ──────────────────────
 export function txnFromPayment(payment, studentName, groupName) {
   return {

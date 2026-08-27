@@ -3,6 +3,7 @@ import { useState, useMemo } from 'react';
 import { useAppStore } from '../../store/app.store';
 import { SectionBoundary } from '../../components/ErrorBoundary';
 import { formatCurrency } from '../../utils/helpers';
+import { getNetRevenue } from '../../services/paymentService';
 // المرحلة 4: lazy loading لـ sub-reports — كل تقرير يُحمَّل عند أول استخدام فقط
 // يُقلّل الـ initial bundle لـ ReportsPage بنسبة ~60%
 import { lazy, Suspense } from 'react';
@@ -37,6 +38,7 @@ function OverviewDashboard() {
   const groups               = useAppStore((s) => s.groups);
   const payments             = useAppStore((s) => s.payments);
   const students             = useAppStore((s) => s.students);
+  const treasuryTxn          = useAppStore((s) => s.treasuryTxn);
 
   const summary = useMemo(() => {
     const now = new Date();
@@ -50,8 +52,10 @@ function OverviewDashboard() {
     // Revenue
     // MEDIUM-A Finding 1: يجب مطابقة السنة أيضاً — بلا هذا القيد، "إيراد هذا الشهر" يجمع
     // كل الدفعات بنفس رقم الشهر عبر كل السنوات.
-    const monthRev = payments.filter(p => p.month===thisMonth && p.year===thisYear).reduce((s,p) => s+p.amount, 0);
-    const totalRev = payments.reduce((s,p) => s+p.amount, 0);
+    // BUG-02: صافي بعد طرح أي استرداد فعّال (getNetRevenue) — كانت تجمع payments.amount
+    // الخام، فتُبقي دفعة استُرِدَّت جزئياً/كلياً محسوبة بكامل مبلغها إلى الأبد.
+    const monthRev = getNetRevenue(payments.filter(p => p.month===thisMonth && p.year===thisYear), treasuryTxn);
+    const totalRev = getNetRevenue(payments, treasuryTxn);
 
     // Attendance
     const attRecs   = attendance;
@@ -79,11 +83,11 @@ function OverviewDashboard() {
       const d = new Date(thisYear, now.getMonth() - (5 - i), 1);
       const m = d.getMonth() + 1;
       const y = d.getFullYear();
-      return payments.filter(p => p.month===m && p.year===y).reduce((s,p) => s+p.amount, 0);
+      return getNetRevenue(payments.filter(p => p.month===m && p.year===y), treasuryTxn);
     });
 
     return { activeStudents, newThisMonth, monthRev, totalRev, attPct, avgExamPct, fullGroups, monthlyTrend };
-  }, [students, groups, payments, attendance, grades, exams]);
+  }, [students, groups, payments, attendance, grades, exams, treasuryTxn]);
 
   const M = ['Cairo,sans-serif'];
 

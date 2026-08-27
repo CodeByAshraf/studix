@@ -10,6 +10,7 @@ import { generateMessage, copyMessage, openWhatsapp } from './studentWhatsappSer
 import WhatsappPreviewModal from './WhatsappPreviewModal';
 import { pgCreateWaReportLog } from '../../services/api';
 import { deriveMatDist } from '../../services/materialService';
+import { getRefundedAmount } from '../../services/paymentService';
 
 // ─────────────────────────────────────────────────────────────
 // Helpers
@@ -160,13 +161,15 @@ export default function StudentReportPage() {
   const centerProfile = useAppStore(s => s.centerProfile);
   const communications = useAppStore(s => s.communications);
   const inventoryTxn   = useAppStore(s => s.inventoryTxn);
+  const treasuryTxn    = useAppStore(s => s.treasuryTxn);
   // matDist مُشتَق من inventoryTxn (المُزامَن إقلاعياً بالفعل) — لا حالة مستقلة بعد الآن.
   const matDist = useMemo(() => deriveMatDist(inventoryTxn), [inventoryTxn]);
   const { currentUser } = useAuth();
   const toast = useToast();
   const currentUserName = currentUser?.name || currentUser?.id || 'النظام';
-  // تجميع الـ store للتقرير الاحترافي (المحرّك الجديد يقرأ منه)
-  const fullStore = { students, groups, attendance, payments, exams, grades, communications, inventoryTxn };
+  // تجميع الـ store للتقرير الاحترافي (المحرّك الجديد يقرأ منه) — treasuryTxn مطلوبة
+  // لكشف الاسترداد الفعلي في gatherStudentData (BUG-02، انظر reportData.js).
+  const fullStore = { students, groups, attendance, payments, exams, grades, communications, inventoryTxn, treasuryTxn };
   const addWaReportLog = useAppStore(s => s.addWaReportLog);
 
   // ── workflow معاينة رسالة واتساب (المنطق كله في الـ service) ──
@@ -278,8 +281,15 @@ export default function StudentReportPage() {
     const matTotal    = matRows.reduce((s,r)=>s+(r.paidAmount||0), 0);
 
     // Payments
+    // NEEDS BUSINESS DECISION (المُغلق الآن) — بيان مطبوع: الجدول أدناه (payRows) يعرض
+    // المبالغ الأصلية التاريخية لكل معاملة كما هي (لا تعديل). totalPaid يبقى إجمالياً
+    // خاماً (Gross) مطابقاً لمجموع تلك الصفوف بالضبط؛ الاسترداد الفعلي يُشتقّ من
+    // treasury_txn في حقلين منفصلين (refundedTotal/netPaid) بدل استبدال الإجمالي برقم
+    // صافٍ يناقض الجدول المطابق له تماماً. Net = Gross − Refunded دائماً.
     const payRows  = payments.filter(p=>p.studentId===student.id).sort((a,b)=>a.date.localeCompare(b.date));
     const totalPaid= payRows.reduce((s,p)=>s+p.amount, 0);
+    const refundedTotal = payRows.reduce((s,p)=>s+getRefundedAmount(p.id, treasuryTxn), 0);
+    const netPaid  = totalPaid - refundedTotal;
     const paidCount= payRows.filter(p=>p.status==='paid').length;
 
     // Timeline — merge all events
@@ -301,10 +311,10 @@ export default function StudentReportPage() {
       examRows, avgExamPct, passedExams, validExams,
       hwRows, hwSubmitted, hwLate, hwMissing,
       matRows, matReceived, matPaid, matTotal,
-      payRows, totalPaid, paidCount,
+      payRows, totalPaid, refundedTotal, netPaid, paidCount,
       timeline, followups,
     };
-  }, [student, attendance, absFollowup, grades, exams, homeworks, hwSubmissions, matDist, materials, payments, group]);
+  }, [student, attendance, absFollowup, grades, exams, homeworks, hwSubmissions, matDist, materials, payments, group, treasuryTxn]);
 
   // ── Tab definitions ──────────────────────────────────────
   const TABS = [
@@ -483,7 +493,7 @@ export default function StudentReportPage() {
               { icon:'✓',  label:'نسبة الحضور',    value:data.attPct!=null?`${data.attPct}%`:'—',    color:pctColor(data.attPct)   },
               { icon:'📝', label:'متوسط الامتحانات', value:data.avgExamPct!=null?`${data.avgExamPct}%`:'—', color:pctColor(data.avgExamPct) },
               { icon:'📋', label:'إنجاز الواجبات',  value:data.hwRows.length?`${Math.round((data.hwSubmitted+data.hwLate)/data.hwRows.length*100)}%`:'—', color:'#8b5cf6' },
-              { icon:'💰', label:'إجمالي المدفوع',  value:formatCurrency(data.totalPaid), color:'#10b981' },
+              { icon:'💰', label:'صافي المدفوع',  value:formatCurrency(data.netPaid), color:'#10b981' },
               { icon:'📚', label:'مذكرات استُلمت',  value:`${data.matReceived}/${data.matRows.length}`, color:'#3b82f6' },
               { icon:'🕐', label:'جلسات الحضور',    value:data.attAll.length, color:'var(--text)' },
             ].map(k => <KpiCard key={k.label} {...k}/>)}
@@ -549,9 +559,15 @@ export default function StudentReportPage() {
                 {/* Finance summary */}
                 <Section icon="💰" title="ملخص المالية" accentColor="#10b981">
                   <div style={{ marginBottom:8 }}>
-                    <div style={{ fontSize:'1.6rem', fontWeight:900, color:'#10b981', marginBottom:4 }}>{formatCurrency(data.totalPaid)}</div>
-                    <div style={{ fontSize:'0.72rem', color:'var(--text3)' }}>إجمالي المدفوع</div>
+                    <div style={{ fontSize:'1.6rem', fontWeight:900, color:'#10b981', marginBottom:4 }}>{formatCurrency(data.netPaid)}</div>
+                    <div style={{ fontSize:'0.72rem', color:'var(--text3)' }}>صافي المدفوع</div>
                   </div>
+                  {data.refundedTotal > 0 && (
+                    <>
+                      <StatRow label="إجمالي قبل الاسترداد" value={formatCurrency(data.totalPaid)}/>
+                      <StatRow label="المسترد" value={formatCurrency(data.refundedTotal)} color="#ef4444"/>
+                    </>
+                  )}
                   <StatRow label="عدد الدفعات" value={data.paidCount}/>
                   <StatRow label="مذكرات مدفوعة" value={`${data.matPaid}/${data.matRows.length}`} color="#3b82f6"/>
                   <StatRow label="إجمالي المذكرات" value={formatCurrency(data.matTotal)} color="#10b981"/>
@@ -857,9 +873,17 @@ export default function StudentReportPage() {
           ══════════════════════════════════════════════════ */}
           {(activeTab==='payments') && (
             <div style={{ display:'flex', flexDirection:'column', gap:16 }}>
-              {/* Totals */}
-              <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:12 }}>
+              {/* Totals — Gross/Refunded/Net (BUG-02: الجدول أدناه يعرض المبالغ الأصلية
+                  التاريخية كما هي، فالإجمالي هنا يبقى خاماً مطابقاً لمجموعها؛ الاسترداد
+                  يظهر كبند منفصل، والصافي = الإجمالي − المسترد) */}
+              <div style={{ display:'grid', gridTemplateColumns: data.refundedTotal > 0 ? 'repeat(5,1fr)' : 'repeat(3,1fr)', gap:12 }}>
                 <KpiCard icon="💰" label="إجمالي المدفوع"  value={formatCurrency(data.totalPaid)}  color="#10b981"/>
+                {data.refundedTotal > 0 && (
+                  <>
+                    <KpiCard icon="↩️" label="المسترد"      value={formatCurrency(data.refundedTotal)} color="#ef4444"/>
+                    <KpiCard icon="💵" label="الصافي"       value={formatCurrency(data.netPaid)}   color="#3b82f6"/>
+                  </>
+                )}
                 <KpiCard icon="🧾" label="عدد الدفعات"      value={data.paidCount}                  color="#3b82f6"/>
                 <KpiCard icon="📚" label="مذكرات (مجموع)"  value={formatCurrency(data.matTotal)}   color="#8b5cf6"/>
               </div>
@@ -896,9 +920,17 @@ export default function StudentReportPage() {
                       </tbody>
                       <tfoot>
                         <tr style={{ background:'var(--surface2)' }}>
-                          <td colSpan={2} style={{ padding:'10px 18px', fontWeight:800, fontSize:'0.82rem' }}>الإجمالي</td>
+                          <td colSpan={2} style={{ padding:'10px 18px', fontWeight:800, fontSize:'0.82rem' }}>
+                            {data.refundedTotal > 0 ? 'الإجمالي (قبل الاسترداد)' : 'الإجمالي'}
+                          </td>
                           <td colSpan={4} style={{ padding:'10px 18px', fontWeight:900, color:'#10b981', fontSize:'1rem' }}>{formatCurrency(data.totalPaid)}</td>
                         </tr>
+                        {data.refundedTotal > 0 && (
+                          <tr style={{ background:'var(--surface2)' }}>
+                            <td colSpan={2} style={{ padding:'10px 18px', fontWeight:800, fontSize:'0.82rem' }}>الصافي (بعد الاسترداد)</td>
+                            <td colSpan={4} style={{ padding:'10px 18px', fontWeight:900, color:'#3b82f6', fontSize:'1rem' }}>{formatCurrency(data.netPaid)}</td>
+                          </tr>
+                        )}
                       </tfoot>
                     </table>
                   </div>

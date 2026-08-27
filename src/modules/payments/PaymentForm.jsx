@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useAppStore } from '../../store/app.store';
 import useForm     from '../../hooks/useForm';
-import { validatePayment, PAYMENT_METHODS, PAYMENT_TYPES, MONTHS_AR, getStudentFee } from '../../services/paymentService';
+import { validatePayment, PAYMENT_METHODS, PAYMENT_TYPES, MONTHS_AR, getStudentFee, getNetRevenue } from '../../services/paymentService';
 import Button      from '../../components/ui/Button';
 import { ConfirmModal } from '../../components/ui/Modal';
 import { useToast } from '../../components/Toast';
@@ -62,6 +62,7 @@ export default function PaymentForm({ onSubmit, onCancel, loading, prefilledStud
   const students             = useAppStore((s) => s.students);
   const materials            = useAppStore((s) => s.invMaterials);
   const cashboxes            = useAppStore((s) => s.cashboxes);
+  const treasuryTxn          = useAppStore((s) => s.treasuryTxn);
   const toast                = useToast();
   const [confirmMaterial, setConfirmMaterial] = useState(false);
   const { values, errors, touched, handleChange, validate, setField } = useForm(EMPTY, validatePayment);
@@ -110,7 +111,9 @@ export default function PaymentForm({ onSubmit, onCancel, loading, prefilledStud
 
   const selectedMaterial = gradeMaterials.find(m => m.id === values.materialId);
 
-  const totalPaid = monthPayments.reduce((s, p) => s + p.amount, 0);
+  // BUG-02: صافي بعد طرح أي استرداد فعّال على دفعات هذا الشهر — دفعة استُرِدَّت
+  // جزئياً/كلياً لا يجب أن تُحتسَب ضمن "متبقي هذا الشهر" وكأنها لا تزال مسدَّدة بالكامل.
+  const totalPaid = getNetRevenue(monthPayments, treasuryTxn);
   const remaining = selectedStudent ? Math.max(0, getStudentFee(selectedStudent, selectedGroup) - totalPaid) : null;
 
   const err  = f => touched[f] && errors[f];

@@ -5,6 +5,7 @@
 // يحوّل مخرجات قاعدة البيانات من snake_case إلى camelCase (خيار أ) وعكسها للكتابة.
 // ─────────────────────────────────────────────────────────────
 import { Router } from 'express';
+import crypto from 'crypto';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma.js';
 import { asyncHandler } from '../middleware/errorHandler.js';

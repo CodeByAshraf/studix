@@ -9,7 +9,7 @@ import {
   basePrintCSS, reportHeaderHTML, reportFooterHTML,
   kpiHTML, sectionTitleHTML, badgeHTML, toolbarHTML,
 } from '../../utils/printStyles';
-import { PAYMENT_METHODS, PAYMENT_TYPES } from '../../services/paymentService';
+import { PAYMENT_METHODS, PAYMENT_TYPES, getStudentFee, getRefundedAmount } from '../../services/paymentService';
 
 const MONTHS_AR = ['', 'يناير','فبراير','مارس','أبريل','مايو','يونيو',
                    'يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
@@ -32,8 +32,9 @@ const STATUS_META = {
  * @param {array}  args.students  كل الطلاب
  * @param {array}  args.payments  كل المدفوعات
  * @param {object} args.profile   بيانات المركز
+ * @param {array}  args.treasuryTxn حركات الخزنة (لطرح أي استرداد فعّال من "المحصّل")
  */
-export function openPaymentsReportPrint({ group, month, year, students, payments, profile }) {
+export function openPaymentsReportPrint({ group, month, year, students, payments, profile, treasuryTxn = [] }) {
   if (!group) return;
 
   const monthName = MONTHS_AR[month] || `شهر ${month}`;
@@ -48,7 +49,9 @@ export function openPaymentsReportPrint({ group, month, year, students, payments
       (p.year === year || p.date?.startsWith(`${year}`)) &&
       (p.payType || 'subscription') === 'subscription'
     );
-    const totalPaid = studentPays.reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
+    // BUG-02: صافي بعد طرح أي استرداد فعّال — يقود هذا الرقم حالة كل طالب (مدفوع/جزئي/
+    // غير مدفوع) وقائمة المتأخرين معاً، فيجب أن يُشتقّا كلاهما من نفس المبلغ الصافي.
+    const totalPaid = studentPays.reduce((sum, p) => sum + (Number(p.amount) || 0) - getRefundedAmount(p.id, treasuryTxn), 0);
     let status = 'unpaid';
     if (totalPaid >= price && price > 0) status = 'paid';
     else if (totalPaid > 0)             status = 'partial';
@@ -169,14 +172,21 @@ export function openPaymentsReportPrint({ group, month, year, students, payments
 // نفس مبدأ PAY_METHOD أعلاه — مصدر واحد (paymentService.js's PAYMENT_TYPES).
 const PAY_TYPE_L = PAYMENT_TYPES;
 
-export function openStudentPaymentsReport({ student, group, payments, profile }) {
+export function openStudentPaymentsReport({ student, group, payments, profile, treasuryTxn = [] }) {
   if (!student) return;
 
   const studentPays = payments
     .filter(p => p.studentId === student.id)
     .sort((a, b) => new Date(b.date) - new Date(a.date));
 
+  // NEEDS BUSINESS DECISION (المُغلق الآن): الجدول أدناه يعرض المبالغ الأصلية التاريخية
+  // لكل معاملة (كما هي — بلا تعديل)، فـ"الإجمالي" الذي يجمعها مباشرة يجب أن يبقى إجمالياً
+  // خاماً (Gross) حتى يستمر مطابقاً لمجموع الصفوف الظاهرة. الاسترداد يُعرَض كبند منفصل
+  // (Refunded)، والصافي = الإجمالي − المسترد (Net = Gross − Refunded) — بدل استبدال
+  // الإجمالي برقم صافٍ يناقض الجدول المطابق له تماماً تحته.
   const total = studentPays.reduce((s, p) => s + (Number(p.amount) || 0), 0);
+  const refunded = studentPays.reduce((s, p) => s + getRefundedAmount(p.id, treasuryTxn), 0);
+  const net = total - refunded;
   const count = studentPays.length;
 
   // تجميع حسب النوع
@@ -217,6 +227,8 @@ export function openStudentPaymentsReport({ student, group, payments, profile })
 
     <div class="kpi-row">
       ${kpiHTML('إجمالي المدفوع', fmtMoney(total), PALETTE.green)}
+      ${refunded > 0 ? kpiHTML('المسترد', fmtMoney(refunded), PALETTE.red) : ''}
+      ${refunded > 0 ? kpiHTML('الصافي', fmtMoney(net), PALETTE.primary) : ''}
       ${kpiHTML('عدد الدفعات', count, PALETTE.primary)}
       ${kpiHTML('أنواع الدفع', Object.keys(byType).length, PALETTE.blue)}
       ${kpiHTML('آخر دفعة', studentPays[0] ? fmtDateShort(studentPays[0].date) : '—', PALETTE.purple)}

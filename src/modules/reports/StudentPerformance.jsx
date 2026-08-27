@@ -4,6 +4,7 @@ import { useAppStore } from '../../store/app.store';
 import { formatCurrency, formatDate } from '../../utils/helpers';
 import { MetricCard, BarChart, DonutChart, AnalyticsCard, StatRow, HeatRow, ProgressRing } from './components/ChartComponents';
 import { scoreColor } from '../../services/examService';
+import { getNetRevenue } from '../../services/paymentService';
 
 const PALETTE = [
   {bg:'rgba(59,130,246,.18)',color:'#3b82f6'},{bg:'rgba(16,185,129,.18)',color:'#10b981'},
@@ -19,6 +20,7 @@ export default function StudentPerformance() {
   const groups               = useAppStore((s) => s.groups);
   const payments             = useAppStore((s) => s.payments);
   const students             = useAppStore((s) => s.students);
+  const treasuryTxn          = useAppStore((s) => s.treasuryTxn);
   const [selectedStudentId, setSelectedStudentId] = useState('');
 
   const activeStudents = students.filter(s => s.status === 'active');
@@ -80,11 +82,13 @@ export default function StudentPerformance() {
     const avgExamPct = examResults.length ? Math.round(examResults.reduce((s,g)=>s+g.pct,0)/examResults.length) : null;
 
     // Payments
+    // BUG-02: صافي بعد طرح أي استرداد فعّال (getNetRevenue) — لا يظهر ملف الطالب هنا
+    // أي جدول خام مجاور، فلا خطر مطابقة يمنع عرض الرقم الصافي مباشرة.
     const payRecs = payments.filter(p => p.studentId===s.id);
-    const totalPaid = payRecs.reduce((sum,p) => sum+p.amount, 0);
+    const totalPaid = getNetRevenue(payRecs, treasuryTxn);
 
     return { s, group, attRecs, attPresent, attAbsent, attLate, attPct, heatCells, examResults, avgExamPct, payRecs, totalPaid };
-  }, [selectedStudentId, students, groups, attendance, grades, exams, payments]);
+  }, [selectedStudentId, students, groups, attendance, grades, exams, payments, treasuryTxn]);
 
   const MONTHS_SHORT = ['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
 

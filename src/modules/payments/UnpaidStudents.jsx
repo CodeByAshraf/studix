@@ -1,7 +1,7 @@
 // src/modules/payments/UnpaidStudents.jsx
 import { useAppStore } from '../../store/app.store';
 import { useState, useMemo } from 'react';
-import { MONTHS_AR, getUnpaidStudents, getPartialStudents, getStudentFee } from '../../services/paymentService';
+import { MONTHS_AR, getUnpaidStudents, getPartialStudents, getStudentFee, getNetRevenue } from '../../services/paymentService';
 import { formatCurrency } from '../../utils/helpers';
 import Button from '../../components/ui/Button';
 
@@ -18,6 +18,7 @@ export default function UnpaidStudents({ onQuickPay }) {
   const groups               = useAppStore((s) => s.groups);
   const payments             = useAppStore((s) => s.payments);
   const students             = useAppStore((s) => s.students);
+  const treasuryTxn          = useAppStore((s) => s.treasuryTxn);
   const [month, setMonth] = useState(new Date().getMonth() + 1);
   const [filterGroup, setFilterGroup] = useState('');
   const [tab, setTab] = useState('unpaid'); // 'unpaid' | 'partial'
@@ -44,9 +45,11 @@ export default function UnpaidStudents({ onQuickPay }) {
     return sum + getStudentFee(s, g);
   }, 0);
 
+  // BUG-02: "paid" كان يجمع payments.amount الخام — دفعة استُرِدَّت جزئياً تُبقي "المتبقي"
+  // أقل مما هو فعلاً. getNetRevenue تطرح أي استرداد فعّال (treasury_txn) لكل دفعة.
   const partialRemaining = partial.reduce((sum, s) => {
     const g = groups.find(g => g.id === s.groupId);
-    const paid = payments.filter(p => p.studentId === s.id && p.month === month && p.year === year).reduce((a, p) => a + p.amount, 0);
+    const paid = getNetRevenue(payments.filter(p => p.studentId === s.id && p.month === month && p.year === year), treasuryTxn);
     return sum + Math.max(0, getStudentFee(s, g) - paid);
   }, 0);
 
@@ -108,7 +111,8 @@ export default function UnpaidStudents({ onQuickPay }) {
             const group  = groups.find(g => g.id === student.groupId);
             const { bg, color } = av(student.name);
             const letters = student.name.split(' ').map(w=>w[0]).slice(0,2).join('');
-            const paidSoFar = payments.filter(p => p.studentId === student.id && p.month === month && p.year === year).reduce((s,p) => s+p.amount, 0);
+            // BUG-02: صافي بعد طرح أي استرداد فعّال — نفس منطق partialRemaining أعلاه.
+            const paidSoFar = getNetRevenue(payments.filter(p => p.studentId === student.id && p.month === month && p.year === year), treasuryTxn);
             const remaining = group ? Math.max(0, getStudentFee(student, group) - paidSoFar) : 0;
 
             return (

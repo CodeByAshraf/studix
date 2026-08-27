@@ -12,15 +12,22 @@ import {
 } from '../../utils/printStyles';
 
 import { STAGES, LEAD_STATUS, FOLLOWUP_TYPES, ADMISSION_PAYMENT_TYPES } from './mockData';
+import { getAdmissionTreasuryTotals } from '../../services/treasuryService';
 
-export function openAdmissionReport({ record, profile }) {
+export function openAdmissionReport({ record, profile, treasuryTxn = [] }) {
   if (!record) return;
 
   const stage = STAGES[record.stage] || STAGES.lead;
   const leadSt = LEAD_STATUS[record.leadStatus];
   const payments = record.payments || [];
   const followups = (record.followups || []).slice().sort((a, b) => new Date(a.at) - new Date(b.at));
+  // NEEDS BUSINESS DECISION (المُغلق الآن) — بيان مطبوع: جدول المدفوعات أدناه يعرض
+  // المبالغ الأصلية التاريخية لكل معاملة كما هي. totalPaid يبقى إجمالياً خاماً (Gross)
+  // مطابقاً لمجموع تلك الصفوف؛ الاسترداد الفعلي (لو وُجد) يُشتقّ من treasury_txn عبر
+  // admissionId — نفس مرجع الحقيقة المُستخدَم في لوحة تفاصيل القبول (DetailsPanel) —
+  // ويظهر كبند منفصل، والصافي = الإجمالي − المسترد.
   const totalPaid = payments.reduce((s, p) => s + (Number(p.amount) || 0), 0);
+  const { refund: refundedTotal, net: netPaid } = getAdmissionTreasuryTotals(record.id, treasuryTxn);
 
   // جدول المدفوعات
   const payRows = payments.map(p => {
@@ -58,6 +65,8 @@ export function openAdmissionReport({ record, profile }) {
     <div class="kpi-row">
       ${kpiHTML('المرحلة', stage.label, stage.color)}
       ${kpiHTML('إجمالي المدفوع', fmtMoney(totalPaid), PALETTE.green)}
+      ${refundedTotal > 0 ? kpiHTML('المسترد', fmtMoney(refundedTotal), PALETTE.red) : ''}
+      ${refundedTotal > 0 ? kpiHTML('الصافي', fmtMoney(netPaid), PALETTE.primary) : ''}
       ${kpiHTML('عدد المتابعات', followups.length, PALETTE.blue)}
       ${kpiHTML('تاريخ التسجيل', fmtDateShort(record.createdAt), PALETTE.purple)}
     </div>
@@ -89,10 +98,21 @@ export function openAdmissionReport({ record, profile }) {
         <tbody>
           ${payRows}
           <tr style="background:${PALETTE.surface}">
-            <td colspan="2" style="font-weight:800">الإجمالي</td>
+            <td colspan="2" style="font-weight:800">${refundedTotal > 0 ? 'الإجمالي (قبل الاسترداد)' : 'الإجمالي'}</td>
             <td class="num" style="font-weight:800;color:${PALETTE.green}">${fmtMoney(totalPaid)}</td>
             <td></td>
           </tr>
+          ${refundedTotal > 0 ? `
+          <tr style="background:${PALETTE.surface}">
+            <td colspan="2" style="font-weight:800">المسترد</td>
+            <td class="num" style="font-weight:800;color:${PALETTE.red}">${fmtMoney(refundedTotal)}</td>
+            <td></td>
+          </tr>
+          <tr style="background:${PALETTE.surface}">
+            <td colspan="2" style="font-weight:800">الصافي (بعد الاسترداد)</td>
+            <td class="num" style="font-weight:800;color:${PALETTE.primary}">${fmtMoney(netPaid)}</td>
+            <td></td>
+          </tr>` : ''}
         </tbody>
       </table>
     </div>` : ''}

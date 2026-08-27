@@ -1,5 +1,6 @@
 // src/services/groupService.js — Backend API version
 import { validate, hasErrors, sanitizeFormData, groupSchema, validators } from '../utils/validation';
+import { getRefundedAmount } from './paymentService';
 
 export const DAYS_AR = {
   sat:'السبت', sun:'الأحد', mon:'الاثنين', tue:'الثلاثاء',
@@ -68,12 +69,14 @@ export function updateGroup(id, data, existing = []) {
 
 
 // ── Client-side helpers ────────────────────────────────────────
-export function getGroupStats(group, students, payments, attendance) {
+export function getGroupStats(group, students, payments, attendance, treasuryTxn = []) {
   const groupStudents = students.filter(s => s.groupId === group.id && s.status === 'active');
   const allStudents   = students.filter(s => s.groupId === group.id);
   const month = new Date().getMonth() + 1;
   const monthlyPayments = payments.filter(p => p.groupId === group.id && p.month === month);
-  const collected = monthlyPayments.filter(p => p.status === 'paid').reduce((s,p) => s + p.amount, 0);
+  // BUG-02: كانت تجمع payments.amount الخام — دفعة استُرِدَّت جزئياً/كلياً تبقى محسوبة
+  // ضمن "المحصَّل" بكامل مبلغها، فتُضخِّم totalRevenue/collectionRate المُشتقّين منها.
+  const collected = monthlyPayments.filter(p => p.status === 'paid').reduce((s,p) => s + (p.amount - getRefundedAmount(p.id, treasuryTxn)), 0);
   // الإيراد المتوقع = مجموع رسوم كل طالب (رسوم الطالب الفردية أو سعر المجموعة احتياطياً)
   const expected  = groupStudents.reduce((sum, s) => {
     const fee = Number(s.monthlyFee);

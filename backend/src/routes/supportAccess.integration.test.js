@@ -48,6 +48,7 @@ describe('Support Access — Phase 4b backend core (real scratch database)', () 
   let requireSupportSession, requireRole;
   let verifySupportSessionToken;
   let verifySession, signSession;
+  let clearAuthCache;
 
   beforeAll(async () => {
     scratch = await setupScratchDb('supportaccess');
@@ -61,6 +62,7 @@ describe('Support Access — Phase 4b backend core (real scratch database)', () 
     ({ requireSupportSession, requireRole } = await import('../middleware/auth.js'));
     ({ verifySupportSessionToken } = await import('../lib/supportSession.js'));
     ({ verifySession, signSession } = await import('../lib/session.js'));
+    ({ clearAll: clearAuthCache } = await import('../lib/authCache.js'));
   }, 60_000);
 
   afterAll(async () => {
@@ -69,6 +71,10 @@ describe('Support Access — Phase 4b backend core (real scratch database)', () 
 
   beforeEach(async () => {
     clearAll();
+    // BUG-03 fix: requireRole now consults authCache (getAuthState) — clear it too, or a
+    // user id reused across tests (e.g. 'admin1') could resolve against a stale cached
+    // entry from a previous test's now-deleted row instead of a real, fresh DB lookup.
+    clearAuthCache();
     // one config row per test, cleanly reset — this table is a strict singleton (id=1,
     // CHECK id=1) so each test truncates and reseeds it rather than trying to reuse rows
     // across tests with different keys/installation setups.
@@ -362,23 +368,35 @@ describe('Support Access — Phase 4b backend core (real scratch database)', () 
   });
 
   describe('authorization — only an authenticated local admin (requireRole(\'admin\'), the exact guard server.js mounts)', () => {
-    it('a non-admin role is rejected with 403, next() never called', () => {
-      const { req, res, next } = mockReqRes({ role: 'teacher' });
-      requireRole('admin')(req, res, next);
+    // BUG-03 fix: requireRole now consults the live auth state (authCache/Postgres), not
+    // just the token's own frozen claims — these two tests need a real matching user row
+    // (with real version numbers) instead of the old bare-token mock, or they'd now
+    // legitimately fail closed (401, "session no longer valid") regardless of the role
+    // string in the mock token. This is the correct, intended new behavior — see
+    // middleware/auth.integration.test.js for the dedicated stale-privilege coverage.
+    it('a non-admin role is rejected with 403, next() never called', async () => {
+      const teacher = await client.users.create({ data: { id: 'support-teacher-1', name: 'Teacher', is_admin: false, active: true, role_id: null } });
+      const req = { user: { id: teacher.id, role: 'user', userAuthVersion: teacher.auth_version, roleAuthVersion: null }, headers: { cookie: '' } };
+      const res = { statusCode: null, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
+      const next = vi.fn();
+      await requireRole('admin')(req, res, next);
       expect(next).not.toHaveBeenCalled();
       expect(res.statusCode).toBe(403);
     });
 
-    it('no session at all is rejected with 403', () => {
+    it('no session at all is rejected with 403', async () => {
       const { req, res, next } = mockReqRes({});
-      requireRole('admin')(req, res, next);
+      await requireRole('admin')(req, res, next);
       expect(next).not.toHaveBeenCalled();
       expect(res.statusCode).toBe(403);
     });
 
-    it('an admin role passes through to next()', () => {
-      const { req, res, next } = mockReqRes({ role: 'admin' });
-      requireRole('admin')(req, res, next);
+    it('an admin role passes through to next()', async () => {
+      const admin = await seedAdminUser('support-admin-pass-1');
+      const req = { user: { id: admin.id, role: 'admin', userAuthVersion: admin.auth_version, roleAuthVersion: null }, headers: { cookie: '' } };
+      const res = { statusCode: null, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
+      const next = vi.fn();
+      await requireRole('admin')(req, res, next);
       expect(next).toHaveBeenCalledOnce();
     });
   });

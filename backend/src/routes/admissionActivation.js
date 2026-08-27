@@ -21,6 +21,7 @@
 //     بدل إكمال انتقال ضمني قد يُخفي تناقض بيانات حقيقياً موجوداً مسبقاً.
 // ─────────────────────────────────────────────────────────────────────────────
 import { Router } from 'express';
+import crypto from 'crypto';
 import { runInTransaction } from '../lib/transaction.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { snakeToCamel } from '../lib/caseMapper.js';

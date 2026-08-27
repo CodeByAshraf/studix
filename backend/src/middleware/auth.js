@@ -10,10 +10,22 @@
 // backend-only — لا موارد دعم محمية بعد)؛ مُصدَّرة الآن جاهزة لمراحل لاحقة، ومُختبَرة
 // مباشرة هنا. يفحص أيضاً السجل الحيّ في الذاكرة (supportAccessCache.js) — توكن موقّع
 // بشكل صحيح لكن مُلغى/منتهي في السجل يُرفَض رغم ذلك (فشل مغلَق مزدوج: توقيع + حالة حيّة).
+//
+// BUG-03 fix — requireRole سابقاً كان يقرأ req.user.role فقط (القيمة المُجمَّدة داخل
+// توكن الجلسة وقت تسجيل الدخول)، دون أي فحص للحالة الحيّة — بعكس requirePermission
+// (middleware/permissions.js) الذي يقارن userAuthVersion/roleAuthVersion/active الحيّة
+// دائماً عبر authCache. بما أن requireRole('admin') هو الحارس الوحيد على
+// /api/support-access/* و/api/license/* (أخطر قدرتين في التطبيق)، مدير أُلغيت صلاحيته أو
+// تغيّر دوره كان يبقى قادراً على استخدامهما بتوكن قديم حتى انتهاء صلاحيته (حتى 12 ساعة).
+// الإصلاح: نفس فحص الحالة الحيّة المُستخدَم في requirePermission بالضبط (active +
+// تطابق الإصدارين)، ثم إعادة اشتقاق الدور الحالي من state.isAdmin/state.roleId بنفس صيغة
+// signSession في session.js تماماً (role = isAdmin ? 'admin' : (roleId || 'user')) —
+// جلسة صحيحة وغير مُعدَّلة تستمرّ بالعمل بلا أي تغيير في السلوك.
 // ─────────────────────────────────────────────────────────────
 import { verifySession, SESSION_COOKIE_NAME } from '../lib/session.js';
 import { verifySupportSessionToken, SUPPORT_SESSION_COOKIE_NAME } from '../lib/supportSession.js';
 import { isSupportSessionActive } from '../lib/supportAccessCache.js';
+import { getAuthState } from '../lib/authCache.js';
 
 function parseCookies(header) {
   const out = {};
@@ -37,10 +49,32 @@ export function requireAuth(req, res, next) {
 }
 
 export function requireRole(...roles) {
-  return (req, res, next) => {
-    if (!req.user || !roles.includes(req.user.role)) {
+  return async (req, res, next) => {
+    if (!req.user) {
       return res.status(403).json({ ok: false, error: 'لا تملك صلاحية الوصول لهذا الإجراء.' });
     }
+
+    const state = await getAuthState(req.user.id);
+    if (!state || !state.active) {
+      return res.status(401).json({ ok: false, error: 'الجلسة لم تعد صالحة. الرجاء تسجيل الدخول مجدداً.' });
+    }
+
+    // نفس مقارنة الإصدار المُستخدَمة في requirePermission بالضبط — أي تغيير على الدور/
+    // الصلاحيات/الحالة منذ تسجيل الدخول يُبطل هذه الجلسة فوراً هنا أيضاً.
+    if (
+      state.userAuthVersion !== req.user.userAuthVersion ||
+      state.roleAuthVersion !== req.user.roleAuthVersion
+    ) {
+      return res.status(401).json({ ok: false, error: 'صلاحياتك تغيّرت. الرجاء تسجيل الدخول مجدداً.' });
+    }
+
+    // الدور الحالي، مُشتَقّ حيّاً بنفس صيغة signSession في session.js بالضبط — لا يُقرَأ
+    // أبداً من التوكن نفسه (قد يكون قديماً)، بل من authCache (مرآة لِـ Postgres).
+    const currentRole = state.isAdmin ? 'admin' : (state.roleId || 'user');
+    if (!roles.includes(currentRole)) {
+      return res.status(403).json({ ok: false, error: 'لا تملك صلاحية الوصول لهذا الإجراء.' });
+    }
+
     next();
   };
 }

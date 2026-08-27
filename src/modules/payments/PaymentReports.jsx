@@ -1,7 +1,7 @@
 // src/modules/payments/PaymentReports.jsx
 import { useState, useMemo } from 'react';
 import { useAppStore } from '../../store/app.store';
-import { MONTHS_AR, getMonthlyBreakdown, getRevenueByGroup, getStudentFee } from '../../services/paymentService';
+import { MONTHS_AR, getMonthlyBreakdown, getRevenueByGroup, getStudentFee, getRefundedAmount, getNetRevenue } from '../../services/paymentService';
 import { formatCurrency } from '../../utils/helpers';
 import { PrintHeader } from '../../components/shared';
 import { openPaymentsReportPrint, openStudentPaymentsReport } from './buildPaymentsReport';
@@ -61,6 +61,7 @@ export default function PaymentReports() {
   const groups               = useAppStore((s) => s.groups);
   const payments             = useAppStore((s) => s.payments);
   const students             = useAppStore((s) => s.students);
+  const treasuryTxn          = useAppStore((s) => s.treasuryTxn);
   const [reportTab, setReportTab] = useState('monthly');
   const [year, setYear] = useState(new Date().getFullYear());
   const centerProfile        = useAppStore((s) => s.centerProfile);
@@ -71,13 +72,13 @@ export default function PaymentReports() {
   const [printStudentId, setPrintStudentId] = useState('');
 
   // ── Monthly breakdown ─────────────────────────────────────
-  const monthly = useMemo(() => getMonthlyBreakdown(payments, year), [payments, year]);
+  const monthly = useMemo(() => getMonthlyBreakdown(payments, year, treasuryTxn), [payments, year, treasuryTxn]);
   const totalYear = monthly.reduce((s, m) => s + m.revenue, 0);
   const bestMonth = monthly.reduce((best, m) => m.revenue > best.revenue ? m : best, { revenue: 0, label: '—' });
   const avgMonthly = Math.round(totalYear / 12);
 
   // ── Group breakdown ───────────────────────────────────────
-  const byGroup = useMemo(() => getRevenueByGroup(payments, groups), [payments, groups]);
+  const byGroup = useMemo(() => getRevenueByGroup(payments, groups, treasuryTxn), [payments, groups, treasuryTxn]);
   const maxGroupRev = Math.max(...byGroup.map(g => g.revenue), 1);
 
   // ── Daily (current month) ─────────────────────────────────
@@ -89,7 +90,7 @@ export default function PaymentReports() {
     });
     const byDay = {};
     thisMonthPayments.forEach(p => {
-      byDay[p.date] = (byDay[p.date] || 0) + p.amount;
+      byDay[p.date] = (byDay[p.date] || 0) + (p.amount - getRefundedAmount(p.id, treasuryTxn));
     });
     return Object.entries(byDay)
       .sort(([a],[b]) => a.localeCompare(b))
@@ -98,7 +99,7 @@ export default function PaymentReports() {
         label: new Date(date).getDate() + '/' + (new Date(date).getMonth()+1),
         revenue,
       }));
-  }, [payments, currentMonth, year]);
+  }, [payments, currentMonth, year, treasuryTxn]);
 
   const dailyTotal = dailyData.reduce((s, d) => s + d.revenue, 0);
 
@@ -242,7 +243,7 @@ export default function PaymentReports() {
                   const groupActiveStudents = students.filter(s => s.groupId === g.id && s.status === 'active');
                   const studentCount = groupActiveStudents.length;
                   const expectedMonthly = groupActiveStudents.reduce((sum, s) => sum + getStudentFee(s, g), 0);
-                  const currentMonthRevenue = payments.filter(p => p.groupId === g.id && p.month === currentMonth && p.year === year).reduce((s,p) => s+p.amount, 0);
+                  const currentMonthRevenue = getNetRevenue(payments.filter(p => p.groupId === g.id && p.month === currentMonth && p.year === year), treasuryTxn);
                   const paymentRate = expectedMonthly > 0 ? Math.round(currentMonthRevenue/expectedMonthly*100) : 0;
                   return (
                     <tr key={g.id} onMouseOver={e=>Array.from(e.currentTarget.cells).forEach(td=>td.style.background='var(--surface2)')} onMouseOut={e=>Array.from(e.currentTarget.cells).forEach(td=>td.style.background='')}>
@@ -325,10 +326,10 @@ export default function PaymentReports() {
                 onClick={() => {
                   const group = groups.find(g => g.id === printGroupId);
                   if (printMode === 'group') {
-                    openPaymentsReportPrint({ group, month:printMonth, year, students, payments, profile:centerProfile });
+                    openPaymentsReportPrint({ group, month:printMonth, year, students, payments, profile:centerProfile, treasuryTxn });
                   } else {
                     const student = students.find(s => s.id === printStudentId);
-                    openStudentPaymentsReport({ student, group, payments, profile:centerProfile });
+                    openStudentPaymentsReport({ student, group, payments, profile:centerProfile, treasuryTxn });
                   }
                 }} style={{ marginTop:6 }}>
                 🖨 توليد الكشف وطباعته
