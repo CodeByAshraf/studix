@@ -14,6 +14,7 @@ import { createTreasurySlice }  from './slices/treasury.slice';
 import { createActivitySlice }  from './slices/activity.slice';
 import { createCenterProfileSlice } from './slices/centerProfile.slice';
 import { createAdmissionsSlice } from './slices/admissions.slice';
+import { createReportSettingsSlice } from './slices/reportSettings.slice';
 import { storage }              from '../hooks/useErrorHandler';
 
 // ── Store ─────────────────────────────────────────────────────
@@ -35,6 +36,7 @@ export const useAppStore = create()(
         ...createActivitySlice(set, get),
         ...createCenterProfileSlice(set, get),
         ...createAdmissionsSlice(set, get),
+        ...createReportSettingsSlice(set, get),
 
         // ── Backup ────────────────────────────────────────────────
         exportBackup: (currentUserId) => {
@@ -116,6 +118,7 @@ export const useAppStore = create()(
           admissionFollowups: state.admissionFollowups,
           admissionSystemLog: state.admissionSystemLog,
           admissionPayments:  state.admissionPayments,
+          reportConfig:       state.reportConfig,
         }),
       }
     ),

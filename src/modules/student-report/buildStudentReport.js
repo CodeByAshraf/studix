@@ -50,7 +50,7 @@ export function generateStudentReport(studentId, store, { profile = {}, generate
 
   // ── الصفحات التفصيلية ──
   const sections = [];
-  if (cfg.showEvaluation)       sections.push(healthScoreSection(data));
+  if (cfg.showHealthScore)      sections.push(healthScoreSection(data));
   if (cfg.showProfile)          sections.push(profileSection(data));
   if (cfg.showFinancials)       sections.push(financialSection(data));
   if (cfg.showAttendance)       sections.push(attendanceSection(data));

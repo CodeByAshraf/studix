@@ -50,7 +50,17 @@ export function buildReportMeta({
 // ─────────────────────────────────────────────────────────────────────────────
 // إعدادات التقرير الافتراضية — تسمح بنسخ مختلفة (كامل/مختصر/مالي...)
 // ─────────────────────────────────────────────────────────────────────────────
+// showHealthScore is a distinct flag from showEvaluation (added for the configurable
+// Student Report settings feature — see src/modules/settings/ReportSettingsSection.jsx):
+// buildStudentReport.js previously gated BOTH the "درجة الصحة الأكاديمية" (Health Score)
+// section AND the "الملخص التنفيذي الذكي" (AI Summary) section behind the single
+// showEvaluation flag, making them impossible to toggle independently even though they are
+// presented as two separate settings. showHealthScore now gates only the Health Score
+// section; showEvaluation continues to gate only the AI Summary section (its original,
+// narrower meaning). Both default to true, so default behavior is unchanged.
 export const DEFAULT_REPORT_CONFIG = Object.freeze({
+  showSnapshot:      true,
+  showHealthScore:   true,
   showProfile:       true,
   showFinancials:    true,
   showAttendance:    true,
@@ -61,7 +71,6 @@ export const DEFAULT_REPORT_CONFIG = Object.freeze({
   showBooklets:      true,
   showCharts:        true,
   showEvaluation:    true,
-  showSnapshot:      true,
   showSignature:     true,
 });
 

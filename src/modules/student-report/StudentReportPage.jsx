@@ -162,6 +162,9 @@ export default function StudentReportPage() {
   const communications = useAppStore(s => s.communications);
   const inventoryTxn   = useAppStore(s => s.inventoryTxn);
   const treasuryTxn    = useAppStore(s => s.treasuryTxn);
+  // إعدادات أقسام التقرير الاحترافي (Settings ← أقسام التقرير) — محلية، منظّمة الأصل
+  // (نفس نمط centerProfile)، انظر src/store/slices/reportSettings.slice.js.
+  const reportConfig   = useAppStore(s => s.reportConfig);
   // matDist مُشتَق من inventoryTxn (المُزامَن إقلاعياً بالفعل) — لا حالة مستقلة بعد الآن.
   const matDist = useMemo(() => deriveMatDist(inventoryTxn), [inventoryTxn]);
   const { currentUser } = useAuth();
@@ -351,7 +354,7 @@ export default function StudentReportPage() {
               onMouseOut={e =>{e.currentTarget.style.background='var(--surface2)';e.currentTarget.style.color='var(--text2)';}}>
               🖨 طباعة / PDF
             </button>
-            <button onClick={() => generateStudentReport(student.id, fullStore, { profile: centerProfile, generatedBy: currentUserName })}
+            <button onClick={() => generateStudentReport(student.id, fullStore, { profile: centerProfile, generatedBy: currentUserName, config: reportConfig })}
               style={{ display:'flex', alignItems:'center', gap:7, padding:'9px 18px', borderRadius:10, border:'none', background:'#2563eb', color:'#fff', fontSize:'0.88rem', fontWeight:700, cursor:'pointer', transition:'opacity .15s' }}
               onMouseOver={e=>{e.currentTarget.style.opacity='0.9';}}
               onMouseOut={e =>{e.currentTarget.style.opacity='1';}}>

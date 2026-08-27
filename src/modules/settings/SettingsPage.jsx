@@ -9,6 +9,7 @@ import { SectionBoundary } from '../../components/ErrorBoundary';
 import { ConfirmModal } from '../../components/ui/Modal';
 import { useToast } from '../../components/Toast';
 import { pgCheckHealth, pgUpdateCenterProfile } from '../../services/api';
+import ReportSettingsSection from './ReportSettingsSection';
 
 // ── حالة الاتصال: نفس منطق الألوان المستخدَم في DBStatusBadge (src/hooks/useDB.jsx) ──
 const DB_STATUS_META = {
@@ -318,6 +319,9 @@ export default function SettingsPage() {
             </div>
           </div>
         </SectionBoundary>
+
+        {/* ══ أقسام تقرير الطالب الاحترافي (Admin فقط) ═════════ */}
+        {isAdmin && <ReportSettingsSection/>}
 
         {/* ══ النسخ الاحتياطي ═════════════════════════════════ */}
         <SectionBoundary label="Backup">
