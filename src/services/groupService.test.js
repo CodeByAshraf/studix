@@ -77,3 +77,56 @@ describe('getGroupStats — collected/totalRevenue/collectionRate net out active
     expect(stats.totalRevenue).toBe(1000);
   });
 });
+
+// BUG-06 — monthlyPayments filtered by month number only, never by year (the same
+// "MEDIUM-A Finding 1" pattern already fixed in ReportsPage.jsx/FinancialAnalytics.jsx/
+// UnpaidStudents.jsx/PaymentsPage.jsx, missed here). A payment from the same month number
+// in a past year was counted into "this month"'s collected/totalRevenue/collectionRate.
+describe('getGroupStats — monthly figures are year-aware (BUG-06)', () => {
+  it('a payment from the current month AND current year is included', () => {
+    const now = new Date();
+    const students = studentsFor(['s1']);
+    const payments = [{ id: 'p1', studentId: 's1', groupId: 'g1', amount: 1000, status: 'paid', month: now.getMonth() + 1, year: now.getFullYear() }];
+    const stats = getGroupStats(GROUP, students, payments, [], []);
+    expect(stats.monthlyCollected).toBe(1000);
+    expect(stats.totalRevenue).toBe(1000);
+    expect(stats.collectionRate).toBe(100);
+  });
+
+  it('a payment from the same month number but a PAST year is excluded', () => {
+    const now = new Date();
+    const students = studentsFor(['s1']);
+    const payments = [{ id: 'p1', studentId: 's1', groupId: 'g1', amount: 1000, status: 'paid', month: now.getMonth() + 1, year: now.getFullYear() - 1 }];
+    const stats = getGroupStats(GROUP, students, payments, [], []);
+    expect(stats.monthlyCollected).toBe(0);
+    expect(stats.totalRevenue).toBe(0);
+    expect(stats.collectionRate).toBe(0);
+  });
+
+  it('an active refund is still deducted from the year-filtered total', () => {
+    const now = new Date();
+    const students = studentsFor(['s1']);
+    const payments = [{ id: 'p1', studentId: 's1', groupId: 'g1', amount: 1000, status: 'paid', month: now.getMonth() + 1, year: now.getFullYear() }];
+    const treasuryTxn = [{ paymentId: 'p1', refType: 'refund', status: 'active', amount: 300 }];
+    const stats = getGroupStats(GROUP, students, payments, [], treasuryTxn);
+    expect(stats.monthlyCollected).toBe(700);
+    expect(stats.collectionRate).toBe(70);
+  });
+
+  it('a cancelled (inactive) refund is not deducted from the year-filtered total', () => {
+    const now = new Date();
+    const students = studentsFor(['s1']);
+    const payments = [{ id: 'p1', studentId: 's1', groupId: 'g1', amount: 1000, status: 'paid', month: now.getMonth() + 1, year: now.getFullYear() }];
+    const treasuryTxn = [{ paymentId: 'p1', refType: 'refund', status: 'cancelled', amount: 300 }];
+    const stats = getGroupStats(GROUP, students, payments, [], treasuryTxn);
+    expect(stats.monthlyCollected).toBe(1000);
+  });
+
+  it('no payments at all -> collected/totalRevenue/collectionRate are all 0, not NaN/crash', () => {
+    const students = studentsFor(['s1']);
+    const stats = getGroupStats(GROUP, students, [], [], []);
+    expect(stats.monthlyCollected).toBe(0);
+    expect(stats.totalRevenue).toBe(0);
+    expect(stats.collectionRate).toBe(0);
+  });
+});

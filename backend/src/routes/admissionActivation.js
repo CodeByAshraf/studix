@@ -124,10 +124,26 @@ export async function activateAdmission({ admissionId, student: studentInput }, 
       data: { id: crypto.randomUUID(), code, ...studentData },
     });
 
-    const updatedAdmission = await tx.admissions.update({
-      where: { id: admissionId },
-      data: { stage: 'active', student_id: student.id, last_modified_by: userId, last_modified_at: new Date() },
+    // حارس ذرّي ضد سباق تفعيل مزدوج: القراءة أعلاه (admission، بداية الدالة) وحدها غير
+    // كافية — قراءة عادية لا تأخذ قفلاً، فطلبان متزامنان قد يريا كلاهما student_id=null
+    // قبل أن يكتب أيّ منهما شيئاً (اكتُشف هذا فعلياً في نفس هذا النمط بالضبط في
+    // reverseTreasuryTxn وcancelAdmissionWithRefund). الإصلاح: شرط student_id:null
+    // يُنقَل إلى الـ WHERE في UPDATE نفسه بدل أن يبقى فحصاً تطبيقياً منفصلاً عن الكتابة
+    // — Postgres يُسرِّي (serializes) عبر قفل الصف الذي يفرضه UPDATE نفسه: الطلب الثاني
+    // يُحجَب خلف معاملة الأول حتى تُثبَّت (commit)، ثم يُعاد تقييم WHERE مقابل الحالة
+    // المُثبَّتة الفعلية — فيُطابِق صفراً من الصفوف إن كان student_id قد أصبح غير null
+    // بالفعل، فيُرفَض بدل أن يُكمِل الكتابة فوق student_id الفائز الأول. الطالب الذي
+    // أُنشئ للتو أعلاه (tx.students.create) لم يُثبَّت بعد بالقاعدة — رمي استثناء هنا
+    // يُلغي المعاملة التفاعلية بأكملها تلقائياً (Prisma $transaction rollback)، فلا طالب
+    // يتيم يصل القاعدة إطلاقاً؛ نفس ضمان عدم-اليُتم المُثبَت فعلياً في reverseTreasuryTxn.
+    const { count } = await tx.admissions.updateMany({
+      where: { id: admissionId, student_id: null },
+      data:  { stage: 'active', student_id: student.id, last_modified_by: userId, last_modified_at: new Date() },
     });
+    if (count !== 1) {
+      throw badRequest('سجل القبول تم تفعيله للتو من طلب آخر متزامن — تحقّق من حالته الحالية.');
+    }
+    const updatedAdmission = await tx.admissions.findUnique({ where: { id: admissionId } });
 
     const firstLessonLog = await tx.admission_system_log.create({
       data: { id: crypto.randomUUID(), admission_id: admissionId, activity_type: 'firstLesson', by_user: userId },

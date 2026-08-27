@@ -124,6 +124,32 @@ export const useAppStore = create()(
   )
 );
 
+// ── BUG-04: session-boundary reset ─────────────────────────────────────────────
+// نقطة مركزية واحدة (لا حراسة مخصّصة في كل شاشة) تُستدعى من auth.context.jsx عند
+// حدود الجلسة (تسجيل خروج، وقبل إعادة المزامنة بعد تسجيل دخول ناجح). بدونها، persist
+// (أعلاه) يُبقي كل هذه المجموعات في localStorage['studix-v1'] بلا أي تغيير عبر تسجيل
+// الخروج — فمستخدم لاحق أقل صلاحية على نفس المتصفح (جهاز استقبال مُشترَك مثلاً) كان
+// يستمرّ يرى بيانات مالية/تجارية حقيقية من جلسة المستخدم السابق (مثال حقيقي مؤكَّد:
+// إيراد Dashboard.jsx يُقرَأ من payments/treasuryTxn المخزَّنين مباشرة، بلا فحص صلاحية
+// على مستوى الحقل — الحماية الوحيدة قبل هذا الإصلاح كانت صلاحية المسار 'dashboard'
+// نفسها، منفصلة تماماً عن صلاحيتَي 'payments'/'treasury' الفعليتين).
+//
+// عمداً لا يُصفِّر centerProfile/inventorySettings/treasuryMeta — هذه إعدادات تنظيمية
+// للمركز نفسه (اسم/شعار/حدود مخزون...)، لا سجلات جلسة مستخدم حسّاسة، ولا داعي لمسحها
+// (قرار صريح: "لا تمسح إعدادات غير ذات صلة إلا عند الضرورة").
+export function resetAppStore() {
+  useAppStore.setState({
+    students: [], groups: [], payments: [], attendance: [], absenceFollowup: [],
+    exams: [], grades: [], homeworks: [], hwSubmissions: [], materials: [],
+    invMaterials: [], inventoryTxn: [], communications: [], commTasks: [],
+    parents: [], waReportLog: [], cashboxes: [], treasuryTxn: [], activityLogs: [],
+    admissions: [], admissionFollowups: [], admissionSystemLog: [], admissionPayments: [],
+  });
+  // يمسح المفتاح الفعلي في localStorage أيضاً (لا يكتفي بالذاكرة) — دفاع إضافي: لو
+  // تعطّلت الصفحة قبل أن تُثبَّت أول عملية تحميل (rehydrate) لاحقة، لا يبقى أي أثر قديم.
+  try { useAppStore.persist.clearStorage(); } catch {}
+}
+
 // ── Selectors ─────────────────────────────────────────────────
 export const useStudents     = () => useAppStore((s) => s.students);
 export const useGroups       = () => useAppStore((s) => s.groups);

@@ -73,7 +73,11 @@ export function getGroupStats(group, students, payments, attendance, treasuryTxn
   const groupStudents = students.filter(s => s.groupId === group.id && s.status === 'active');
   const allStudents   = students.filter(s => s.groupId === group.id);
   const month = new Date().getMonth() + 1;
-  const monthlyPayments = payments.filter(p => p.groupId === group.id && p.month === month);
+  const year  = new Date().getFullYear();
+  // BUG-06: كانت تفلتر بالشهر فقط دون السنة — دفعة من نفس رقم الشهر في سنة سابقة كانت
+  // تُحسَب ضمن "هذا الشهر" (نفس نمط "MEDIUM-A Finding 1" المُصلَح في كل مكان آخر —
+  // ReportsPage.jsx/FinancialAnalytics.jsx/UnpaidStudents.jsx/PaymentsPage.jsx).
+  const monthlyPayments = payments.filter(p => p.groupId === group.id && p.month === month && (!p.year || p.year === year || p.date?.startsWith(`${year}`)));
   // BUG-02: كانت تجمع payments.amount الخام — دفعة استُرِدَّت جزئياً/كلياً تبقى محسوبة
   // ضمن "المحصَّل" بكامل مبلغها، فتُضخِّم totalRevenue/collectionRate المُشتقّين منها.
   const collected = monthlyPayments.filter(p => p.status === 'paid').reduce((s,p) => s + (p.amount - getRefundedAmount(p.id, treasuryTxn)), 0);

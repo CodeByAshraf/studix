@@ -6,6 +6,8 @@ import { INITIAL_TEACHERS } from '../data/initialData';
 import { pgLogin, pgLogout, BackendUnreachableError } from '../services/api';
 import { AUTH_CONFIG } from '../config/app.config';
 import { storage } from '../hooks/useErrorHandler';
+import { useAppStore, resetAppStore } from './app.store';
+import { loadFromPostgres } from './db.middleware';
 
 // Stabilization phase (Decision 6/Correction — Identity Reconciliation): PostgreSQL
 // هو مصدر الحقيقة الوحيد لـ users/roles/permissions الآن. لا مزيد من
@@ -127,6 +129,14 @@ export function AuthProvider({ children, onLogin }) {
     setCurrentUser(safeUser);
     setIsLoggedIn(true);
     saveSession(safeUser);
+    // BUG-04: يُصفِّر أي بيانات مالية/تجارية بقيت في الذاكرة/localStorage من جلسة
+    // مستخدم سابق على نفس المتصفح (لو خرج بلا استدعاء logout() نظيفاً — تبويب أُغلِق
+    // مباشرة مثلاً) قبل أن تُعاد المزامنة من الخادم بصلاحيات هذا المستخدم الجديد فقط —
+    // best-effort غير مُنتظَر عمداً (نفس فلسفة المزامنة الأصلية في useDB.jsx: الواجهة
+    // تُعرَض فوراً، والبيانات تمتلئ لاحقاً بلا حجب الدخول نفسه).
+    resetAppStore();
+    loadFromPostgres((updater) => useAppStore.setState(updater))
+      .catch((e) => console.error('[auth] فشل إعادة المزامنة بعد تسجيل الدخول:', e.message));
     onLogin?.({ userId: safeUser.id, userName: safeUser.name || safeUser.id });
     // name مُعاد هنا أيضاً صراحة — استدعاء login() لا يرى currentUser المحدَّث في
     // نفس اللفّة (تحديث state غير متزامن)، فأي مستهلك يحتاج الاسم فوراً بعد نجاح
@@ -140,6 +150,10 @@ export function AuthProvider({ children, onLogin }) {
     setIsLoggedIn(false);
     setCurrentUser(null);
     clearSession();
+    // BUG-04: نقطة الحدّ المركزية الثانية — يُصفِّر كل البيانات المالية/التجارية
+    // المخزَّنة محلياً فور الخروج، بدل تركها في localStorage['studix-v1'] بانتظار
+    // مستخدم لاحق (انظر التعليق الكامل في resetAppStore، app.store.js).
+    resetAppStore();
   }, [currentUser]);
 
   const value = useMemo(() => ({
