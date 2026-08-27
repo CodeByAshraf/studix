@@ -6,6 +6,7 @@ import { SectionBoundary } from '../components/ErrorBoundary';
 import { PageHeader } from '../components/shared';
 import { KpiCard, KpiGrid } from '../components/ui';
 import { formatCurrency } from '../utils/helpers';
+import { getNetRevenue } from '../services/paymentService';
 
 // ── Mini bar chart component ─────────────────────────────────
 function BarRow({ label, value, max, color = 'var(--accent)' }) {
@@ -150,19 +151,35 @@ export default function Dashboard() {
   const students      = useAppStore((s) => s.students);
   const groups        = useAppStore((s) => s.groups);
   const payments      = useAppStore((s) => s.payments);
+  const treasuryTxn   = useAppStore((s) => s.treasuryTxn);
   const attendance    = useAppStore((s) => s.attendance);
   const activityLogs  = useAppStore((s) => s.activityLogs);
   const { notifications, navigate } = useUI();
 
+  // BUG-02 (remaining part, final sweep): كانت "إيراد مارس" ثابتة على شهر مارس (month===3)
+  // بغضّ النظر عن التاريخ الفعلي، وتجمع payments.amount الخام دون طرح أي استرداد فعّال —
+  // نفس نمط BUG-02 المُصلَح في كل مكان آخر. الآن: الشهر الحالي فعلياً (بنفس منطق
+  // ReportsPage.jsx/FinancialAnalytics.jsx)، وصافٍ عبر getNetRevenue (لا منطق استرداد
+  // مكرَّر)، مع نسبة نمو حقيقية مقارنةً بالشهر السابق (نفس نمط FinancialAnalytics.jsx
+  // بالضبط) بدل نص "+12%" ثابت.
   const stats = useMemo(() => {
+    const now           = new Date();
+    const currentMonth  = now.getMonth() + 1;
+    const currentYear   = now.getFullYear();
+    const lastMonthNum  = currentMonth === 1 ? 12 : currentMonth - 1;
+    const lastMonthYear = currentMonth === 1 ? currentYear - 1 : currentYear;
+
     const activeStudents = students.filter(s => s.status === 'active').length;
-    const marchPaid      = [...new Set(payments.filter(p => p.month === 3 && p.status === 'paid').map(p => p.studentId))].length;
-    const marchRev       = payments.filter(p => p.month === 3).reduce((a, p) => a + p.amount, 0);
+    const monthPayments  = payments.filter(p => p.month === currentMonth && (!p.year || p.year === currentYear));
+    const monthPaid      = [...new Set(monthPayments.filter(p => p.status === 'paid').map(p => p.studentId))].length;
+    const monthRev       = getNetRevenue(monthPayments, treasuryTxn);
+    const lastMonthRev   = getNetRevenue(payments.filter(p => p.month === lastMonthNum && (!p.year || p.year === lastMonthYear)), treasuryTxn);
+    const revGrowth      = lastMonthRev > 0 ? Math.round(((monthRev - lastMonthRev) / lastMonthRev) * 100) : null;
     const attRecs        = attendance.slice(-50);
     const attPct         = attRecs.length ? Math.round(attRecs.filter(a => a.status === 'present').length / attRecs.length * 100) : null;
     const unread         = notifications.filter(n => !n.read).length;
-    return { activeStudents, marchPaid, marchRev, attPct, unread };
-  }, [students, payments, attendance, notifications]);
+    return { activeStudents, monthPaid, monthRev, revGrowth, attPct, unread };
+  }, [students, payments, treasuryTxn, attendance, notifications]);
 
   const QUICK_ACTIONS = [
     { icon:'👤', label:'تسجيل طالب',   sub:'إضافة جديد',      bg:'rgba(59,130,246,.1)',  color:'#3b82f6',  page:'students'      },
@@ -245,9 +262,9 @@ export default function Dashboard() {
             onClick={() => navigate('students')}
           />
           <KpiCard
-            icon="💰" label="إيراد مارس"
-            value={formatCurrency(stats.marchRev)} sub={`${stats.marchPaid} طالب دفع`}
-            trend="↑ +12% عن فبراير" trendUp={true}
+            icon="💰" label="إيراد هذا الشهر"
+            value={formatCurrency(stats.monthRev)} sub={`${stats.monthPaid} طالب دفع`}
+            trend={stats.revGrowth}
             onClick={() => navigate('payments')}
           />
           <KpiCard
