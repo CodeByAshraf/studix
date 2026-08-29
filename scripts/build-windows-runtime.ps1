@@ -110,16 +110,17 @@ Copy-Item -Recurse -Force (Join-Path $Backend 'migrations') (Join-Path $OutBacke
 Copy-Item -Recurse -Force (Join-Path $Backend 'prisma') (Join-Path $OutBackend 'prisma')
 
 # backend/scripts — bootstrapDatabase.js/runMigrations.js/adminCreate.js/
-# generateProductionConfig.js/provisionPostgres.js are the only way to get a fresh install
-# operational before INSTALL-04's first-run wizard exists (generateProductionConfig.js added by
-# INSTALL-02; provisionPostgres.js added by INSTALL-03 — the bundled-PostgreSQL initialization
-# entry point INSTALL-05/06 will invoke, before generateProductionConfig.js on a fresh install
-# per the sequencing contract in migration/reports/INSTALL-03_POSTGRES_PROVISIONING_DESIGN.md).
-# Excludes generateSchemaArtifact.js deliberately: a maintainer-only tool that regenerates
-# studix-schema.sql from a live scratch DB via pg_dump — never invoked by the running app or
-# by any installation step, out of place in a customer-facing runtime package.
+# generateProductionConfig.js/provisionPostgres.js/manageWindowsServices.js are the only way to
+# get a fresh install operational before INSTALL-04's first-run wizard exists
+# (generateProductionConfig.js added by INSTALL-02; provisionPostgres.js by INSTALL-03;
+# manageWindowsServices.js by INSTALL-05 — the Windows-service register/start/stop/status/
+# unregister entry point INSTALL-06's installer will invoke, for both StudixPostgreSQL and
+# StudixApp, per migration/reports/INSTALL-03_POSTGRES_PROVISIONING_DESIGN.md's sequencing
+# contract). Excludes generateSchemaArtifact.js deliberately: a maintainer-only tool that
+# regenerates studix-schema.sql from a live scratch DB via pg_dump — never invoked by the
+# running app or by any installation step, out of place in a customer-facing runtime package.
 New-Item -ItemType Directory -Force -Path (Join-Path $OutBackend 'scripts') | Out-Null
-foreach ($f in @('bootstrapDatabase.js', 'runMigrations.js', 'adminCreate.js', 'generateProductionConfig.js', 'provisionPostgres.js')) {
+foreach ($f in @('bootstrapDatabase.js', 'runMigrations.js', 'adminCreate.js', 'generateProductionConfig.js', 'provisionPostgres.js', 'manageWindowsServices.js')) {
     Copy-Item -Force (Join-Path $Backend "scripts\$f") (Join-Path $OutBackend "scripts\$f")
 }
 
