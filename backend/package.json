@@ -10,6 +10,7 @@
     "db:generate": "prisma generate",
     "db:studio": "prisma studio",
     "admin:create": "node scripts/adminCreate.js",
+    "config:generate": "node scripts/generateProductionConfig.js",
     "test": "vitest run",
     "test:integration": "vitest run --config vitest.integration.config.js"
   },
