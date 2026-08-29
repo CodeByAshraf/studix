@@ -20,6 +20,10 @@ backend/node_modules/
 # =========================
 dist/
 
+# Windows runtime package assembled by scripts/build-windows-runtime.ps1 (INSTALL-01) —
+# generated, includes a copy of node.exe and installed node_modules, never committed.
+release/
+
 # =========================
 # Logs
 # =========================
