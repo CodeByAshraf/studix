@@ -34,6 +34,7 @@ import ActivationGate                             from './modules/activation/Act
 // كل صفحة لها دالة تحميل منفصلة حتى نتمكن من الـ prefetch في الخلفية.
 const loaders = {
   login:         () => import('./modules/LoginScreen'),
+  setup:         () => import('./modules/setup/SetupWizard'),
   dashboard:     () => import('./modules/Dashboard'),
   students:      () => import('./modules/students/StudentsPage'),
   admissions:    () => import('./modules/admissions/AdmissionsPage'),
@@ -71,6 +72,7 @@ function prefetchAllPages() {
 }
 
 const LoginScreen       = lazy(loaders.login);
+const SetupWizard       = lazy(loaders.setup);
 const Dashboard         = lazy(loaders.dashboard);
 const StudentsPage      = lazy(loaders.students);
 const AdmissionsPage    = lazy(loaders.admissions);
@@ -185,6 +187,23 @@ function AppRoutes() {
               </Suspense>
             </ErrorBoundary>
           )
+      }/>
+
+      {/* INSTALL-04 — First-Run Setup: public, outside ProtectedRoute, same shape as /login.
+          SetupWizard itself decides whether to render the form, redirect to /login (setup
+          already closed), or redirect to / (already logged in) — see its own header comment. */}
+      <Route path="/setup" element={
+        <ErrorBoundary label="الإعداد الأولي">
+          <Suspense fallback={
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'center',
+              height:'100vh', background:'#0a1628', color:'#4a9994',
+              fontSize:16, fontFamily:'Cairo,sans-serif' }}>
+              ⏳ جاري التحميل...
+            </div>
+          }>
+            <SetupWizard/>
+          </Suspense>
+        </ErrorBoundary>
       }/>
 
       {/* Protected app routes */}

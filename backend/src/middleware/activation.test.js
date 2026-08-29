@@ -37,6 +37,11 @@ describe('isActivationExempt — allowlist path matching', () => {
     expect(isActivationExempt('/api/support-access/revoke')).toBe(true);
   });
 
+  it('exempts /api/setup and its sub-paths (INSTALL-04)', () => {
+    expect(isActivationExempt('/api/setup')).toBe(true);
+    expect(isActivationExempt('/api/setup/status')).toBe(true);
+  });
+
   it('does NOT exempt ordinary business API routes', () => {
     expect(isActivationExempt('/api/students')).toBe(false);
     expect(isActivationExempt('/api/users')).toBe(false);
@@ -49,5 +54,6 @@ describe('isActivationExempt — allowlist path matching', () => {
     expect(isActivationExempt('/api/sessionx')).toBe(false);
     expect(isActivationExempt('/api/licensexyz')).toBe(false);
     expect(isActivationExempt('/api/support-accessorama')).toBe(false);
+    expect(isActivationExempt('/api/setupxyz')).toBe(false);
   });
 });

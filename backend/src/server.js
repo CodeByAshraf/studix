@@ -31,6 +31,7 @@ import { fileURLToPath } from 'url';
 
 import healthRouter from './routes/health.js';
 import sessionRouter from './routes/session.js';
+import setupRouter from './routes/setup.js';
 import { makeCrudRouter } from './routes/crud.js';
 import attendanceSessionsRouter from './routes/attendanceSessions.js';
 import examDeleteRouter from './routes/examDelete.js';
@@ -148,6 +149,12 @@ app.use('/health', healthRouter);
 app.use('/api/session', sessionRouter);
 // أداة ترحيل حساب المدير الأول: أُزيلت في Phase 3B-1 بعد اكتمال الترحيل
 // (users=1 فعلياً، ولا كود frontend/production يستخدمها — انظر تقرير Phase 3B-1).
+
+// ── INSTALL-04: الإعداد الأولي (First-Run Setup) — لا تتطلّب جلسة سابقة بطبيعتها، ولا
+// requireAuth/requirePermission: db/firstAdmin.js يفرض قفله الخاص (صفر مدير نشط) داخلياً،
+// مستقلاً تماماً عن أي حارس هنا. مُستثنًى من requireActivation أعلاه صراحة (middleware/
+// activation.js) لنفس سبب استثناء /api/license بالضبط.
+app.use('/api/setup', setupRouter);
 
 // ── Phase 3B-4 (تحضيري): استبدال جلسة حضور كاملة بمعاملة ذرّية واحدة ──
 // مسار منفصل عن /api/attendance العام (makeCrudRouter) لأن SessionMarking يحفظ

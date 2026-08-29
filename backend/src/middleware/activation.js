@@ -15,7 +15,10 @@
 import { getLicenseStatus } from '../lib/license.js';
 
 // القائمة البيضاء قصيرة وصريحة عمداً — يجب أن تبقى كذلك.
-const ALLOWLISTED_API_PREFIXES = ['/api/session', '/api/license', '/api/support-access'];
+// INSTALL-04: /api/setup أُضيف لنفس السبب بالضبط الذي أُضيف له /api/license — لا يجوز أن
+// يتطلّب إنشاء المدير الأول (وهو ما يجعل تسجيل الدخول ممكناً من الأساس) تفعيلاً مسبقاً؛
+// endpoint نفسه يفرض قفله الخاص (صفر مدير نشط) بشكل مستقل تماماً عن هذا الفحص.
+const ALLOWLISTED_API_PREFIXES = ['/api/session', '/api/license', '/api/support-access', '/api/setup'];
 
 // isActivationExempt: أي طلب ليس تحت /api/ إطلاقاً (ملفات ثابتة، مسارات SPA من جهة العميل،
 // الجذر /) يُستثنى تلقائياً — التفعيل مصدر قلق على مستوى الـ API فقط، لا تحميل الصفحة نفسها
