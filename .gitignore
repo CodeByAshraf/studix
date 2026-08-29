@@ -24,6 +24,10 @@ dist/
 # generated, includes a copy of node.exe and installed node_modules, never committed.
 release/
 
+# Inno Setup's compiled installer output (INSTALL-06, installer/studix.iss's default Output\
+# dir) — a generated multi-hundred-MB .exe, never committed, same reasoning as release/ above.
+installer/Output/
+
 # =========================
 # Logs
 # =========================

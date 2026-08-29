@@ -1,0 +1,20 @@
+{
+  "_comment": "INSTALL-06 — pinned third-party binary versions for the assembled Windows runtime package. Neither vendor publishes an official SHA256 for these specific archives (verified during the INSTALL-06 audit) — sha256 values below are self-established: downloaded once, sanity-checked (file version/size/content, matching the pinned version exactly), hashed, and committed here as the trusted value all future automated builds verify against. scripts/fetchWindowsRuntimeDependencies.js refuses to run against a still-placeholder value — it never treats an unverified download as trusted.",
+  "postgresql": {
+    "version": "18.6",
+    "landingPage": "https://www.enterprisedb.com/download-postgresql-binaries",
+    "_urlNote": "EDB's real download URL is https://sbp.enterprisedb.com/getfile.jsp?fileid=<opaque numeric id> (confirmed via a third-party open-source acquisition script that documents this exact mechanism) — the id is only discoverable by loading the landing page above, which returned HTTP 403 to every access method tried in this session (both a dedicated web-fetch tool and PowerShell Invoke-WebRequest, against both the '-binaries' page and the general downloads page). NOT guessed — still unresolved, see migration/reports/INSTALL-06_INSTALLER_DESIGN.md for the full trace.",
+    "url": "REPLACE_WITH_CONFIRMED_DIRECT_DOWNLOAD_URL_FROM_LANDING_PAGE",
+    "expectedFilenamePattern": "postgresql-18.6-*-windows-x64-binaries.zip",
+    "sha256": "REPLACE_WITH_MANUALLY_VERIFIED_SHA256_BEFORE_USE",
+    "extractTo": "pgsql"
+  },
+  "nssm": {
+    "version": "2.24-101-g897c7ad",
+    "url": "https://nssm.cc/ci/nssm-2.24-101-g897c7ad.zip",
+    "_verifiedNote": "Downloaded for real, extracted, and sanity-checked in this session: win64\\nssm.exe reports FileVersion '2.24-101-g897c7ad', ProductName 'NSSM 64-bit', CompanyName 'Iain Patterson' (the real NSSM author) — matches the pinned version exactly. Not code-signed (expected/normal for NSSM releases — this checksum is the compensating control).",
+    "sha256": "99f5045fffbffb745d67fe3a065a953c4a3d9c253b868892d9b685b0ee7d07b8",
+    "extractSourceSubpath": "nssm-2.24-101-g897c7ad/win64/nssm.exe",
+    "extractTo": "tools/nssm.exe"
+  }
+}

@@ -12,9 +12,14 @@
 # Usage: powershell -ExecutionPolicy Bypass -File scripts/build-windows-runtime.ps1
 #        Add -SkipSmokeTest to skip the smoke-test step (e.g. on a non-Windows CI runner —
 #        every other step still requires Windows since it needs the Windows Prisma engine).
+#        Add -SkipDependencyFetch to skip downloading PostgreSQL/NSSM (INSTALL-06) — e.g. when
+#        the pinned checksums in backend/scripts/windows-runtime-dependencies.json are still
+#        placeholders (see migration/reports/INSTALL-06_INSTALLER_DESIGN.md), or to reproduce
+#        the exact INSTALL-01..05 build/verify behavior without a network dependency.
 
 param(
-    [switch]$SkipSmokeTest
+    [switch]$SkipSmokeTest,
+    [switch]$SkipDependencyFetch
 )
 
 $ErrorActionPreference = 'Stop'
@@ -110,17 +115,18 @@ Copy-Item -Recurse -Force (Join-Path $Backend 'migrations') (Join-Path $OutBacke
 Copy-Item -Recurse -Force (Join-Path $Backend 'prisma') (Join-Path $OutBackend 'prisma')
 
 # backend/scripts — bootstrapDatabase.js/runMigrations.js/adminCreate.js/
-# generateProductionConfig.js/provisionPostgres.js/manageWindowsServices.js are the only way to
-# get a fresh install operational before INSTALL-04's first-run wizard exists
+# generateProductionConfig.js/provisionPostgres.js/manageWindowsServices.js/firstInstall.js are
+# the only way to get a fresh install operational before INSTALL-04's first-run wizard exists
 # (generateProductionConfig.js added by INSTALL-02; provisionPostgres.js by INSTALL-03;
-# manageWindowsServices.js by INSTALL-05 — the Windows-service register/start/stop/status/
-# unregister entry point INSTALL-06's installer will invoke, for both StudixPostgreSQL and
-# StudixApp, per migration/reports/INSTALL-03_POSTGRES_PROVISIONING_DESIGN.md's sequencing
-# contract). Excludes generateSchemaArtifact.js deliberately: a maintainer-only tool that
-# regenerates studix-schema.sql from a live scratch DB via pg_dump — never invoked by the
-# running app or by any installation step, out of place in a customer-facing runtime package.
+# manageWindowsServices.js by INSTALL-05; firstInstall.js by INSTALL-06 — the single script the
+# Inno Setup installer's [Code] section invokes via one Exec() call, sequencing all of the
+# above per migration/reports/INSTALL-06_INSTALLER_DESIGN.md). Excludes
+# fetchWindowsRuntimeDependencies.js and windows-runtime-dependencies.json deliberately: a
+# build-time-only tool (downloads/verifies PostgreSQL/NSSM into THIS build, before it even
+# exists) — like generateSchemaArtifact.js, never invoked by the running app, the installer, or
+# any installation step, out of place in a customer-facing runtime package.
 New-Item -ItemType Directory -Force -Path (Join-Path $OutBackend 'scripts') | Out-Null
-foreach ($f in @('bootstrapDatabase.js', 'runMigrations.js', 'adminCreate.js', 'generateProductionConfig.js', 'provisionPostgres.js', 'manageWindowsServices.js')) {
+foreach ($f in @('bootstrapDatabase.js', 'runMigrations.js', 'adminCreate.js', 'generateProductionConfig.js', 'provisionPostgres.js', 'manageWindowsServices.js', 'firstInstall.js')) {
     Copy-Item -Force (Join-Path $Backend "scripts\$f") (Join-Path $OutBackend "scripts\$f")
 }
 
@@ -222,6 +228,22 @@ Copy-Item -Force $nodeCmd.Source (Join-Path $NodeOutDir 'node.exe')
 
 $bundledVersion = & (Join-Path $NodeOutDir 'node.exe') --version
 Write-Host "Bundled node.exe reports: $bundledVersion"
+
+# ── 8b. INSTALL-06 — fetch pinned PostgreSQL/NSSM binaries into pgsql\ and tools\nssm.exe ──
+# Never vendored in git (see migration/reports/INSTALL-06_INSTALLER_DESIGN.md) — downloaded
+# here, verified against the pinned SHA256 in backend/scripts/windows-runtime-dependencies.json
+# (backend/src/installer/fetchDependencies.js refuses a placeholder or mismatched hash
+# outright). Skippable (-SkipDependencyFetch) so the exact INSTALL-01..05 build/verify behavior
+# remains reproducible with no network dependency, and so the checksums can stay placeholders
+# until the one-time manual verification step is actually completed.
+if ($SkipDependencyFetch) {
+    Write-Host ""
+    Write-Host "Skipping PostgreSQL/NSSM dependency fetch (-SkipDependencyFetch passed)." -ForegroundColor Yellow
+} else {
+    Step 'Fetching pinned PostgreSQL/NSSM binaries (INSTALL-06)'
+    node (Join-Path $Backend 'scripts\fetchWindowsRuntimeDependencies.js') $OutDir
+    if ($LASTEXITCODE -ne 0) { Fail 'Fetching PostgreSQL/NSSM runtime dependencies failed.' }
+}
 
 # ── 9. Portability scan — no developer-machine paths baked into the package ──────────────
 # Note: `prisma generate` embeds the absolute cwd it was run from as diagnostic DMMF metadata
