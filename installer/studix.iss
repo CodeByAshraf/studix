@@ -49,7 +49,7 @@
 ; Windows "Programs and Features" entry identity) is keyed on this GUID, not the app name/
 ; version. Generate a real GUID once (e.g. via Inno Setup's own Tools > Generate GUID) and
 ; treat it as permanent from that point on.
-AppId={{00000000-0000-0000-0000-000000000000}
+AppId={{BE518660-3EBF-4DFF-BDF0-87E8052CE2E6}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}

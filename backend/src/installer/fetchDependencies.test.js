@@ -26,6 +26,17 @@ const MANIFEST_PATH = path.join(__dirname, '..', '..', 'scripts', 'windows-runti
 // stops matching windows-runtime-dependencies.json, something changed the pinned value.
 const ESTABLISHED_NSSM_SHA256 = '99f5045fffbffb745d67fe3a065a953c4a3d9c253b868892d9b685b0ee7d07b8';
 
+// The exact SHA256 established for PostgreSQL 18.6, resolved in a later session once EDB's
+// landing page access was no longer blocked (earlier sessions got HTTP 403 from every access
+// method tried). Downloaded https://sbp.enterprisedb.com/getfile.jsp?fileid=1260435 for real
+// (343808005 bytes, matching a prior HEAD request's Content-Length exactly), confirmed it's a
+// genuine ZIP with the expected pgsql/bin/*.exe layout, confirmed the extracted postgres.exe
+// --version genuinely reports "18.6", then hashed it with both `sha256sum` and PowerShell's
+// Get-FileHash independently — both agreed. A hardcoded regression check, not a guess — if this
+// ever stops matching windows-runtime-dependencies.json, something changed the pinned value.
+const ESTABLISHED_POSTGRESQL_SHA256 = 'fbe23da234ee31547bf8a36d29dfd81e82b849df2d2b78d2eecb43d360252f8c';
+const ESTABLISHED_POSTGRESQL_URL = 'https://sbp.enterprisedb.com/getfile.jsp?fileid=1260435';
+
 function realSha256(content) {
   return crypto.createHash('sha256').update(content).digest('hex');
 }
@@ -219,20 +230,44 @@ describe('windows-runtime-dependencies.json — the real pinned manifest', () =>
     expect(() => verifyChecksum(realNssmZipPath, manifest.nssm.sha256, { label: 'nssm' })).not.toThrow();
   });
 
-  it('PostgreSQL: honestly still a placeholder — the EDB download page returned HTTP 403 to every access method tried in this session (WebFetch, PowerShell Invoke-WebRequest, both the "-binaries" page and the general downloads page); the real download URL requires an opaque, page-embedded fileid (https://sbp.enterprisedb.com/getfile.jsp?fileid=<id>, confirmed via a third-party open-source script that documents this exact mechanism) that cannot be derived or safely guessed', () => {
-    expect(manifest.postgresql.sha256).toBe(PLACEHOLDER_SHA256);
-    expect(manifest.postgresql.url).not.toMatch(/^https?:\/\//); // still the placeholder string, not a real URL
-    // This assertion is EXPECTED TO FAIL and require updating once a future session
-    // successfully completes the one-time manual PostgreSQL verification process.
+  it('PostgreSQL: the pinned SHA256 is the real, manually-established value (not a placeholder)', () => {
+    // Resolved in a later session — EDB's landing page access was no longer blocked (earlier
+    // sessions got HTTP 403 from every access method tried). See the manifest's own _urlNote
+    // and migration/reports/INSTALL-06_INSTALLER_DESIGN.md / the release-validation session
+    // transcript for the full real-download verification trace (HEAD-request confirmation,
+    // byte-exact size match, genuine ZIP signature, pgsql/bin/*.exe layout, postgres.exe
+    // --version genuinely reporting "18.6", and two independent SHA256 implementations —
+    // sha256sum and PowerShell Get-FileHash — agreeing exactly).
+    expect(manifest.postgresql.sha256).toBe(ESTABLISHED_POSTGRESQL_SHA256);
+    expect(manifest.postgresql.sha256).not.toBe(PLACEHOLDER_SHA256);
+    expect(manifest.postgresql.sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(manifest.postgresql.url).toBe(ESTABLISHED_POSTGRESQL_URL);
   });
 
-  it('fetchAndVerify against the real manifest: PostgreSQL is refused before any download is attempted', async () => {
-    const io = { mkdirSync: () => {}, writeFileSync: () => {}, existsSync: () => true, rmSync: () => {} };
+  it('fetchAndVerify against the real manifest: PostgreSQL now proceeds to a real download attempt instead of being refused pre-flight, and checksum verification still genuinely runs (never weakened)', async () => {
+    const written = {};
+    const io = {
+      mkdirSync: () => {},
+      writeFileSync: (p, data) => { written[p] = data; },
+      readFileSync: (p) => written[p],
+      existsSync: () => true,
+      rmSync: () => {},
+    };
     let pgDownloadCalled = false;
+    let seenUrl = null;
+    // Stand-in bytes, deliberately NOT the real ~328 MiB archive (embedding that in a unit test
+    // fixture would be absurd) — this proves two things at once: (1) the placeholder gate no
+    // longer blocks this manifest entry pre-flight (downloadFn IS called now, unlike the old
+    // "refused before any download is attempted" behavior this test replaces), and (2) checksum
+    // verification is NOT weakened or bypassed for PostgreSQL — mismatched content is still
+    // correctly rejected with checksum_mismatch, exactly like the generic
+    // "a checksum failure removes the downloaded file and throws" case above.
+    const downloadFn = async (url) => { pgDownloadCalled = true; seenUrl = url; return Buffer.from('stand-in bytes, not the real archive'); };
     await expect(fetchAndVerify({
       url: manifest.postgresql.url, expectedSha256: manifest.postgresql.sha256, label: 'PostgreSQL',
-      destPath: 'C:\\out\\pg.zip', downloadFn: async () => { pgDownloadCalled = true; return Buffer.alloc(0); }, io,
-    })).rejects.toMatchObject({ reason: 'checksum_not_pinned' });
-    expect(pgDownloadCalled).toBe(false);
+      destPath: 'C:\\out\\pg.zip', downloadFn, io,
+    })).rejects.toMatchObject({ reason: 'checksum_mismatch' });
+    expect(pgDownloadCalled).toBe(true);
+    expect(seenUrl).toBe(ESTABLISHED_POSTGRESQL_URL);
   });
 });

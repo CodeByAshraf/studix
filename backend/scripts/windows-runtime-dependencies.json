@@ -3,10 +3,10 @@
   "postgresql": {
     "version": "18.6",
     "landingPage": "https://www.enterprisedb.com/download-postgresql-binaries",
-    "_urlNote": "EDB's real download URL is https://sbp.enterprisedb.com/getfile.jsp?fileid=<opaque numeric id> (confirmed via a third-party open-source acquisition script that documents this exact mechanism) — the id is only discoverable by loading the landing page above, which returned HTTP 403 to every access method tried in this session (both a dedicated web-fetch tool and PowerShell Invoke-WebRequest, against both the '-binaries' page and the general downloads page). NOT guessed — still unresolved, see migration/reports/INSTALL-06_INSTALLER_DESIGN.md for the full trace.",
-    "url": "REPLACE_WITH_CONFIRMED_DIRECT_DOWNLOAD_URL_FROM_LANDING_PAGE",
-    "expectedFilenamePattern": "postgresql-18.6-*-windows-x64-binaries.zip",
-    "sha256": "REPLACE_WITH_MANUALLY_VERIFIED_SHA256_BEFORE_USE",
+    "_urlNote": "Resolved — landing page access is no longer blocked (confirmed working in a later session; earlier sessions got HTTP 403 from every access method tried). Real download URL below verified independently via a direct HTTP HEAD request (200, application/zip, Content-Length 343808005) before download, then verified again after: exact byte size match, genuine ZIP signature, archive layout matches pgsql/bin/*.exe exactly, and the extracted postgres.exe --version genuinely reports '18.6' (not just a trusted filename). The server sends no Content-Disposition filename — expectedFilenamePattern below is the exact name this download was verified under, not a server-confirmed one.",
+    "url": "https://sbp.enterprisedb.com/getfile.jsp?fileid=1260435",
+    "expectedFilenamePattern": "postgresql-18.6-windows-x64-binaries.zip",
+    "sha256": "fbe23da234ee31547bf8a36d29dfd81e82b849df2d2b78d2eecb43d360252f8c",
     "extractTo": "pgsql"
   },
   "nssm": {
