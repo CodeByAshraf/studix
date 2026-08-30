@@ -23,6 +23,13 @@
 ; below), closing the one gap INSTALL-06's design doc explicitly flagged as deferred
 ; ("stopping the StudixApp/StudixPostgreSQL services before the [Files] copy phase overwrites
 ; their binaries on an in-place upgrade"). No other INSTALL-06 behavior changed.
+;
+; INSTALL-08 — added an opt-in, off-by-default data-wipe to the uninstaller (see
+; InitializeUninstall/TeardownServiceForWipe/CurUninstallStepChanged below), closing the "future
+; explicit 'wipe all Studix data' utility" gap INSTALL-06's design doc explicitly flagged as its
+; own out-of-scope item (design doc §"Uninstall policy"). Declining the prompt (still the
+; default) leaves uninstall behavior byte-for-byte identical to INSTALL-06/07 — nothing about
+; the normal uninstall path changed. No INSTALL-01..07 code changed.
 ; ─────────────────────────────────────────────────────────────
 
 #define MyAppName "Studix"
@@ -168,9 +175,176 @@ begin
 end;
 
 // Explicit, in-code confirmation of decision #5 — NOT registered as an [UninstallDelete]
-// entry, and no code here ever targets {commonappdata}\Studix. Inno Setup's own built-in
-// uninstaller only ever removes files it tracked installing under {app} (Program Files) — it
-// has no knowledge of {commonappdata}\Studix at all unless explicitly told to touch it, so the
-// simplest and safest implementation of "never delete ProgramData on uninstall" is exactly
-// what this script already does: nothing. A future explicit, separate, opt-in "wipe all data"
-// utility is out of INSTALL-06's scope (design doc §"Uninstall policy").
+// entry. Inno Setup's own built-in uninstaller only ever removes files it tracked installing
+// under {app} (Program Files) — it has no knowledge of {commonappdata}\Studix at all unless
+// explicitly told to touch it, so the DEFAULT/DECLINED uninstall path (unchanged since
+// INSTALL-06) is exactly what this script already did: nothing. INSTALL-08 below adds the one
+// explicit, off-by-default, doubly-confirmed exception to that.
+
+// ── INSTALL-08 — opt-in data-wipe on uninstall ──────────────────────────────────────────────
+// Approved design (D1-D5, see migration/reports/INSTALL-08_DATA_WIPE_UNINSTALL.md):
+//   D1 — normal (declined-wipe) uninstall behavior is completely unchanged; the pre-existing
+//        gap where a normal uninstall never stops/unregisters either service is a SEPARATE,
+//        already-reported issue, deliberately NOT fixed here.
+//   D2 — {commonappdata}\Studix\backups is NEVER deleted, wipe or no wipe — it is the customer's
+//        only local disaster-recovery copy (backend/src/db/backup.js has no off-machine
+//        replication). Only pgdata\, config\, and logs\ are ever targeted below.
+//   D3 — two sequential MsgBox(..., MB_YESNO) confirmations, nothing pre-selected, no custom
+//        VCL form.
+//   D4 — reachable ONLY through the standard uninstaller; no standalone tool/shortcut/exe.
+//   D5 — FAIL-CLOSED: both StudixApp and StudixPostgreSQL must be confirmed
+//        stopped-and-unregistered before ANY deletion happens. If either fails, the ENTIRE
+//        uninstall aborts before {app} is touched — {app} and both services are left exactly
+//        as they were.
+//
+// Global, set (at most) inside InitializeUninstall, read later inside
+// CurUninstallStepChanged(usPostUninstall) — Pascal Script module-level vars persist for the
+// whole (un)installer process, the same mechanism already relied on implicitly elsewhere in
+// this file (e.g. ExpandConstant('{app}') resolving consistently across every procedure call).
+var
+  WipeDataConfirmed: Boolean;
+
+// TeardownServiceForWipe: the fail-closed counterpart to INSTALL-07's
+// BestEffortStopServiceForUpgrade above — same Exec()-against-the-still-installed-
+// manageWindowsServices.js mechanism (decision #1: reuse INSTALL-05, never reimplement service
+// logic in Pascal Script), but with the OPPOSITE failure philosophy on purpose (D5): a stop/
+// unregister failure here is destructive-adjacent (about to DelTree pgdata), not merely a
+// missed optimization the way it is in BestEffortStopServiceForUpgrade (which always has
+// firstInstall.js as an independent second safety net afterward — no equivalent net exists for
+// a delete). Result defaults to False (fail-closed) and only flips True on a CONFIRMED safe
+// outcome.
+//
+// Uses the 'unregister' action, not 'stop' — unregisterAppService and unregisterPostgresService
+// (backend/src/lib/windowsService.js:251,341) already stop the service first internally if it's
+// RUNNING before unregistering, so one Exec() call safely does both, reusing INSTALL-05 exactly
+// as committed with zero new backend code (per the approved implementation constraints).
+//
+// A missing manageWindowsServices.js (FileExists check) is treated as a FAILURE here, not a
+// safe skip — unlike BestEffortStopServiceForUpgrade's fresh-install case (where "nothing
+// installed yet" is provably safe), an uninstall implies something WAS installed; if the script
+// that would let us confirm safe teardown is missing, teardown cannot be confirmed, so per D5
+// this must not be silently treated as "nothing to do."
+function TeardownServiceForWipe(ServiceArg: String): Boolean;
+var
+  NodeExe, ManageScript: String;
+  ResultCode: Integer;
+begin
+  Result := False; // fail-closed default — only set True below on a confirmed safe outcome
+  NodeExe := ExpandConstant('{app}\node\node.exe');
+  ManageScript := ExpandConstant('{app}\backend\scripts\manageWindowsServices.js');
+
+  if not FileExists(ManageScript) then
+  begin
+    Log('INSTALL-08: manageWindowsServices.js not found — cannot confirm safe teardown of ' +
+        ServiceArg + '; treating as failure (fail-closed, per D5).');
+    Exit;
+  end;
+
+  if not Exec(NodeExe, '"' + ManageScript + '" ' + ServiceArg + ' unregister', ExpandConstant('{app}'),
+              SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  begin
+    Log('INSTALL-08: could not even launch manageWindowsServices.js to unregister ' + ServiceArg +
+        ' — treating as failure (fail-closed, per D5).');
+    Exit;
+  end;
+
+  if ResultCode <> 0 then
+  begin
+    Log('INSTALL-08: unregister of ' + ServiceArg + ' exited with code ' + IntToStr(ResultCode) +
+        ' — treating as failure (fail-closed, per D5).');
+    Exit;
+  end;
+
+  Log('INSTALL-08: ' + ServiceArg + ' confirmed safely stopped and unregistered (or was already ' +
+      'not registered — manageWindowsServices.js exits 0 for that case too).');
+  Result := True;
+end;
+
+// InitializeUninstall: the only documented Pascal Script hook whose Boolean return can prevent
+// an uninstall from proceeding AT ALL (returning False here cancels everything before Inno
+// removes anything, before Inno even shows its own standard "are you sure you want to remove
+// {app}?" confirmation) — which is why the wipe's prompts and its fail-closed teardown both have
+// to live here rather than in CurUninstallStepChanged(usUninstall) (a plain procedure with no
+// way to veto the uninstall). This is a direct, structural consequence of D5's "abort the entire
+// uninstall" requirement, not an arbitrary placement choice — traced against Inno Setup's
+// documented event contract, not verified by a real compiled run (ISCC.exe still not installed
+// in this environment — same carried-forward limitation as INSTALL-06/07).
+//
+// One known, inherent residual risk (not fixable without new backend transactional logic, which
+// the approved implementation constraints explicitly rule out): unregisterAppService and
+// unregisterPostgresService are each themselves a stop-then-unregister pair, not a single atomic
+// operation. If the 'app' teardown succeeds but the 'postgres' teardown then fails, this
+// function still aborts the whole uninstall (D5's letter is satisfied — {app} is never removed,
+// no data is deleted), but StudixApp will already have been unregistered while StudixPostgreSQL
+// was not — a real, if narrow, partial-state possibility inherent to reusing INSTALL-05's
+// existing (non-transactional) primitives as-is.
+function InitializeUninstall(): Boolean;
+begin
+  Result := True; // default: proceed with a completely normal uninstall, no wipe
+  WipeDataConfirmed := False;
+
+  if MsgBox(
+    'هل تريد أيضاً حذف جميع بيانات Studix نهائياً؟' + #13#10#13#10 +
+    'يشمل ذلك: قاعدة البيانات، ملف الإعدادات (بما فيه بيانات الاتصال بقاعدة البيانات)، ' +
+    'وسجلّات النظام، الموجودة في:' + #13#10 +
+    ExpandConstant('{commonappdata}\Studix') + #13#10#13#10 +
+    'لن يتم حذف النسخ الاحتياطية المحلية (backups) — ستبقى محفوظة كما هي.' + #13#10#13#10 +
+    'إن اخترت "لا"، ستتم إزالة برنامج Studix فقط، وستبقى جميع بياناتك دون أي تغيير.',
+    mbConfirmation, MB_YESNO) = IDNO then
+    Exit; // declined at the first prompt — normal uninstall proceeds completely unchanged
+
+  if MsgBox(
+    'تحذير: هذا الإجراء نهائي ولا يمكن التراجع عنه.' + #13#10#13#10 +
+    'سيتم حذف قاعدة البيانات وملف الإعدادات والسجلّات نهائياً ولن يكون بالإمكان استعادتها ' +
+    '(باستثناء النسخ الاحتياطية المحلية في backups، التي ستبقى محفوظة).' + #13#10#13#10 +
+    'هل أنت متأكد تماماً من المتابعة؟',
+    mbError, MB_YESNO) = IDNO then
+    Exit; // backed out at the stronger, irreversibility-focused prompt — proceeds unchanged
+
+  // Fail-closed teardown (D5) — BOTH must succeed before ANY destructive step is allowed.
+  // App first (it depends on Postgres — same ordering rationale as INSTALL-07's
+  // BestEffortStopServiceForUpgrade above), then Postgres.
+  if not TeardownServiceForWipe('app') then
+  begin
+    MsgBox(
+      'تعذّر إيقاف وإلغاء تسجيل خدمة تطبيق Studix (StudixApp) بأمان. تم إلغاء عملية إزالة ' +
+      'البرنامج بالكامل حفاظاً على السلامة — لم يتم حذف أي شيء ولم يتم لمس أي بيانات. ' +
+      'يمكنك المحاولة مرة أخرى، أو التحقّق من حالة الخدمة يدوياً.',
+      mbCriticalError, MB_OK);
+    Result := False; // abort the ENTIRE uninstall — {app} and both services stay exactly as they were
+    Exit;
+  end;
+
+  if not TeardownServiceForWipe('postgres') then
+  begin
+    MsgBox(
+      'تعذّر إيقاف وإلغاء تسجيل خدمة PostgreSQL الخاصة بـ Studix (StudixPostgreSQL) بأمان. تم ' +
+      'إلغاء عملية إزالة البرنامج بالكامل حفاظاً على السلامة — لم يتم حذف أي بيانات. ملاحظة: قد ' +
+      'تكون خدمة StudixApp قد أُلغي تسجيلها بالفعل ضمن هذه المحاولة.',
+      mbCriticalError, MB_OK);
+    Result := False;
+    Exit;
+  end;
+
+  WipeDataConfirmed := True; // both services confirmed safely torn down — wipe may proceed below
+end;
+
+// CurUninstallStepChanged: the actual deletion, deliberately placed at usPostUninstall — AFTER
+// Inno's own {app} removal has already completed (only reachable at all if InitializeUninstall
+// returned True, i.e. either the wipe was declined [WipeDataConfirmed stays False, this whole
+// block is a no-op] or both services were already confirmed safely torn down above). Targets
+// pgdata\, config\, and logs\ INDIVIDUALLY — never the {commonappdata}\Studix root itself, and
+// never backups\ (D2) — so the parent directory and its backups\ subdirectory both survive
+// exactly as decision #5's original ACL/[Dirs] entry left them.
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if (CurUninstallStep = usPostUninstall) and WipeDataConfirmed then
+  begin
+    if not DelTree(ExpandConstant('{commonappdata}\Studix\pgdata'), True, True, True) then
+      Log('INSTALL-08: تعذّر حذف pgdata بالكامل — قد تبقى بعض الملفات (راجع سجلّ الإزالة).');
+    if not DelTree(ExpandConstant('{commonappdata}\Studix\config'), True, True, True) then
+      Log('INSTALL-08: تعذّر حذف config بالكامل — قد تبقى بعض الملفات (راجع سجلّ الإزالة).');
+    if not DelTree(ExpandConstant('{commonappdata}\Studix\logs'), True, True, True) then
+      Log('INSTALL-08: تعذّر حذف logs بالكامل — قد تبقى بعض الملفات (راجع سجلّ الإزالة).');
+  end;
+end;

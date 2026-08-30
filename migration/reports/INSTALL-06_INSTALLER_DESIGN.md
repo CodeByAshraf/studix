@@ -179,9 +179,12 @@ originally flagged here as deferred, now implemented via `installer/studix.iss`'
 **Default uninstall never deletes `%ProgramData%\Studix\`** — config (`SESSION_SECRET`,
 `DATABASE_URL`), `pgdata` (the actual customer database), `logs\`, and `backups\` are all
 preserved. Implemented by omission, not by a compensating check: no `[UninstallDelete]` entry
-and no uninstall-time Pascal Script code ever names that path. A future explicit "wipe all
-Studix data" utility, if ever wanted, is a distinct, clearly-labeled opt-in feature — out of
-INSTALL-06's scope.
+and no uninstall-time Pascal Script code ever names that path, unless the operator explicitly
+opts in. **Resolved in INSTALL-08** (see `migration/reports/INSTALL-08_DATA_WIPE_UNINSTALL.md`):
+an off-by-default, doubly-confirmed, fail-closed opt-in wipe of `pgdata\`/`config\`/`logs\` —
+`backups\` is deliberately never deleted, wipe or no wipe — originally flagged here as a
+future/out-of-scope item, now implemented via `installer/studix.iss`'s `InitializeUninstall`,
+added without changing anything this phase (INSTALL-06) itself built.
 
 ## 10. Failure/rollback philosophy (decision #11)
 
