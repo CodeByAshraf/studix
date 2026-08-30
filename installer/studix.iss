@@ -30,6 +30,14 @@
 ; own out-of-scope item (design doc §"Uninstall policy"). Declining the prompt (still the
 ; default) leaves uninstall behavior byte-for-byte identical to INSTALL-06/07 — nothing about
 ; the normal uninstall path changed. No INSTALL-01..07 code changed.
+;
+; INSTALL-09 — added BestEffortUnregisterServiceForUninstall, closing the gap INSTALL-08's own
+; D1 decision explicitly left open: a normal (declined-wipe) uninstall never stopped or
+; unregistered StudixApp/StudixPostgreSQL, leaving both orphaned and pointing at deleted
+; binaries. Best-effort/non-fatal (OD1), runs at CurUninstallStepChanged(usUninstall) (OD2),
+; and is a separate helper from TeardownServiceForWipe (OD3) — see
+; migration/reports/INSTALL-09_UNINSTALL_SERVICE_CLEANUP.md. InitializeUninstall, D1-D5's
+; wipe behavior, and all INSTALL-06/07 install-time code are unchanged.
 ; ─────────────────────────────────────────────────────────────
 
 #define MyAppName "Studix"
@@ -183,9 +191,11 @@ end;
 
 // ── INSTALL-08 — opt-in data-wipe on uninstall ──────────────────────────────────────────────
 // Approved design (D1-D5, see migration/reports/INSTALL-08_DATA_WIPE_UNINSTALL.md):
-//   D1 — normal (declined-wipe) uninstall behavior is completely unchanged; the pre-existing
-//        gap where a normal uninstall never stops/unregisters either service is a SEPARATE,
-//        already-reported issue, deliberately NOT fixed here.
+//   D1 — normal (declined-wipe) uninstall behavior is unchanged BY INSTALL-08; the pre-existing
+//        gap where a normal uninstall never stops/unregisters either service was a SEPARATE,
+//        reported-not-fixed-here issue at the time. Resolved in INSTALL-09 (see
+//        BestEffortUnregisterServiceForUninstall below) — the wipe-path decisions D2-D5 in this
+//        comment remain exactly as INSTALL-08 implemented them, untouched by that fix.
 //   D2 — {commonappdata}\Studix\backups is NEVER deleted, wipe or no wipe — it is the customer's
 //        only local disaster-recovery copy (backend/src/db/backup.js has no off-machine
 //        replication). Only pgdata\, config\, and logs\ are ever targeted below.
@@ -329,7 +339,60 @@ begin
   WipeDataConfirmed := True; // both services confirmed safely torn down — wipe may proceed below
 end;
 
-// CurUninstallStepChanged: the actual deletion, deliberately placed at usPostUninstall — AFTER
+// ── INSTALL-09 — best-effort service cleanup for the NORMAL (any) uninstall path ───────────────
+// Closes the gap INSTALL-08's own D1 decision explicitly left open (see
+// migration/reports/INSTALL-08_DATA_WIPE_UNINSTALL.md and
+// migration/reports/INSTALL-09_UNINSTALL_SERVICE_CLEANUP.md): a declined-wipe uninstall
+// previously never stopped or unregistered StudixApp/StudixPostgreSQL at all, leaving both
+// orphaned and pointing at soon-to-be-deleted binaries.
+//
+// BestEffortUnregisterServiceForUninstall is a DELIBERATELY SEPARATE helper from
+// TeardownServiceForWipe above, not a call to it with the result discarded (OD3) — the two exist
+// for different reasons and must stay independently readable: TeardownServiceForWipe is
+// fail-closed because it gates a destructive DelTree (D5); this helper is best-effort/non-fatal
+// (OD1) because a normal uninstall has no destructive deletion downstream — a failure here only
+// means the pre-existing orphaning bug isn't fully closed on this particular run, never a reason
+// to block the operator from removing the application. Mirrors
+// BestEffortStopServiceForUpgrade's exact shape/mechanism above (decision #1: reuse INSTALL-05's
+// manageWindowsServices.js via Exec(), never reimplement service logic in Pascal Script), using
+// 'unregister' (not 'stop') for the same reason TeardownServiceForWipe does — unregisterAppService/
+// unregisterPostgresService (backend/src/lib/windowsService.js:251,341) already stop the service
+// first internally if it's RUNNING, so one Exec() call does both.
+procedure BestEffortUnregisterServiceForUninstall(ServiceArg: String);
+var
+  NodeExe, ManageScript: String;
+  ResultCode: Integer;
+begin
+  NodeExe := ExpandConstant('{app}\node\node.exe');
+  ManageScript := ExpandConstant('{app}\backend\scripts\manageWindowsServices.js');
+  if not FileExists(ManageScript) then
+    Exit; // nothing installed here to unregister
+
+  if not Exec(NodeExe, '"' + ManageScript + '" ' + ServiceArg + ' unregister', ExpandConstant('{app}'),
+              SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    Log('INSTALL-09: could not even launch manageWindowsServices.js to unregister ' + ServiceArg +
+        ' during normal uninstall — continuing anyway (best-effort, non-fatal, per OD1).')
+  else
+    Log('INSTALL-09: normal-uninstall unregister of ' + ServiceArg + ' exited with code ' +
+        IntToStr(ResultCode) + ' (0/already-unregistered are both fine).');
+end;
+
+// CurUninstallStepChanged: two independent branches.
+//
+// usUninstall (INSTALL-09) — fires AFTER Inno's own "are you sure you want to remove Studix?"
+// confirmation has already been accepted (OD2: never acts before the user has confirmed
+// anything — deliberately NOT folded into InitializeUninstall, which runs before that standard
+// confirmation), and BEFORE {app}'s files are removed, so node.exe/manageWindowsServices.js are
+// still present. Runs UNCONDITIONALLY — regardless of whether the operator also accepted
+// INSTALL-08's data wipe. This is always safe/idempotent, never a duplicate destructive action:
+// if the wipe WAS accepted, InitializeUninstall (which always runs first, before any
+// TUninstallStep) already unregistered both services via TeardownServiceForWipe; manageWindows
+// Services.js's 'unregister' action exits 0 for an already-not-registered service exactly as it
+// does for a freshly-unregistered one, so this call simply finds nothing left to do and logs a
+// harmless success. It never re-stops a running process (there isn't one left) and never
+// conflicts with D1-D5's already-approved wipe behavior.
+//
+// usPostUninstall (INSTALL-08, unchanged) — the actual deletion, deliberately placed AFTER
 // Inno's own {app} removal has already completed (only reachable at all if InitializeUninstall
 // returned True, i.e. either the wipe was declined [WipeDataConfirmed stays False, this whole
 // block is a no-op] or both services were already confirmed safely torn down above). Targets
@@ -338,6 +401,12 @@ end;
 // exactly as decision #5's original ACL/[Dirs] entry left them.
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
+  if CurUninstallStep = usUninstall then
+  begin
+    BestEffortUnregisterServiceForUninstall('app');      // app first — it depends on Postgres
+    BestEffortUnregisterServiceForUninstall('postgres'); // then Postgres
+  end;
+
   if (CurUninstallStep = usPostUninstall) and WipeDataConfirmed then
   begin
     if not DelTree(ExpandConstant('{commonappdata}\Studix\pgdata'), True, True, True) then

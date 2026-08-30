@@ -19,7 +19,10 @@ contract).
   `StudixApp`/`StudixPostgreSQL` on a normal (declined-wipe) uninstall, leaving both services
   registered and pointing at deleted binaries. This is a separate, pre-existing correctness gap —
   reported here for the record, **not fixed by INSTALL-08**. Normal uninstall behavior is
-  unchanged.
+  unchanged. **Resolved in INSTALL-09** (see
+  `migration/reports/INSTALL-09_UNINSTALL_SERVICE_CLEANUP.md`): a best-effort
+  `BestEffortUnregisterServiceForUninstall`, hooked at `CurUninstallStepChanged(usUninstall)`,
+  added without changing anything this phase (INSTALL-08) itself built.
 - **D2 — `%ProgramData%\Studix\backups\` is never deleted**, wipe or no wipe. It is the only
   local disaster-recovery copy of the customer's database (`backend/src/db/backup.js`'s
   `pg_dump`-based logical backups have no off-machine replication anywhere in the codebase). The
