@@ -168,12 +168,11 @@ Traced in §5: the *same* orchestrator run is already correct for both fresh ins
 upgrades, by construction of every reused primitive's own idempotency. The one thing this phase
 adds beyond the orchestrator: Inno Setup's own `AppId`-based upgrade detection lets the same
 installer `.exe` (a new version) recognize an existing install and reuse its chosen directory —
-standard Inno Setup behavior, no custom code needed. **Deferred, not solved here**: stopping the
-`StudixApp`/`StudixPostgreSQL` services *before* the `[Files]` copy phase overwrites their
-binaries on an in-place upgrade (needed so Windows doesn't refuse to overwrite locked
-`.exe`/`.dll` files) — a real concern identified but not yet implemented; `[Code]`'s
-`CurStepChanged(ssInstall)` handler would be the natural place, left for the next iteration once
-real elevated verification is possible.
+standard Inno Setup behavior, no custom code needed. **Resolved in INSTALL-07** (see
+`migration/reports/INSTALL-07_UPGRADE_SAFETY.md`): stopping the `StudixApp`/`StudixPostgreSQL`
+services *before* the `[Files]` copy phase overwrites their binaries on an in-place upgrade —
+originally flagged here as deferred, now implemented via `installer/studix.iss`'s
+`PrepareToInstall`, added without changing anything this phase (INSTALL-06) itself built.
 
 ## 9. Uninstall policy (decision #5, implemented as designed)
 

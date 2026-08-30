@@ -18,6 +18,11 @@
 ; this file. Written against documented, standard Inno Setup 6.x syntax; compilation and a real
 ; elevated install are both deferred to a future manual verification step, ideally on a
 ; disposable VM (see the design doc's testing-strategy section).
+;
+; INSTALL-07 — added PrepareToInstall's pre-upgrade service-stop step (see its own comment
+; below), closing the one gap INSTALL-06's design doc explicitly flagged as deferred
+; ("stopping the StudixApp/StudixPostgreSQL services before the [Files] copy phase overwrites
+; their binaries on an in-place upgrade"). No other INSTALL-06 behavior changed.
 ; ─────────────────────────────────────────────────────────────
 
 #define MyAppName "Studix"
@@ -78,6 +83,52 @@ Name: "{group}\Studix"; Filename: "http://localhost:4000/"; IconFilename: "{app}
 Name: "{group}\Uninstall Studix"; Filename: "{uninstallexe}"
 
 [Code]
+// INSTALL-07 — upgrade safety: stop both services BEFORE the [Files] section overwrites
+// node.exe/postgres.exe/pg_ctl.exe/nssm.exe on an in-place upgrade. Without this, Windows can
+// refuse to overwrite an executable file that a running process still has open, failing the
+// upgrade outright. This gap was explicitly identified and deliberately left unsolved by
+// INSTALL-06's own design doc (§"Upgrade/reinstall behavior") — closed here, in the same file,
+// with no changes to any INSTALL-01..06 code.
+//
+// Reuses the ALREADY-INSTALLED (old) node.exe + backend/scripts/manageWindowsServices.js
+// (INSTALL-05, unmodified) via Exec() — never reimplements service-stop logic in Pascal
+// Script, matching decision #1's "keep Pascal Script minimal, reuse the Node-side tooling"
+// principle exactly. Runs at PrepareToInstall — strictly before [Files] copies anything, so
+// what gets executed here is genuinely the PREVIOUS version's own tooling stopping itself.
+//
+// Best-effort and never fatal to the install: a fresh install has neither service registered
+// yet (the expected, common case — manageWindowsServices.js's own "stop" action exits non-zero
+// with reason "not_registered" for exactly this case), which this code deliberately does not
+// treat as an error. Any OTHER real stop failure does not abort Setup either — the actual
+// safety net remains firstInstall.js's own unchanged, already-approved fail-closed
+// register+start sequence at ssPostInstall (below), which runs after every [Files] copy
+// regardless and will surface a clear error if something is still genuinely wrong.
+procedure BestEffortStopServiceForUpgrade(ServiceArg: String);
+var
+  NodeExe, ManageScript: String;
+  ResultCode: Integer;
+begin
+  NodeExe := ExpandConstant('{app}\node\node.exe');
+  ManageScript := ExpandConstant('{app}\backend\scripts\manageWindowsServices.js');
+  if not FileExists(ManageScript) then
+    Exit; // nothing previously installed here — genuinely fresh install, nothing to stop
+
+  if not Exec(NodeExe, '"' + ManageScript + '" ' + ServiceArg + ' stop', ExpandConstant('{app}'),
+              SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    Log('INSTALL-07: could not even launch manageWindowsServices.js to stop ' + ServiceArg +
+        ' before upgrade file copy — continuing anyway (best-effort, non-fatal).')
+  else
+    Log('INSTALL-07: pre-upgrade stop of ' + ServiceArg + ' exited with code ' + IntToStr(ResultCode) +
+        ' (0/already-stopped/not-registered are all fine; firstInstall.js re-verifies after file copy regardless).');
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  BestEffortStopServiceForUpgrade('app');      // stop the Node app first — it depends on Postgres
+  BestEffortStopServiceForUpgrade('postgres'); // then Postgres, whose binaries [Files] may also overwrite
+  Result := ''; // never block Setup on this — see the procedure's own comment for why
+end;
+
 // RunFirstInstall: the ONE Exec() call (decision #1) — invokes the bundled node.exe against
 // the single JS orchestrator, passing the actual chosen install directory through so
 // lib/windowsService.js's resolveInstallRoot()/STUDIX_INSTALL_ROOT override resolves correctly
