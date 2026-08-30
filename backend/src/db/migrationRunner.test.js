@@ -11,6 +11,7 @@ import {
   splitSqlStatements,
   discoverMigrationFiles,
   findDestructiveStatements,
+  checkMigrationsUpToDate,
   ALLOW_DESTRUCTIVE_MARKER,
 } from './migrationRunner.js';
 
@@ -128,5 +129,95 @@ describe('findDestructiveStatements', () => {
 
   it('exports the exact marker text used to acknowledge a destructive migration', () => {
     expect(ALLOW_DESTRUCTIVE_MARKER).toBe('-- studix:allow-destructive');
+  });
+});
+
+// INSTALL-10 — checkMigrationsUpToDate: server.js's read-only boot-time replacement for calling
+// runMigrations() directly (migration execution is now exclusively an installer/upgrade-time
+// responsibility, see backend/src/installer/firstInstall.js). A hand-rolled fake `prisma`-shaped
+// object is used throughout instead of a real PostgreSQL connection — this function's own
+// contract is "call $queryRaw exactly, nothing else", which a fake object can verify precisely
+// and unconditionally (no real-database gating needed, unlike migrationRunner.integration.test.js).
+describe('checkMigrationsUpToDate', () => {
+  let tmpDir;
+  afterEach(() => {
+    if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+    tmpDir = undefined;
+  });
+
+  function makeMigrationsDir(versions) {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'studix-freshness-'));
+    for (const v of versions) {
+      fs.writeFileSync(path.join(tmpDir, `${String(v).padStart(3, '0')}_m.sql`), 'SELECT 1;');
+    }
+    return tmpDir;
+  }
+
+  // "must never write/DDL" guard — $executeRaw/$executeRawUnsafe throw if invoked at all, so any
+  // accidental write call fails the test immediately rather than silently succeeding.
+  function readOnlyPrismaStub(appliedVersions) {
+    return {
+      $queryRaw: async () => appliedVersions.map((version) => ({ version })),
+      $executeRaw: () => { throw new Error('checkMigrationsUpToDate must never call $executeRaw'); },
+      $executeRawUnsafe: () => { throw new Error('checkMigrationsUpToDate must never call $executeRawUnsafe'); },
+    };
+  }
+
+  it('no on-disk migration files at all -> up to date trivially, without ever querying', async () => {
+    const dir = makeMigrationsDir([]);
+    let queried = false;
+    const prisma = { $queryRaw: async () => { queried = true; return []; } };
+    const result = await checkMigrationsUpToDate(prisma, { migrationsDir: dir });
+    expect(result).toEqual({ upToDate: true, pendingVersions: [] });
+    expect(queried).toBe(false);
+  });
+
+  it('every on-disk version already recorded as applied -> up to date, no pending versions', async () => {
+    const dir = makeMigrationsDir([1, 2, 3]);
+    const prisma = readOnlyPrismaStub([1, 2, 3]);
+    const result = await checkMigrationsUpToDate(prisma, { migrationsDir: dir });
+    expect(result).toEqual({ upToDate: true, pendingVersions: [] });
+  });
+
+  it('an on-disk version missing from _studix_migrations -> fails closed, reports it as pending', async () => {
+    const dir = makeMigrationsDir([1, 2, 3]);
+    const prisma = readOnlyPrismaStub([1, 2]); // version 3 never applied
+    const result = await checkMigrationsUpToDate(prisma, { migrationsDir: dir });
+    expect(result.upToDate).toBe(false);
+    expect(result.pendingVersions).toEqual([3]);
+  });
+
+  it('a completely empty _studix_migrations table (nothing ever applied) -> every on-disk version is pending', async () => {
+    const dir = makeMigrationsDir([1, 2]);
+    const prisma = readOnlyPrismaStub([]);
+    const result = await checkMigrationsUpToDate(prisma, { migrationsDir: dir });
+    expect(result).toEqual({ upToDate: false, pendingVersions: [1, 2] });
+  });
+
+  it('a missing _studix_migrations table (undefined_table, 42P01) is treated identically to "pending" — bootstrap never ran', async () => {
+    const dir = makeMigrationsDir([1]);
+    const prisma = {
+      $queryRaw: async () => { const err = new Error('relation "_studix_migrations" does not exist'); err.code = '42P01'; throw err; },
+    };
+    const result = await checkMigrationsUpToDate(prisma, { migrationsDir: dir });
+    expect(result).toEqual({ upToDate: false, pendingVersions: [1] });
+  });
+
+  it('a genuine connectivity/auth failure (any other error code) propagates — never silently reported as "pending"', async () => {
+    const dir = makeMigrationsDir([1]);
+    const prisma = {
+      $queryRaw: async () => { const err = new Error('password authentication failed'); err.code = '28P01'; throw err; },
+    };
+    await expect(checkMigrationsUpToDate(prisma, { migrationsDir: dir })).rejects.toThrow('password authentication failed');
+  });
+
+  it('never calls $executeRaw/$executeRawUnsafe — read-only, whether up to date or not', async () => {
+    const dirUpToDate = makeMigrationsDir([1]);
+    await expect(checkMigrationsUpToDate(readOnlyPrismaStub([1]), { migrationsDir: dirUpToDate })).resolves.toEqual({ upToDate: true, pendingVersions: [] });
+
+    const dirPending = makeMigrationsDir([1, 2]);
+    await expect(checkMigrationsUpToDate(readOnlyPrismaStub([1]), { migrationsDir: dirPending })).resolves.toEqual({ upToDate: false, pendingVersions: [2] });
+    // Both calls above would have thrown from the stub's $executeRaw/$executeRawUnsafe had
+    // checkMigrationsUpToDate ever invoked either — reaching here proves it never did.
   });
 });

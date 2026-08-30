@@ -56,8 +56,7 @@ import { requireAuth, requireRole } from './middleware/auth.js';
 import { requirePermission } from './middleware/permissions.js';
 import { requireActivation } from './middleware/activation.js';
 import { prisma, checkDbConnection } from './prisma.js';
-import { runMigrations } from './db/migrationRunner.js';
-import { createPreMigrationBackup } from './db/backup.js';
+import { checkMigrationsUpToDate } from './db/migrationRunner.js';
 import logger from './lib/logger.js';
 import { validateDatabaseUrl, describeStartupFailure } from './lib/startupErrors.js';
 import { createGracefulShutdown, registerShutdownHandlers } from './lib/shutdown.js';
@@ -331,24 +330,27 @@ try {
   process.exit(1);
 }
 
-// ── Database Update/Migration System (Phase 1) — يُشغَّل قبل app.listen() مباشرة، دائماً،
-// كل إقلاع (idempotent — no-op سريع لو لا ترحيلات معلَّقة). runMigrations يرمي استثناءً
-// عند أي فشل (نسخة احتياطية فاشلة، checksum متعارض، ترحيل فشل ورجع بالكامل، أو تعذّر الوصول
-// لخادم PostgreSQL نفسه) — الخادم لا يستدعي app.listen() أبداً في هذه الحالة، فلا يخدم أي
-// طلب فوق قاعدة في حالة غير معروفة. سلوك fail-closed هذا محفوظ حرفياً بلا أي تعديل —
-// Phase 6b فقط يُمرِّر الرسالة عبر logger (يُبقيها في ملف السجلّ لا الطرفية وحدها) ويُلخِّص
-// أخطاء PostgreSQL الشائعة عبر describeStartupFailure بدل رسالة Prisma الخام كسطر أساسي. ──
+// ── Database migration freshness check (INSTALL-10) — يُشغَّل قبل app.listen() مباشرة، دائماً،
+// كل إقلاع. الخادم لا يُطبِّق أي ترحيل بنفسه بعد الآن — تطبيق الترحيلات أصبح حصراً مسؤولية
+// وقت التثبيت/التحديث (backend/src/installer/firstInstall.js، عبر اتصال studix_admin
+// الإداري المنفصل) — هذا الفحص للقراءة فقط (SELECT من _studix_migrations عبر اتصال
+// studix_app المحدود نفسه)، لا يكتب ولا يُطبِّق أي شيء إطلاقاً. لو وُجدت ترحيلات معلَّقة أو
+// لم يُشغَّل التثبيت إطلاقاً (الجدول غائب)، نتوقّف بوضوح بدل خدمة طلبات فوق schema غير
+// متوقَّعة — سلوك fail-closed مطابق تماماً لما كان عليه الحال مع runMigrations سابقاً، فقط
+// بلا أي محاولة تطبيق. أي فشل اتصال حقيقي (غير "ترحيلات معلَّقة") يصعد ليُصنَّف عبر
+// describeStartupFailure كما هو الحال في الفحص الذي يسبقه أعلاه. ──
 try {
-  const migrationResult = await runMigrations(prisma, { backup: createPreMigrationBackup });
-  if (migrationResult.action === 'stamped') {
-    logger.info(`تثبيت جديد — سُجِّلت الإصدارات [${migrationResult.versions.join(', ')}] كمُطبَّقة (بلا تنفيذ SQL).`);
-  } else if (migrationResult.action === 'migrated') {
-    logger.info(`تم تطبيق ترحيلات جديدة: [${migrationResult.versions.join(', ')}] (نسخة احتياطية: ${migrationResult.backupPath})`);
-  } else {
-    logger.info('قاعدة البيانات محدَّثة بالفعل — لا ترحيلات معلَّقة.');
+  const { upToDate } = await checkMigrationsUpToDate(prisma);
+  if (!upToDate) {
+    logger.error(
+      'قاعدة البيانات تحتوي ترحيلات معلَّقة لم تُطبَّق بعد (أو لم يُشغَّل التثبيت الأول إطلاقاً). ' +
+      'أعد تشغيل مثبِّت/محدِّث Studix لتطبيق ترحيلات قاعدة البيانات المطلوبة قبل تشغيل التطبيق.'
+    );
+    logger.error('تم إيقاف بدء التشغيل — لم يُشغَّل الخادم.');
+    process.exit(1);
   }
 } catch (err) {
-  logger.error(`فشل نظام الترحيل: ${describeStartupFailure(err)}`, { rawError: err.message });
+  logger.error(`فشل التحقّق من حالة ترحيلات قاعدة البيانات: ${describeStartupFailure(err)}`, { rawError: err.message });
   logger.error('تم إيقاف بدء التشغيل — لم يُشغَّل الخادم.');
   process.exit(1);
 }

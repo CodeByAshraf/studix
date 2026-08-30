@@ -340,7 +340,150 @@ describe('bootstrapDatabase — Phase 6c (real scratch PostgreSQL, never the rea
     });
   });
 
-  describe('18. real database remains untouched', () => {
+  describe('18. INSTALL-10 — ensureAppRole grants exactly DML, never DDL, never ownership', () => {
+    let counter2 = 0;
+    const createdRoleNames = [];
+
+    function freshRoleName() {
+      counter2 += 1;
+      const name = `${realDbName}_test_app_role_${process.pid}_${counter2}`;
+      createdRoleNames.push(name);
+      return name;
+    }
+
+    async function dropRoleIfExists(name) {
+      const client = new PrismaClient({ datasources: { db: { url: adminUrl } } });
+      try {
+        await client.$executeRawUnsafe(`DROP OWNED BY "${name}"`).catch(() => {});
+        await client.$executeRawUnsafe(`DROP ROLE IF EXISTS "${name}"`);
+      } finally {
+        await client.$disconnect().catch(() => {});
+      }
+    }
+
+    afterEach(async () => {
+      for (const name of createdRoleNames.splice(0)) {
+        await dropRoleIfExists(name).catch(() => {});
+      }
+    });
+
+    it('creates the role and returns a working connection string on first call, over a freshly bootstrapped schema', async () => {
+      const { ensureAppRole } = await import('./bootstrapDatabase.js');
+      const dbUrl = new URL(realUrl);
+      const name = freshScratchName();
+      const scratchUrl = withDbName(realUrl, name);
+      await bootstrapDatabase({ databaseUrl: scratchUrl, schemaPath: SCHEMA_PATH });
+
+      const appUser = freshRoleName();
+      const result = await ensureAppRole(scratchUrl, { appUser, appPassword: 'deadbeefdeadbeefdeadbeefdeadbeef', port: Number(dbUrl.port) });
+
+      expect(result.status).toBe('created');
+      expect(result.databaseUrl).toContain(appUser);
+
+      const appClient = new PrismaClient({ datasources: { db: { url: result.databaseUrl } } });
+      const rows = await appClient.$queryRaw`SELECT current_user AS u`;
+      expect(rows[0].u).toBe(appUser);
+      await appClient.$disconnect();
+    });
+
+    it('the restricted role can SELECT/INSERT/UPDATE/DELETE on schema tables — same query shape checkMigrationsUpToDate uses', async () => {
+      const { ensureAppRole } = await import('./bootstrapDatabase.js');
+      const { runMigrations, checkMigrationsUpToDate } = await import('./migrationRunner.js');
+      const dbUrl = new URL(realUrl);
+      const name = freshScratchName();
+      const scratchUrl = withDbName(realUrl, name);
+      await bootstrapDatabase({ databaseUrl: scratchUrl, schemaPath: SCHEMA_PATH });
+      const adminMigrationClient = new PrismaClient({ datasources: { db: { url: scratchUrl } } });
+      await runMigrations(adminMigrationClient, { databaseUrl: scratchUrl });
+      await adminMigrationClient.$disconnect();
+
+      const appUser = freshRoleName();
+      const appRole = await ensureAppRole(scratchUrl, { appUser, appPassword: 'deadbeefdeadbeefdeadbeefdeadbeef', port: Number(dbUrl.port) });
+
+      const appClient = new PrismaClient({ datasources: { db: { url: appRole.databaseUrl } } });
+      try {
+        // DML the running application actually performs — plain SELECT/INSERT/UPDATE/DELETE.
+        await appClient.$executeRawUnsafe(`INSERT INTO public.center_profile (id) VALUES ('1')`);
+        await appClient.$queryRaw`SELECT id FROM public.center_profile WHERE id = '1'`;
+        await appClient.$executeRawUnsafe(`UPDATE public.center_profile SET id = '1' WHERE id = '1'`);
+        await appClient.$executeRawUnsafe(`DELETE FROM public.center_profile WHERE id = '1'`);
+
+        // The EXACT read checkMigrationsUpToDate performs at server.js boot must also succeed
+        // through this same restricted connection — proves the freshness check's own permission
+        // requirement (constraint #4 from the approved test plan).
+        const freshness = await checkMigrationsUpToDate(appClient, { migrationsDir: `${process.cwd()}/migrations` });
+        expect(freshness.upToDate).toBe(true);
+      } finally {
+        await appClient.$disconnect();
+      }
+    });
+
+    it('the restricted role CANNOT perform DDL — CREATE TABLE is rejected, proving the actual privilege boundary, not just an unused capability', async () => {
+      const { ensureAppRole } = await import('./bootstrapDatabase.js');
+      const dbUrl = new URL(realUrl);
+      const name = freshScratchName();
+      const scratchUrl = withDbName(realUrl, name);
+      await bootstrapDatabase({ databaseUrl: scratchUrl, schemaPath: SCHEMA_PATH });
+
+      const appUser = freshRoleName();
+      const appRole = await ensureAppRole(scratchUrl, { appUser, appPassword: 'deadbeefdeadbeefdeadbeefdeadbeef', port: Number(dbUrl.port) });
+
+      const appClient = new PrismaClient({ datasources: { db: { url: appRole.databaseUrl } } });
+      try {
+        let caught;
+        try {
+          await appClient.$executeRawUnsafe('CREATE TABLE public.should_not_be_allowed (id text)');
+        } catch (err) {
+          caught = err;
+        }
+        expect(caught).toBeDefined();
+        expect(caught?.meta?.code || caught?.code).toBe('42501'); // insufficient_privilege
+      } finally {
+        await appClient.$disconnect();
+      }
+    });
+
+    it('the restricted role is never the owner of any table it can query — ownership stays with studix_admin', async () => {
+      const { ensureAppRole } = await import('./bootstrapDatabase.js');
+      const dbUrl = new URL(realUrl);
+      const name = freshScratchName();
+      const scratchUrl = withDbName(realUrl, name);
+      await bootstrapDatabase({ databaseUrl: scratchUrl, schemaPath: SCHEMA_PATH });
+
+      const appUser = freshRoleName();
+      await ensureAppRole(scratchUrl, { appUser, appPassword: 'deadbeefdeadbeefdeadbeefdeadbeef', port: Number(dbUrl.port) });
+
+      const adminClient = new PrismaClient({ datasources: { db: { url: scratchUrl } } });
+      const rows = await adminClient.$queryRaw`
+        SELECT tableowner FROM pg_tables WHERE schemaname = 'public' AND tablename = 'students'
+      `;
+      expect(rows[0].tableowner).not.toBe(appUser);
+      await adminClient.$disconnect();
+    });
+
+    it('idempotent — a second call never rotates the already-created role\'s password', async () => {
+      const { ensureAppRole } = await import('./bootstrapDatabase.js');
+      const dbUrl = new URL(realUrl);
+      const name = freshScratchName();
+      const scratchUrl = withDbName(realUrl, name);
+      await bootstrapDatabase({ databaseUrl: scratchUrl, schemaPath: SCHEMA_PATH });
+
+      const appUser = freshRoleName();
+      const first = await ensureAppRole(scratchUrl, { appUser, appPassword: 'deadbeefdeadbeefdeadbeefdeadbeef', port: Number(dbUrl.port) });
+      const second = await ensureAppRole(scratchUrl, { appUser, appPassword: 'ffffffffffffffffffffffffffffffff', port: Number(dbUrl.port) });
+
+      expect(first.status).toBe('created');
+      expect(second.status).toBe('already_exists');
+
+      // The ORIGINAL password must still work — proves the second call's (different) password
+      // was never applied.
+      const appClient = new PrismaClient({ datasources: { db: { url: first.databaseUrl } } });
+      await expect(appClient.$queryRaw`SELECT 1`).resolves.toBeDefined();
+      await appClient.$disconnect();
+    });
+  });
+
+  describe('19. real database remains untouched', () => {
     it('this entire suite never referenced the real DATABASE_URL for anything other than deriving scratch names/admin URL', () => {
       // Structural proof, not a live query against the real DB (which this suite must never
       // touch): every test above operates on a name derived via freshScratchName() or

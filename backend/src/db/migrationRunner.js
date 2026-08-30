@@ -389,3 +389,38 @@ async function runMigrationsLocked(prisma, { migrationsDir, backupFn, databaseUr
 
   return { action: 'migrated', versions: pending.map((f) => f.version), backupPath };
 }
+
+// ── INSTALL-10 — read-only migration-freshness check ──────────────────────────────────────────
+// checkMigrationsUpToDate: server.js's boot-time replacement for calling runMigrations()
+// directly — migration EXECUTION is now exclusively an installer/upgrade-time responsibility
+// (backend/src/installer/firstInstall.js, using the separate studix_admin connection). This
+// function only ever SELECTs from _studix_migrations — no CREATE TABLE, no advisory lock, no
+// $executeRaw/$executeRawUnsafe anywhere in it — so it works correctly through the restricted
+// runtime studix_app role, which is granted plain SELECT on every table in schema public
+// (including this tracking table) and nothing more.
+//
+// A missing _studix_migrations table (PostgreSQL error code 42P01, undefined_table — bootstrap
+// never ran at all) is treated identically to "pending migrations found", since the operator's
+// remedy is the same either way: re-run the installer/upgrade. Any OTHER error (auth failure,
+// unreachable server, ...) is left to propagate — it is a genuine connectivity failure, not a
+// migration-freshness question, and server.js already has an established, secret-free way to
+// classify and report that (lib/startupErrors.js's describeStartupFailure), reused unchanged.
+export async function checkMigrationsUpToDate(prisma, { migrationsDir = DEFAULT_MIGRATIONS_DIR } = {}) {
+  const files = discoverMigrationFiles(migrationsDir);
+  if (files.length === 0) return { upToDate: true, pendingVersions: [] };
+
+  let appliedVersions;
+  try {
+    const rows = await prisma.$queryRaw`SELECT version FROM _studix_migrations`;
+    appliedVersions = new Set(rows.map((r) => Number(r.version)));
+  } catch (err) {
+    const pgCode = err?.meta?.code || err?.code;
+    if (pgCode === '42P01') {
+      return { upToDate: false, pendingVersions: files.map((f) => f.version) };
+    }
+    throw err;
+  }
+
+  const pendingVersions = files.filter((f) => !appliedVersions.has(f.version)).map((f) => f.version);
+  return { upToDate: pendingVersions.length === 0, pendingVersions };
+}

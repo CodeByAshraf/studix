@@ -1,33 +1,35 @@
 // backend/src/installer/firstInstall.test.js
-// INSTALL-06 — pure, dependency-injected unit tests for the orchestrator's sequencing and
-// branching logic. Every reused INSTALL-02/03/05 function is mocked at its own boundary (each
-// already has its own full test coverage in its own module) — this file tests ONLY that
+// INSTALL-06/INSTALL-10 — pure, dependency-injected unit tests for the orchestrator's sequencing
+// and branching logic. Every reused INSTALL-02/03/05/10 function is mocked at its own boundary
+// (each already has its own full test coverage in its own module) — this file tests ONLY that
 // runFirstInstall calls the right functions, in the right order, with the right arguments, and
 // stops immediately on the first failure. Never touches a real PostgreSQL, a real Windows
 // service, a real network request, or a real browser.
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { runFirstInstall, FirstInstallError } from './firstInstall.js';
 
-let savedDatabaseUrl;
-beforeEach(() => {
-  savedDatabaseUrl = process.env.DATABASE_URL;
-});
-afterEach(() => {
-  if (savedDatabaseUrl === undefined) delete process.env.DATABASE_URL;
-  else process.env.DATABASE_URL = savedDatabaseUrl;
-});
+const ADMIN_URL = 'postgresql://studix_admin:adminsecret@127.0.0.1:55432/studix';
+const APP_URL = 'postgresql://studix_app:appsecret@127.0.0.1:55432/studix';
 
 function baseDeps(overrides = {}) {
   const calls = [];
   const record = (name) => (...args) => { calls.push([name, ...args]); };
+  const migrationClient = { $disconnect: vi.fn(async () => {}) };
 
   const deps = {
-    provisionPostgresFn: vi.fn(async (...args) => { record('provisionPostgres')(...args); return { status: 'initialized', databaseUrl: 'postgresql://studix_admin:secret@127.0.0.1:55432/studix' }; }),
-    ensureProductionConfigFn: vi.fn((...args) => { record('ensureProductionConfig')(...args); return { created: true }; }),
-    resolveProductionConfigPathFn: vi.fn(() => 'C:\\ProgramData\\Studix\\config\\.env'),
-    loadEnvConfigFn: vi.fn((...args) => { record('loadEnvConfig')(...args); process.env.DATABASE_URL = 'postgresql://studix_admin:secret@127.0.0.1:55432/studix'; }),
+    provisionPostgresFn: vi.fn(async (...args) => { record('provisionPostgres')(...args); return { status: 'initialized', databaseUrl: ADMIN_URL, port: 55432 }; }),
+    generatePostgresPasswordFn: vi.fn(() => 'deadbeef00'),
+    ensureProvisioningAdminConfigFn: vi.fn((...args) => { record('ensureProvisioningAdminConfig')(...args); return { created: true }; }),
+    readProvisioningAdminUrlFn: vi.fn((...args) => { record('readProvisioningAdminUrl')(...args); return ADMIN_URL; }),
+    resolveProvisioningAdminConfigPathFn: vi.fn(() => 'C:\\ProgramData\\Studix\\config\\admin.env'),
     validateDatabaseUrlFn: vi.fn((...args) => { record('validateDatabaseUrl')(...args); }),
     bootstrapDatabaseFn: vi.fn(async (...args) => { record('bootstrapDatabase')(...args); return { action: 'schema_applied' }; }),
+    createMigrationPrismaClientFn: vi.fn((...args) => { record('createMigrationPrismaClient')(...args); return migrationClient; }),
+    runMigrationsFn: vi.fn(async (...args) => { record('runMigrations')(...args); return { action: 'up-to-date' }; }),
+    backupFn: vi.fn(),
+    ensureAppRoleFn: vi.fn(async (...args) => { record('ensureAppRole')(...args); return { status: 'created', appUser: 'studix_app', databaseUrl: APP_URL }; }),
+    ensureProductionConfigFn: vi.fn((...args) => { record('ensureProductionConfig')(...args); return { created: true }; }),
+    resolveProductionConfigPathFn: vi.fn(() => 'C:\\ProgramData\\Studix\\config\\.env'),
     stopPostgresFn: vi.fn((...args) => { record('stopPostgres')(...args); }),
     resolvePgHomeFn: vi.fn(() => 'C:\\Studix\\pgsql'),
     resolvePgDataDirFn: vi.fn(() => 'C:\\ProgramData\\Studix\\pgdata'),
@@ -41,7 +43,7 @@ function baseDeps(overrides = {}) {
     fetchImpl: vi.fn(),
     ...overrides,
   };
-  return { deps, calls };
+  return { deps, calls, migrationClient };
 }
 
 describe('runFirstInstall — input validation', () => {
@@ -61,25 +63,52 @@ describe('runFirstInstall — fresh install (provisionPostgres returns "initiali
 
     const order = calls.map((c) => c[0]);
     expect(order).toEqual([
-      'provisionPostgres', 'ensureProductionConfig', 'loadEnvConfig', 'validateDatabaseUrl',
-      'bootstrapDatabase', 'stopPostgres', 'registerPostgresService', 'startService',
+      'provisionPostgres', 'ensureProvisioningAdminConfig', 'validateDatabaseUrl',
+      'bootstrapDatabase', 'createMigrationPrismaClient', 'runMigrations', 'ensureAppRole',
+      'ensureProductionConfig', 'stopPostgres', 'registerPostgresService', 'startService',
       'registerAppService', 'startService', 'waitForHealth', 'openBrowser',
     ]);
   });
 
-  it('writes the production config with the databaseUrl provisionPostgres returned', async () => {
+  it('persists the admin connection using the databaseUrl provisionPostgres returned, never reading it back on a fresh init', async () => {
     const { deps } = baseDeps();
     await runFirstInstall({ schemaPath: 'schema.sql', deps });
-    expect(deps.ensureProductionConfigFn).toHaveBeenCalledWith({
-      configPath: 'C:\\ProgramData\\Studix\\config\\.env',
-      databaseUrl: 'postgresql://studix_admin:secret@127.0.0.1:55432/studix',
+    expect(deps.ensureProvisioningAdminConfigFn).toHaveBeenCalledWith({
+      configPath: 'C:\\ProgramData\\Studix\\config\\admin.env', databaseUrl: ADMIN_URL,
+    });
+    expect(deps.readProvisioningAdminUrlFn).not.toHaveBeenCalled();
+    expect(deps.validateDatabaseUrlFn).toHaveBeenCalledWith(ADMIN_URL);
+  });
+
+  it('passes the resolved schemaPath and admin databaseUrl through to bootstrapDatabase — never the app URL', async () => {
+    const { deps } = baseDeps();
+    await runFirstInstall({ schemaPath: 'C:\\Studix\\backend\\prisma\\studix-schema.sql', deps });
+    expect(deps.bootstrapDatabaseFn).toHaveBeenCalledWith({
+      databaseUrl: ADMIN_URL, schemaPath: 'C:\\Studix\\backend\\prisma\\studix-schema.sql',
     });
   });
 
-  it('passes the resolved schemaPath through to bootstrapDatabase', async () => {
+  it('runs migrations over a dedicated admin-rooted client, then disconnects it', async () => {
+    const { deps, migrationClient } = baseDeps();
+    await runFirstInstall({ schemaPath: 'schema.sql', deps });
+    expect(deps.createMigrationPrismaClientFn).toHaveBeenCalledWith(ADMIN_URL);
+    expect(deps.runMigrationsFn).toHaveBeenCalledWith(migrationClient, { databaseUrl: ADMIN_URL, backup: deps.backupFn });
+    expect(migrationClient.$disconnect).toHaveBeenCalled();
+  });
+
+  it('generates a fresh candidate password and calls ensureAppRole with it and the resolved port, over the admin connection', async () => {
     const { deps } = baseDeps();
-    await runFirstInstall({ schemaPath: 'C:\\Studix\\backend\\prisma\\studix-schema.sql', deps });
-    expect(deps.bootstrapDatabaseFn).toHaveBeenCalledWith({ schemaPath: 'C:\\Studix\\backend\\prisma\\studix-schema.sql' });
+    await runFirstInstall({ schemaPath: 'schema.sql', deps });
+    expect(deps.generatePostgresPasswordFn).toHaveBeenCalled();
+    expect(deps.ensureAppRoleFn).toHaveBeenCalledWith(ADMIN_URL, { appPassword: 'deadbeef00', port: 55432 });
+  });
+
+  it('writes the production config with the RESTRICTED app databaseUrl ensureAppRole returned, never the admin one', async () => {
+    const { deps } = baseDeps();
+    await runFirstInstall({ schemaPath: 'schema.sql', deps });
+    expect(deps.ensureProductionConfigFn).toHaveBeenCalledWith({
+      configPath: 'C:\\ProgramData\\Studix\\config\\.env', databaseUrl: APP_URL,
+    });
   });
 
   it('stops the ad-hoc PostgreSQL instance using the resolved pg_ctl path and data directory', async () => {
@@ -122,23 +151,36 @@ describe('runFirstInstall — fresh install (provisionPostgres returns "initiali
 });
 
 describe('runFirstInstall — existing installation (provisionPostgres returns "already_initialized")', () => {
-  it('never calls ensureProductionConfig — an existing SESSION_SECRET/DATABASE_URL is never touched', async () => {
+  it('reads the admin connection back from the separate admin config instead of persisting a new one', async () => {
     const { deps, calls } = baseDeps({
-      provisionPostgresFn: vi.fn(async () => ({ status: 'already_initialized' })),
+      provisionPostgresFn: vi.fn(async () => ({ status: 'already_initialized', port: 55432 })),
     });
     const result = await runFirstInstall({ schemaPath: 'schema.sql', deps });
 
     expect(result).toEqual({ status: 'installed', browserOpened: true });
-    expect(deps.ensureProductionConfigFn).not.toHaveBeenCalled();
-    expect(calls.map((c) => c[0])).not.toContain('ensureProductionConfig');
+    expect(deps.readProvisioningAdminUrlFn).toHaveBeenCalledWith({ configPath: 'C:\\ProgramData\\Studix\\config\\admin.env' });
+    expect(deps.ensureProvisioningAdminConfigFn).not.toHaveBeenCalled();
+    expect(calls.map((c) => c[0])).not.toContain('ensureProvisioningAdminConfig');
   });
 
-  it('still runs every other step (bootstrap/stop/register/start/health/browser) on a re-run', async () => {
+  it('never calls ensureProductionConfig when ensureAppRole reports the role already existed — an existing SESSION_SECRET/DATABASE_URL is never touched', async () => {
     const { deps } = baseDeps({
-      provisionPostgresFn: vi.fn(async () => ({ status: 'already_initialized' })),
+      provisionPostgresFn: vi.fn(async () => ({ status: 'already_initialized', port: 55432 })),
+      ensureAppRoleFn: vi.fn(async () => ({ status: 'already_exists', appUser: 'studix_app' })),
+    });
+    await runFirstInstall({ schemaPath: 'schema.sql', deps });
+    expect(deps.ensureProductionConfigFn).not.toHaveBeenCalled();
+  });
+
+  it('still runs every other step (bootstrap/migrate/role/stop/register/start/health/browser) on a re-run', async () => {
+    const { deps } = baseDeps({
+      provisionPostgresFn: vi.fn(async () => ({ status: 'already_initialized', port: 55432 })),
+      ensureAppRoleFn: vi.fn(async () => ({ status: 'already_exists', appUser: 'studix_app' })),
     });
     await runFirstInstall({ schemaPath: 'schema.sql', deps });
     expect(deps.bootstrapDatabaseFn).toHaveBeenCalled();
+    expect(deps.runMigrationsFn).toHaveBeenCalled();
+    expect(deps.ensureAppRoleFn).toHaveBeenCalled();
     expect(deps.stopPostgresFn).toHaveBeenCalled();
     expect(deps.registerPostgresServiceFn).toHaveBeenCalled();
     expect(deps.registerAppServiceFn).toHaveBeenCalled();
@@ -147,9 +189,21 @@ describe('runFirstInstall — existing installation (provisionPostgres returns "
     expect(deps.openBrowserFn).toHaveBeenCalled();
   });
 
+  it('a partial-failure recovery (cluster already existed, app role did not yet) still writes the production config on the run that finally creates the role', async () => {
+    const { deps } = baseDeps({
+      provisionPostgresFn: vi.fn(async () => ({ status: 'already_initialized', port: 55432 })),
+      ensureAppRoleFn: vi.fn(async () => ({ status: 'created', appUser: 'studix_app', databaseUrl: APP_URL })),
+    });
+    await runFirstInstall({ schemaPath: 'schema.sql', deps });
+    expect(deps.ensureProductionConfigFn).toHaveBeenCalledWith(
+      expect.objectContaining({ databaseUrl: APP_URL })
+    );
+  });
+
   it('idempotent repeated runs against an already-installed system both succeed identically', async () => {
     const { deps } = baseDeps({
-      provisionPostgresFn: vi.fn(async () => ({ status: 'already_initialized' })),
+      provisionPostgresFn: vi.fn(async () => ({ status: 'already_initialized', port: 55432 })),
+      ensureAppRoleFn: vi.fn(async () => ({ status: 'already_exists', appUser: 'studix_app' })),
     });
     const first = await runFirstInstall({ schemaPath: 'schema.sql', deps });
     const second = await runFirstInstall({ schemaPath: 'schema.sql', deps });
@@ -158,10 +212,30 @@ describe('runFirstInstall — existing installation (provisionPostgres returns "
   });
 });
 
+describe('runFirstInstall — resolving the admin connection fails closed, never guesses', () => {
+  it('a missing admin file against an already-initialized cluster throws resolve_admin_connection before bootstrap ever runs', async () => {
+    const { deps } = baseDeps({
+      provisionPostgresFn: vi.fn(async () => ({ status: 'already_initialized', port: 55432 })),
+      readProvisioningAdminUrlFn: vi.fn(() => null),
+    });
+    await expect(runFirstInstall({ schemaPath: 'schema.sql', deps })).rejects.toMatchObject({ step: 'resolve_admin_connection' });
+    expect(deps.bootstrapDatabaseFn).not.toHaveBeenCalled();
+  });
+
+  it('a malformed admin URL (validateDatabaseUrl throws) stops before bootstrap ever runs', async () => {
+    const { deps } = baseDeps({
+      validateDatabaseUrlFn: vi.fn(() => { throw new Error('malformed admin URL'); }),
+    });
+    await expect(runFirstInstall({ schemaPath: 'schema.sql', deps })).rejects.toMatchObject({ step: 'resolve_admin_connection' });
+    expect(deps.bootstrapDatabaseFn).not.toHaveBeenCalled();
+  });
+});
+
 describe('runFirstInstall — failure at each step stops immediately with a machine-readable .step', () => {
   it.each([
     ['provision_postgres', 'provisionPostgresFn', () => { throw new Error('pg down'); }],
     ['bootstrap_database', 'bootstrapDatabaseFn', () => { throw new Error('schema failed'); }],
+    ['ensure_app_role', 'ensureAppRoleFn', () => { throw new Error('grant failed'); }],
     ['stop_adhoc_postgres', 'stopPostgresFn', () => { throw new Error('stop failed'); }],
     ['start_postgres_service', 'registerPostgresServiceFn', () => { throw new Error('register failed'); }],
     ['start_app_service', 'registerAppServiceFn', () => { throw new Error('nssm missing'); }],
@@ -176,27 +250,30 @@ describe('runFirstInstall — failure at each step stops immediately with a mach
     }
   });
 
-  it('write_production_config failure stops before bootstrap ever runs', async () => {
+  it('run_migrations failure stops with step "run_migrations" but still disconnects the migration client', async () => {
+    const { deps, migrationClient } = baseDeps({
+      runMigrationsFn: vi.fn(async () => { throw new Error('migration failed'); }),
+    });
+    await expect(runFirstInstall({ schemaPath: 'schema.sql', deps })).rejects.toMatchObject({ step: 'run_migrations' });
+    expect(migrationClient.$disconnect).toHaveBeenCalled();
+    expect(deps.ensureAppRoleFn).not.toHaveBeenCalled();
+  });
+
+  it('write_production_config failure stops before the ad-hoc instance is stopped', async () => {
     const { deps } = baseDeps({
       ensureProductionConfigFn: vi.fn(() => { throw new Error('disk full'); }),
     });
     await expect(runFirstInstall({ schemaPath: 'schema.sql', deps })).rejects.toMatchObject({ step: 'write_production_config' });
-    expect(deps.bootstrapDatabaseFn).not.toHaveBeenCalled();
+    expect(deps.stopPostgresFn).not.toHaveBeenCalled();
   });
 
-  it('resolve_database_url failure (e.g. malformed DATABASE_URL) stops before bootstrap ever runs', async () => {
-    const { deps } = baseDeps({
-      validateDatabaseUrlFn: vi.fn(() => { throw new Error('malformed DATABASE_URL'); }),
-    });
-    await expect(runFirstInstall({ schemaPath: 'schema.sql', deps })).rejects.toMatchObject({ step: 'resolve_database_url' });
-    expect(deps.bootstrapDatabaseFn).not.toHaveBeenCalled();
-  });
-
-  it('a failure partway through never reaches later steps (e.g. bootstrap failure never registers services)', async () => {
+  it('a failure partway through never reaches later steps (e.g. bootstrap failure never runs migrations or registers services)', async () => {
     const { deps } = baseDeps({
       bootstrapDatabaseFn: vi.fn(async () => { throw new Error('schema failed'); }),
     });
     await expect(runFirstInstall({ schemaPath: 'schema.sql', deps })).rejects.toThrow(FirstInstallError);
+    expect(deps.runMigrationsFn).not.toHaveBeenCalled();
+    expect(deps.ensureAppRoleFn).not.toHaveBeenCalled();
     expect(deps.stopPostgresFn).not.toHaveBeenCalled();
     expect(deps.registerPostgresServiceFn).not.toHaveBeenCalled();
     expect(deps.registerAppServiceFn).not.toHaveBeenCalled();

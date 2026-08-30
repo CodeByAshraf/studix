@@ -36,10 +36,21 @@
 // locked-down dedicated application role) — it is validated to point at the exact same host as
 // DATABASE_URL; a mismatch is refused rather than silently used, so this can never become an
 // accidental route to a different/remote database.
+//
+// INSTALL-10 — the `databaseUrl` this module's exported functions receive is now, by contract,
+// the studix_admin (provisioning) connection — never the restricted runtime studix_app role's
+// DATABASE_URL. This was already true for createDatabaseIfMissing's own admin-derived
+// connection; applyBaseSchema/classifySchemaState needed no code change at all to become
+// correct under the new architecture — only their caller (backend/src/installer/firstInstall.js)
+// changed what it passes in. ensureAppRole (below) is the one genuinely new piece: it creates
+// the restricted studix_app role and grants it exactly SELECT/INSERT/UPDATE/DELETE on the
+// schema's tables/sequences — never DDL, never ownership of anything (see its own comment for
+// the full grant derivation).
 // ─────────────────────────────────────────────────────────────
 import fs from 'fs';
 import { PrismaClient } from '@prisma/client';
 import { splitSqlStatements } from './migrationRunner.js';
+import { buildDatabaseUrl } from './postgresProvisioning.js';
 
 // Distinct from migrationRunner.js's own ADVISORY_LOCK_KEY (7727727) — advisory locks are
 // keyed per-cluster in PostgreSQL (not per-database), so a shared key would make an in-flight
@@ -193,6 +204,76 @@ export async function createDatabaseIfMissing(adminUrl, dbName) {
       );
     }
     throw describeConnectionFailure(err, 'إنشاء قاعدة البيانات');
+  } finally {
+    await client.$disconnect().catch(() => {});
+  }
+}
+
+// ── INSTALL-10 — least-privilege runtime application role ─────────────────────────────────────
+const APP_ROLE = 'studix_app';
+// A CSPRNG hex secret (postgresProvisioning.js's generatePostgresPassword — randomBytes(32)
+// .toString('hex')) can only ever contain [0-9a-f] by construction — never a quote, backslash,
+// or $-sign. This is verified here, not assumed, before the one place this module interpolates
+// a password directly into raw SQL text: CREATE ROLE's PASSWORD clause does not accept a bound
+// query parameter ($1) in PostgreSQL's own grammar (unlike every other raw SQL call in this
+// file/migrationRunner.js, which use Prisma's normal $queryRaw/$executeRaw parameter binding),
+// so this regex guard is the actual injection defense here, not an incidental extra check.
+const HEX_SECRET_RE = /^[0-9a-f]+$/;
+
+// ensureAppRole: idempotent, verify-before-trust (same discipline as
+// windowsService.js's isOurPostgresService/isOurAppService and this file's own
+// createDatabaseIfMissing) — an already-existing studix_app role's password is NEVER rotated
+// (appPassword is only ever used the one time the role doesn't exist yet); re-running this is
+// always safe and re-applies the GRANT set unconditionally, so a schema/migration run that added
+// new tables since the role was first created is picked up automatically on the next call.
+//
+// Runs entirely over `adminUrl` — the studix_admin connection already pointed at the target
+// database (see bootstrapDatabase()'s own caller contract) — never the app's own DATABASE_URL,
+// since granting/revoking requires rights studix_app itself must never hold (constraint: do not
+// make studix_app the owner of anything it creates its own grants for).
+//
+// `port` (required) + `host` mirror postgresProvisioning.js's buildDatabaseUrl() exactly — reused
+// directly, not reimplemented — to construct the returned databaseUrl on first creation, the
+// same connection-string shape provisionPostgres() already returns for the admin role.
+export async function ensureAppRole(adminUrl, { appUser = APP_ROLE, appPassword, host = '127.0.0.1', port } = {}) {
+  if (!SAFE_IDENTIFIER.test(appUser)) {
+    throw new BootstrapError('unsafe_role_name', 'اسم دور التطبيق يحتوي أحرفاً غير آمنة للاستخدام كمُعرِّف SQL مباشر.');
+  }
+  const dbName = extractDatabaseName(adminUrl);
+  const client = new PrismaClient({ datasources: { db: { url: adminUrl } } });
+  try {
+    let created = false;
+    try {
+      const existing = await client.$queryRaw`SELECT 1 FROM pg_roles WHERE rolname = ${appUser}`;
+      if (existing.length === 0) {
+        if (!appPassword || !HEX_SECRET_RE.test(appPassword)) {
+          throw new BootstrapError(
+            'invalid_app_password',
+            'appPassword مطلوب وبصيغة hex فقط لإنشاء دور التطبيق المحدود لأول مرة — رُفضت القيمة الممرَّرة دفاعاً عن حقن SQL.'
+          );
+        }
+        if (!port) {
+          throw new BootstrapError('missing_port', 'port مطلوب لإنشاء رابط اتصال دور التطبيق المحدود لأول مرة.');
+        }
+        await client.$executeRawUnsafe(
+          `CREATE ROLE "${appUser}" LOGIN PASSWORD '${appPassword}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS`
+        );
+        created = true;
+      }
+
+      // Re-applied unconditionally every call — cheap, idempotent, and the only way a role
+      // created in an earlier run picks up privileges on tables a LATER migration added.
+      await client.$executeRawUnsafe(`GRANT CONNECT ON DATABASE "${dbName}" TO "${appUser}"`);
+      await client.$executeRawUnsafe(`GRANT USAGE ON SCHEMA public TO "${appUser}"`);
+      await client.$executeRawUnsafe(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO "${appUser}"`);
+      await client.$executeRawUnsafe(`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO "${appUser}"`);
+      await client.$executeRawUnsafe(`REVOKE CONNECT ON DATABASE "${dbName}" FROM PUBLIC`);
+    } catch (err) {
+      if (err instanceof BootstrapError) throw err;
+      throw describeConnectionFailure(err, 'إعداد دور التطبيق المحدود');
+    }
+    if (!created) return { status: 'already_exists', appUser };
+    return { status: 'created', appUser, databaseUrl: buildDatabaseUrl({ user: appUser, password: appPassword, host, port, database: dbName }) };
   } finally {
     await client.$disconnect().catch(() => {});
   }
