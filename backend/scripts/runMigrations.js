@@ -1,12 +1,18 @@
 #!/usr/bin/env node
 // backend/scripts/runMigrations.js
 // ─────────────────────────────────────────────────────────────
-// أداة تشغيل يدوية لمرة واحدة (npm run migrate) — يستدعي نفس migrationRunner.js الذي
-// يستدعيه server.js تلقائياً عند الإقلاع، بلا أي فرق في المنطق. مفيدة للتطوير/الاختبار
-// اليدوي (تشغيل الترحيلات بمعزل عن تشغيل الخادم كاملاً) وكخطوة تثبيت/تحديث اختيارية
-// يستدعيها المثبِّت مستقبلاً صراحةً قبل بدء خدمة Windows، لو اقتُضي ذلك.
+// أداة تشغيل يدوية لمرة واحدة (node scripts/runMigrations.js — لا يوجد alias في package.json
+// باسم "npm run migrate"، رغم أن تعليقاً سابقاً هنا ادّعى وجوده) — يستدعي نفس migrationRunner.js
+// مباشرة. مفيدة للتطوير/الاختبار اليدوي (تشغيل الترحيلات بمعزل عن تشغيل الخادم كاملاً)، عادة
+// مقابل قاعدة PostgreSQL محلية كاملة الصلاحية خاصة بالمطوّر.
 //
-// يعمل على DATABASE_URL الحالي في .env كأي سكربت آخر في backend/scripts — لا فرق خاص.
+// INSTALL-11 — التثبيتات الحقيقية (INSTALL-10+) لم تعد تُطبِّق الترحيلات عبر server.js أو عبر
+// هذا السكربت إطلاقاً؛ ذلك أصبح حصراً مسؤولية backend/src/installer/firstInstall.js، عبر اتصال
+// studix_admin الإداري المنفصل. هذا السكربت يعمل على DATABASE_URL الحالي في .env كما هو —
+// في تثبيت حقيقي يكون هذا دور studix_app المحدود (بلا صلاحيات DDL)، فمن المتوقَّع أن يفشل هذا
+// السكربت بوضوح (رفض صلاحية) لا أن يُطبِّق شيئاً بصمت — راجع
+// migration/reports/INSTALL-10_LEAST_PRIVILEGE_APP_ROLE.md و
+// migration/reports/INSTALL-11_CLI_SCRIPT_RECONCILIATION.md.
 // ─────────────────────────────────────────────────────────────
 import dotenv from 'dotenv';
 import { prisma } from '../src/prisma.js';

@@ -1,15 +1,26 @@
 #!/usr/bin/env node
 // backend/scripts/bootstrapDatabase.js
 // ─────────────────────────────────────────────────────────────
-// Phase 6c — manual/future-installer entry point. Ensures the configured database exists and
-// has its base schema (backend/src/db/bootstrapDatabase.js), then hands off to the existing,
-// unmodified migration runner (backend/src/db/migrationRunner.js) for incremental migrations —
-// mirroring scripts/runMigrations.js's own invocation of it exactly, one step later in the
-// lifecycle. Never run automatically by server.js; a deliberate, explicit step, same as
-// runMigrations.js already is.
+// Phase 6c — manual entry point. Ensures the configured database exists and has its base schema
+// (backend/src/db/bootstrapDatabase.js), then hands off to the existing, unmodified migration
+// runner (backend/src/db/migrationRunner.js) for incremental migrations — mirroring
+// scripts/runMigrations.js's own invocation of it. Never run automatically by server.js; a
+// deliberate, explicit step, same as runMigrations.js already is.
 //
 // Uses the Phase 6b config loader (lib/config.js) — not a bare dotenv.config() — so this
 // script resolves the same production-config-path-vs-dev-.env precedence server.js does.
+//
+// INSTALL-11 — this script operates on the ambient DATABASE_URL, whatever role that happens to
+// be. A real INSTALL-10 installation's DATABASE_URL is studix_app, the restricted runtime role
+// (SELECT/INSERT/UPDATE/DELETE only, no DDL) — running this script against a real install will
+// therefore correctly FAIL CLOSED (a Postgres permission-denied error on the schema/DDL work
+// below), not silently misbehave. That is expected, not a bug: real installs and upgrades apply
+// schema/migrations exclusively through backend/src/installer/firstInstall.js, which uses a
+// separate, admin-rooted (studix_admin) connection this script never has access to (see
+// migration/reports/INSTALL-10_LEAST_PRIVILEGE_APP_ROLE.md and
+// migration/reports/INSTALL-11_CLI_SCRIPT_RECONCILIATION.md). This script remains valid for its
+// original purpose — a developer manually bootstrapping their own full-privilege local dev
+// PostgreSQL — where DATABASE_URL is whatever role the developer's own database uses.
 // ─────────────────────────────────────────────────────────────
 import '../src/lib/config.js';
 import path from 'path';
