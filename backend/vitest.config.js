@@ -8,15 +8,19 @@
 // backend/src/test-helpers/scratchDb.js) are deliberately excluded from this default
 // config so `npm run test` stays instant and dependency-free exactly as before. They run
 // only via `npm run test:integration` (vitest.integration.config.js).
+//
+// `scripts/**/*.test.js` — added alongside `src/**/*.test.js` so backend/scripts/*.js (thin
+// CLI wrappers invoked directly by the installer, e.g. manageWindowsServices.js) can carry
+// their own tests without being moved into src/ purely to satisfy this glob.
 import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
-    include: ['src/**/*.test.js'],
-    // include already scopes to src/, so no need to re-list node_modules/dist/etc. here —
-    // only the integration suite itself needs excluding from this default config.
+    include: ['src/**/*.test.js', 'scripts/**/*.test.js'],
+    // include already scopes to src/+scripts/, so no need to re-list node_modules/dist/etc.
+    // here — only the integration suite itself needs excluding from this default config.
     exclude: ['**/*.integration.test.js'],
   },
 });
