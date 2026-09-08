@@ -1,4 +1,4 @@
-; installer/studix.iss
+﻿; installer/studix.iss
 ; ─────────────────────────────────────────────────────────────
 ; INSTALL-06 — Inno Setup script for Studix. Pinned to Inno Setup 6.4.3 (the last version
 ; before JRSoftware's optional commercial-license request introduced in 6.5.0 — see
@@ -92,6 +92,24 @@ Name: "{commonappdata}\Studix"; Permissions: admins-full system-full
 ; not itself run npm/vite/prisma/binary downloads — it only packages an already-assembled,
 ; already-verified output directory.
 Source: "..\release\win-x64\studix\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
+
+; [UninstallDelete] — closes a real Phase 3B E2E finding: Inno Setup only auto-removes a
+; directory at uninstall time if IT created that directory during THAT SAME install run. On an
+; in-place upgrade (same AppId/DefaultDirName as an existing install — Studix's normal, expected
+; lifecycle event, see INSTALL-07 above), {app}\backend\node\pgsql\tools already exist before the
+; [Files] copy step runs, so Inno never records them as "created this run" and its own uninstaller
+; later removes every individual FILE it tracked but leaves the (now-empty) directory shells and
+; the {app} folder itself behind. Confirmed empirically: a real reinstall-then-uninstall left 9
+; empty directories under {app} with 0 files, while every file was correctly deleted.
+;
+; Type: filesandordirs; Name: "{app}" runs as part of Inno's own standard, UNCONDITIONAL uninstall
+; step (independent of InitializeUninstall/WipeDataConfirmed/CurUninstallStepChanged below — none
+; of that Pascal code is touched by this section) and targets ONLY {app} (Program Files\Studix).
+; It never touches {commonappdata}\Studix — that tree's fate (backups\ always kept; pgdata\/
+; config\/logs\ deleted only on confirmed wipe) is governed entirely by the existing, separate
+; CurUninstallStepChanged logic, unchanged here.
+[UninstallDelete]
+Type: filesandordirs; Name: "{app}"
 
 [Icons]
 Name: "{group}\Studix"; Filename: "http://localhost:4000/"; IconFilename: "{app}\node\node.exe"
