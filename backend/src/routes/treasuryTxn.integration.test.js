@@ -11,6 +11,15 @@ import { checkPostgresReachable, setupScratchDb, teardownScratchDb } from '../te
 
 const dbCheck = await checkPostgresReachable();
 
+// ملاحظة: اختبارات parseTreasuryDate الصرفة (بلا قاعدة بيانات) في treasuryTxn.test.js
+// المنفصل عمداً — استيراد ثابت (static import) لـ treasuryTxn.js هنا في نفس هذا الملف كان
+// يُحمِّل prisma.js (ومن ثم عميل Prisma المشترك) قبل beforeAll/setupScratchDb، فيلتقط
+// DATABASE_URL الحقيقي بدل قاعدة scratch (اكتُشف فعلياً: تسبَّب في "الخزنة غير موجودة" رغم
+// إنشائها للتو — client متصل بـ scratch، لكن tx داخل transferBetweenCashboxes/reverseTreasuryTxn
+// متصل بقاعدة التطوير الحقيقية). الاستيراد الديناميكي داخل beforeAll أدناه (بعد
+// setupScratchDb) هو ما يضمن التقاط globalThis.prisma الصحيح — لا نكرّر الخطأ بإضافة أي
+// استيراد ثابت آخر لهذا الملف لنفس السبب.
+
 describe('treasuryTxn.js — real PostgreSQL integration (MEDIUM-B1)', () => {
   if (!dbCheck.reachable) {
     it.skip(`SKIPPED — PostgreSQL scratch DB unavailable: ${dbCheck.reason}`, () => {});
@@ -137,6 +146,9 @@ describe('treasuryTxn.js — real PostgreSQL integration (MEDIUM-B1)', () => {
       expect(outTxn.refId).toBe(inTxn.refId);
       expect(Number(outTxn.amount)).toBe(200);
       expect(Number(inTxn.amount)).toBe(200);
+      // لا انزياح توقيت: التاريخ التقويمي المُرسَل ("2026-01-10") يجب أن يبقى كما هو تماماً.
+      expect(new Date(outTxn.date).toISOString().slice(0, 10)).toBe('2026-01-10');
+      expect(new Date(inTxn.date).toISOString().slice(0, 10)).toBe('2026-01-10');
 
       const rows = await client.treasury_txn.findMany({ where: { ref_id: outTxn.refId } });
       expect(rows).toHaveLength(2);
@@ -149,6 +161,18 @@ describe('treasuryTxn.js — real PostgreSQL integration (MEDIUM-B1)', () => {
       await expect(transferBetweenCashboxes({
         fromCashboxId: fromCb.id, toCashboxId: 'nonexistent_cb', amount: 100, date: '2026-01-10',
       }, { userId: null })).rejects.toThrow('الخزنة الوجهة غير موجودة.');
+
+      expect(await client.treasury_txn.count()).toBe(before);
+    });
+
+    it('rejects an invalid transfer date with a 400-style error instead of a raw Prisma 500, creates no rows at all', async () => {
+      const fromCb = await seedCashbox({ opening_balance: 500 });
+      const toCb = await seedCashbox({ opening_balance: 0 });
+      const before = await client.treasury_txn.count();
+
+      await expect(transferBetweenCashboxes({
+        fromCashboxId: fromCb.id, toCashboxId: toCb.id, amount: 100, date: 'not-a-date',
+      }, { userId: null })).rejects.toMatchObject({ status: 400 });
 
       expect(await client.treasury_txn.count()).toBe(before);
     });

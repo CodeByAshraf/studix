@@ -146,4 +146,29 @@ describe('requireRole — live auth-state check (real scratch database)', () => 
     expect(next).not.toHaveBeenCalled();
     expect(res.statusCode).toBe(403);
   });
+
+  // F. unexpected DB/auth-cache error (production blocker fix — requireRole is async and
+  // calls getAuthState() with no try/catch and without asyncHandler; under Express 4.21 an
+  // async middleware's rejection is not auto-forwarded to the error handler, so it became an
+  // unhandled promise rejection at the process level — which, now that
+  // backend/src/lib/shutdown.js's registerFatalErrorHandlers exists, would trigger a full
+  // graceful shutdown of the entire backend for what should be a single recoverable request
+  // failure. Fixed by wrapping the returned middleware with the same asyncHandler already
+  // used by every route handler in this project. Deterministic, no-mocking-Prisma
+  // reproduction, same technique as permissions.integration.test.js's equivalent case: an
+  // id of the wrong type makes prisma.users.findUnique's own argument validation throw a
+  // real PrismaClientValidationError.)
+  it('F: an unexpected auth-cache/database error is forwarded to next(err) — no unhandled rejection, no thrown exception, response untouched', async () => {
+    const { req, res, next } = mockReqRes({ id: 12345, role: 'admin', userAuthVersion: 1, roleAuthVersion: null });
+
+    await expect(requireRole('admin')(req, res, next)).resolves.toBeUndefined();
+
+    expect(next).toHaveBeenCalledOnce();
+    const [err] = next.mock.calls[0];
+    expect(err).toBeInstanceOf(Error);
+    expect(err.status).toBeUndefined();
+    expect(err.expose).toBeUndefined();
+    expect(err.code).toBeUndefined();
+    expect(res.statusCode).toBeNull();
+  });
 });

@@ -41,6 +41,7 @@ import hwSubmissionsRouter from './routes/hwSubmissions.js';
 import centerProfileRouter from './routes/centerProfile.js';
 import materialDistributionRouter from './routes/materialDistribution.js';
 import admissionActivationRouter from './routes/admissionActivation.js';
+import studentCreateRouter from './routes/studentCreate.js';
 import treasuryTxnRouter from './routes/treasuryTxn.js';
 import paymentsRouter from './routes/payments.js';
 import admissionPaymentsRouter from './routes/admissionPayments.js';
@@ -59,7 +60,7 @@ import { prisma, checkDbConnection } from './prisma.js';
 import { checkMigrationsUpToDate } from './db/migrationRunner.js';
 import logger from './lib/logger.js';
 import { validateDatabaseUrl, describeStartupFailure } from './lib/startupErrors.js';
-import { createGracefulShutdown, registerShutdownHandlers } from './lib/shutdown.js';
+import { createGracefulShutdown, registerShutdownHandlers, registerFatalErrorHandlers } from './lib/shutdown.js';
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -209,6 +210,14 @@ app.use('/api/admissions', requireAuth, requirePermission('admissions'), admissi
 // (PUT /:id، segment واحد). ملف منفصل عمداً عن admissionActivation.js — مسؤولية واحدة
 // لكل ملف (نفس نمط examDelete.js/examGrades.js الحالي).
 app.use('/api/admissions', requireAuth, requirePermission('admissions'), admissionCancellationRouter);
+
+// ── Production hardening pass: إنشاء طالب مباشر بكود خادم-authoritative ──
+// يُعترَض هنا فقط POST /api/students (segment واحد فقط) — نفس تقنية الاعتراض حسب
+// method+path المستخدَمة أعلاه لـ exams/homeworks. GET/PUT/DELETE /api/students تمرّ
+// دون أي تغيير للحلقة الديناميكية أدناه، التي تتولّاها كما هي اليوم (preserveClientId
+// لا يزال مفعَّلاً هناك لـ GET/PUT). نفس حراسة students الحالية (requireAuth +
+// requirePermission('students')).
+app.use('/api/students', requireAuth, requirePermission('students'), studentCreateRouter);
 
 // ── Phase 3B-14A: منع DELETE عن cashboxes فقط، بلا التأثير على أي فعل آخر ──
 // قرار تفتيش/قرار Phase 3B-14A الصريح: لا واجهة مستخدم فعلية تحذف خزنة اليوم
@@ -389,3 +398,9 @@ server.on('error', (err) => {
 // ثانية أثناء إيقاف جارٍ بالفعل تُسجَّل وتُتجاهَل، لا تُعيد المحاولة.
 const shutdown = createGracefulShutdown({ server, prisma, logger });
 registerShutdownHandlers(shutdown);
+
+// أي خطأ يهرب خارج نطاق طلب HTTP (وعد غير مُنتظَر، استثناء داخل مُستمِع/مؤقّت) لا يلتقطه
+// asyncHandler/errorHandler.js إطلاقاً — بلا هذا المُستمِع كانت Node ستُنهي العملية بأكملها
+// فوراً وبصمت نسبي (لا console مرئية أثناء تشغيل كـ Windows Service)، فتُقطَع كل الجلسات
+// النشطة بلا أي أثر تشخيصي. نفس آلية shutdown الآمنة أعلاه بالضبط — idempotent بالفعل.
+registerFatalErrorHandlers(shutdown, logger);

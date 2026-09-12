@@ -31,6 +31,7 @@ import crypto from 'crypto';
 import { runInTransaction } from '../lib/transaction.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { snakeToCamel } from '../lib/caseMapper.js';
+import { parseTreasuryDate } from './treasuryTxn.js';
 
 function badRequest(message) {
   const err = new Error(message);
@@ -91,6 +92,11 @@ export async function createPayment(input, { userId = null } = {}) {
   if (!METHODS.includes(method)) throw badRequest('طريقة الدفع غير صحيحة.');
   if (!PAY_TYPES.includes(payType)) throw badRequest('نوع الدفع غير صحيح.');
   if (typeof date !== 'string' || !date.trim()) throw badRequest('التاريخ مطلوب.');
+  // نفس منطق parseTreasuryDate المستخدَم في treasuryTxn.js بالضبط — قيمة غير قابلة للتحليل
+  // كانت ستصل خاماً لـ Prisma (عمودا payments.date وtreasury_txn.date كلاهما @db.Date)
+  // فتُنتج PrismaClientValidationError خام (بلا code) يصل كـ 500 عام عبر errorHandler.js.
+  const parsedDate = parseTreasuryDate(date);
+  if (!parsedDate) throw badRequest('التاريخ غير صالح.');
 
   let materialIdBig = null;
   if (materialId !== null && materialId !== undefined && materialId !== '') {
@@ -123,7 +129,6 @@ export async function createPayment(input, { userId = null } = {}) {
     const meta = PAY_TYPE_TO_CATEGORY[payType] || PAY_TYPE_TO_CATEGORY.subscription;
     const paymentId      = crypto.randomUUID();
     const treasuryTxnId  = crypto.randomUUID();
-    const parsedDate     = new Date(date);
 
     // ── الخطوة 1: treasury_txn أولاً، payment_id تبقى NULL مبدئياً ──
     // fk_treasury_payment وpayments_treasury_txn_id_fkey غير deferrable (تحقّق فعلي حيّ

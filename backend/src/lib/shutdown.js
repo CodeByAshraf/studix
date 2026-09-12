@@ -58,3 +58,29 @@ export function registerShutdownHandlers(shutdown, processRef = process) {
   processRef.on('SIGINT', () => shutdown('SIGINT'));
   processRef.on('SIGTERM', () => shutdown('SIGTERM'));
 }
+
+// registerFatalErrorHandlers: catches errors that escape request scope entirely (a stray
+// unawaited promise, a timer/event-listener callback that throws) — asyncHandler/errorHandler.js
+// only cover errors inside a request handler. Node's default behavior for an unhandled
+// rejection in current LTS releases is to crash the process exactly like an uncaught exception,
+// and for a process running headless as a Windows Service there is no console to read (see
+// logger.js's own note) — the process would just vanish, killing every active session with no
+// diagnostic trail. This logs the real error via the existing persistent logger first, then
+// reuses the SAME shutdown() closure passed in — its own idempotency guard (see
+// createGracefulShutdown above) already covers both handlers firing, or either firing while a
+// SIGINT/SIGTERM shutdown is already in progress, so no separate guard is needed here.
+export function registerFatalErrorHandlers(shutdown, logger, processRef = process) {
+  processRef.on('uncaughtException', (err) => {
+    logger.error('استثناء غير مُلتقَط (uncaughtException) — إيقاف تشغيل آمن.', {
+      error: err?.message, stack: err?.stack,
+    });
+    shutdown('uncaughtException');
+  });
+  processRef.on('unhandledRejection', (reason) => {
+    const err = reason instanceof Error ? reason : new Error(String(reason));
+    logger.error('رفض Promise غير مُعالَج (unhandledRejection) — إيقاف تشغيل آمن.', {
+      error: err.message, stack: err.stack,
+    });
+    shutdown('unhandledRejection');
+  });
+}

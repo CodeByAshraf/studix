@@ -21,6 +21,7 @@
 // lazily) — never the token's own claims — for the actual permission values.
 // ─────────────────────────────────────────────────────────────
 import { getAuthState } from '../lib/authCache.js';
+import { asyncHandler } from './errorHandler.js';
 
 function resolveEffectivePermissions(state) {
   if (Array.isArray(state.userPermissions) && state.userPermissions.length > 0) {
@@ -34,7 +35,15 @@ function resolveEffectivePermissions(state) {
 }
 
 export function requirePermission(pageId) {
-  return async function permissionGuard(req, res, next) {
+  // asyncHandler (نفس الغلاف المستخدَم بالفعل في كل route handler في هذا المشروع): خطأ
+  // غير متوقَّع من getAuthState (مثلاً عطل عابر في Postgres أثناء قراءة authCache) يصل
+  // هنا كاستثناء غير مُلتقَط — بلا هذا الغلاف كان سيتحوّل إلى unhandled promise rejection
+  // (Express 4 لا يُمرِّر رفض async middleware للـ error handler تلقائياً)، فيُفعِّل
+  // registerFatalErrorHandlers في server.js ويُوقِف الخادم بأكمله لخطأ عابر قابل للتعافي.
+  // asyncHandler يُحوِّله بدلاً من ذلك إلى next(err) العادي → errorHandler.js المركزي (500
+  // عام، بلا تسريب تفاصيل Prisma، مع نفس تسجيل logger.error الحالي) — لا يغيّر أي استجابة
+  // 401/403 حالية (تلك عبارة عن return عادي هنا، لا استثناء، فلا تمرّ عبر catch أصلاً).
+  return asyncHandler(async function permissionGuard(req, res, next) {
     if (!req.user) {
       return res.status(401).json({ ok: false, error: 'يجب تسجيل الدخول للوصول لهذا المسار.' });
     }
@@ -61,7 +70,7 @@ export function requirePermission(pageId) {
     }
 
     next();
-  };
+  });
 }
 
 // مُصدَّرة للاختبار المباشر بلا HTTP كامل.

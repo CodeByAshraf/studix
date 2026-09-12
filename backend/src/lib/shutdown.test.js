@@ -4,7 +4,7 @@
 // registerShutdownHandlers tests specifically so this suite never attaches a real SIGINT/
 // SIGTERM listener to the actual vitest process.
 import { describe, it, expect, vi } from 'vitest';
-import { createGracefulShutdown, registerShutdownHandlers } from './shutdown.js';
+import { createGracefulShutdown, registerShutdownHandlers, registerFatalErrorHandlers } from './shutdown.js';
 
 function makeLogger() {
   return { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
@@ -156,5 +156,82 @@ describe('registerShutdownHandlers', () => {
     const fakeProcess = makeFakeProcess();
     registerShutdownHandlers(vi.fn(), fakeProcess);
     expect(process.listenerCount('SIGINT')).toBe(before);
+  });
+});
+
+describe('registerFatalErrorHandlers', () => {
+  function makeFakeProcess() {
+    const handlers = {};
+    return {
+      on: vi.fn((event, cb) => { handlers[event] = cb; }),
+      emit: (event, ...args) => handlers[event]?.(...args),
+    };
+  }
+
+  it('registers listeners for both uncaughtException and unhandledRejection on the given process-like object', () => {
+    const fakeProcess = makeFakeProcess();
+    registerFatalErrorHandlers(vi.fn(), makeLogger(), fakeProcess);
+
+    expect(fakeProcess.on).toHaveBeenCalledWith('uncaughtException', expect.any(Function));
+    expect(fakeProcess.on).toHaveBeenCalledWith('unhandledRejection', expect.any(Function));
+  });
+
+  it('an uncaughtException logs the real error with useful context and triggers shutdown, without touching the real process', () => {
+    const fakeProcess = makeFakeProcess();
+    const logger = makeLogger();
+    const shutdown = vi.fn();
+    registerFatalErrorHandlers(shutdown, logger, fakeProcess);
+
+    const err = new Error('boom - stray throw outside any request');
+    fakeProcess.emit('uncaughtException', err);
+
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('استثناء غير مُلتقَط'),
+      expect.objectContaining({ error: 'boom - stray throw outside any request', stack: err.stack })
+    );
+    expect(shutdown).toHaveBeenCalledWith('uncaughtException');
+  });
+
+  it('an unhandledRejection logs the real reason and triggers shutdown, even when the rejection reason is not an Error instance', () => {
+    const fakeProcess = makeFakeProcess();
+    const logger = makeLogger();
+    const shutdown = vi.fn();
+    registerFatalErrorHandlers(shutdown, logger, fakeProcess);
+
+    fakeProcess.emit('unhandledRejection', 'a plain string rejection reason');
+
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('رفض Promise غير مُعالَج'),
+      expect.objectContaining({ error: 'a plain string rejection reason' })
+    );
+    expect(shutdown).toHaveBeenCalledWith('unhandledRejection');
+  });
+
+  it('does not crash the test process and relies on shutdown()\'s own idempotency guard when both handlers fire', async () => {
+    const fakeProcess = makeFakeProcess();
+    const logger = makeLogger();
+    const server = makeServer();
+    const prisma = makePrisma();
+    const exitFn = vi.fn();
+    const shutdown = createGracefulShutdown({ server, prisma, logger, timeoutMs: 500, exitFn });
+    registerFatalErrorHandlers(shutdown, logger, fakeProcess);
+
+    fakeProcess.emit('uncaughtException', new Error('first fatal error'));
+    fakeProcess.emit('unhandledRejection', new Error('second fatal error, arrives while shutdown is already in progress'));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(server.close).toHaveBeenCalledTimes(1);
+    expect(prisma.$disconnect).toHaveBeenCalledTimes(1);
+    expect(exitFn).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('تم تجاهلها'), { signal: 'unhandledRejection' });
+  });
+
+  it('never touches the real process object (no real uncaughtException/unhandledRejection listeners attached by this suite)', () => {
+    const beforeExc = process.listenerCount('uncaughtException');
+    const beforeRej = process.listenerCount('unhandledRejection');
+    const fakeProcess = makeFakeProcess();
+    registerFatalErrorHandlers(vi.fn(), makeLogger(), fakeProcess);
+    expect(process.listenerCount('uncaughtException')).toBe(beforeExc);
+    expect(process.listenerCount('unhandledRejection')).toBe(beforeRej);
   });
 });

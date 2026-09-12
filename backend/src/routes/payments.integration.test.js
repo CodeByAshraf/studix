@@ -93,6 +93,38 @@ describe('payments.js — real PostgreSQL integration (MEDIUM-B1)', () => {
       expect(await client.treasury_txn.count({ where: { cashbox_id: cashbox.id } })).toBe(0);
     });
 
+    it('rejects an invalid date with a 400-style error instead of a raw Prisma 500, zero residue', async () => {
+      const student = await seedStudent();
+      const cashbox = await seedCashbox();
+      const before = await client.treasury_txn.count();
+
+      await expect(createPayment({
+        studentId: student.id, month: 1, year: 2026, amount: 300,
+        method: 'cash', payType: 'subscription', date: 'not-a-date', cashboxId: cashbox.id,
+      }, { userId: null })).rejects.toMatchObject({ status: 400 });
+
+      expect(await client.payments.count({ where: { student_id: student.id } })).toBe(0);
+      expect(await client.treasury_txn.count()).toBe(before);
+    });
+
+    it('accepts a plain YYYY-MM-DD date, preserving the exact calendar date on both payments.date and treasury_txn.date with no timezone shift', async () => {
+      const student = await seedStudent();
+      const cashbox = await seedCashbox();
+
+      const { payment, treasuryTxn } = await createPayment({
+        studentId: student.id, month: 4, year: 2026, amount: 300,
+        method: 'cash', payType: 'subscription', date: '2026-04-15', cashboxId: cashbox.id,
+      }, { userId: null });
+
+      expect(new Date(payment.date).toISOString().slice(0, 10)).toBe('2026-04-15');
+      expect(new Date(treasuryTxn.date).toISOString().slice(0, 10)).toBe('2026-04-15');
+
+      const dbPayment = await client.payments.findUnique({ where: { id: payment.id } });
+      const dbTxn = await client.treasury_txn.findUnique({ where: { id: treasuryTxn.id } });
+      expect(dbPayment.date.toISOString().slice(0, 10)).toBe('2026-04-15');
+      expect(dbTxn.date.toISOString().slice(0, 10)).toBe('2026-04-15');
+    });
+
     it('rejects a nonexistent student with zero residue', async () => {
       const cashbox = await seedCashbox();
       const before = await client.treasury_txn.count();

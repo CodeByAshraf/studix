@@ -38,6 +38,22 @@ function badRequest(message) {
   return err;
 }
 
+const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+// treasury_txn.date هو @db.Date وغير nullable — كان يصل هنا خاماً إلى `new Date(date)` بلا
+// أي تحقّق: قيمة غير قابلة للتحليل (مثلاً نص عشوائي) تُنتج Invalid Date، ثم
+// PrismaClientValidationError خام (بلا code) عند tx.treasury_txn.create يصل كـ 500 عام عبر
+// errorHandler.js بدل 400 واضح. يقبل هنا "YYYY-MM-DD" (يُطبَّع لمنتصف ليل UTC صراحةً، يحفظ
+// التاريخ التقويمي بلا انزياح توقيت — نفس نمط attendanceSessions.js) أو ISO-8601 كامل صالح
+// بالفعل (الحالة التي يُرسلها العميل مُطبَّعة سلفاً عبر toRequestDate في src/services/api.js
+// لإدخال الخزنة اليدوي) — أي شيء آخر (فارغ/Invalid Date) يُعاد null فيرفضه المستدعي بـ 400.
+export function parseTreasuryDate(value) {
+  if (typeof value !== 'string' && !(value instanceof Date)) return null;
+  const asIso = typeof value === 'string' && DATE_ONLY_RE.test(value) ? `${value}T00:00:00.000Z` : value;
+  const parsed = asIso instanceof Date ? asIso : new Date(asIso);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
 // يُصدَّر منفصلاً عن الـ router ليكون قابلاً للاختبار مباشرة بلا HTTP/auth، بنفس مبدأ
 // activateAdmission في admissionActivation.js.
 export async function reverseTreasuryTxn({ id, reason }, { userId = null } = {}) {
@@ -128,6 +144,8 @@ export async function transferBetweenCashboxes(
   const amt = Number(amount);
   if (!amt || amt <= 0) throw badRequest('المبلغ يجب أن يكون أكبر من صفر.');
   if (!date) throw badRequest('التاريخ مطلوب.');
+  const dateObj = parseTreasuryDate(date);
+  if (!dateObj) throw badRequest('التاريخ غير صالح.');
 
   const result = await runInTransaction(async (tx) => {
     // القراءة الحاسمة داخل المعاملة — نفس مبدأ reverseTreasuryTxn أعلاه.
@@ -146,7 +164,7 @@ export async function transferBetweenCashboxes(
       data: {
         id: crypto.randomUUID(),
         cashbox_id:  fromCashboxId,
-        date:        new Date(date),
+        date:        dateObj,
         type:        'expense',
         category:    'transfer',
         amount:      amt,
@@ -163,7 +181,7 @@ export async function transferBetweenCashboxes(
       data: {
         id: crypto.randomUUID(),
         cashbox_id:  toCashboxId,
-        date:        new Date(date),
+        date:        dateObj,
         type:        'income',
         category:    'transfer',
         amount:      amt,
@@ -191,6 +209,15 @@ const router = Router();
 // نستبدل created_by بـ req.user.id أولاً — الوسيلة الوحيدة المتاحة لحقن قيمة من
 // الجلسة في كتابة تمرّ عبر crud.js لاحقاً، بلا تعديل crud.js نفسه إطلاقاً.
 router.post('/', (req, res, next) => {
+  // date يمرّ بعدها مباشرة للـ CRUD العام (crud.js، غير مُعدَّل عمداً — انظر توضيح الملف
+  // أعلاه) الذي يمرّره خاماً لـ Prisma بلا أي تحقّق. نفس منطق parseTreasuryDate المستخدَم
+  // في transferBetweenCashboxes بالضبط — قيمة غير صالحة كانت ستصل كـ PrismaClientValidationError
+  // خام (500 عام)، تُرفَض هنا الآن بـ 400 واضح قبل أن تصل الـ CRUD العام إطلاقاً.
+  if (req.body?.date !== undefined) {
+    const parsedDate = parseTreasuryDate(req.body.date);
+    if (!parsedDate) return res.status(400).json({ ok: false, error: 'التاريخ غير صالح.' });
+    req.body = { ...req.body, date: parsedDate };
+  }
   req.body = { ...req.body, createdBy: req.user?.id ?? null };
   next();
 });

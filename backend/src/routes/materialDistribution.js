@@ -33,6 +33,17 @@ const RELEVANT_TYPES = ['studentDelivery', 'reservation', 'reservationRelease', 
 const PAY_STATUSES = new Set(['paid', 'partial', 'unpaid']);
 const NUMBER_RE = /^INV-(\d+)$/;
 
+// مفتاح قفل استشاري (pg_advisory_xact_lock) مخصّص لتخصيص inventory_txn.number — يتبع نفس
+// تسلسل الثوابت العشوائية بلا معنى خاص المستخدَمة فعلاً في db/migrationRunner.js (7727727)/
+// db/bootstrapDatabase.js (7727728)/db/firstAdmin.js (7727729)/studentCreate.js (7727730)،
+// مفتاح مختلف هنا عمداً لتجنّب أي تصادم معها. نفس السبب بالضبط المُوثَّق في studentCreate.js:
+// computeNextSeq تقرأ MAX(number) بلا أي قفل — طلبات متزامنة (حتى لمواد مختلفة، الترقيم
+// عالمي) تقرأ نفس MAX قبل أن يُثبِّت أيٌّ منها شيئاً فتتصادم على UNIQUE، وإعادة المحاولة
+// الواحدة أدناه (isP2002OnNumber) لا تكفي وحدها تحت تزامن حقيقي (أثبت هذا فعلياً اختبار
+// تزامن studentCreate.js قبل إصلاحه، بمحاولات retry أكثر من هنا وبقيت غير كافية). نطاق-
+// معاملة (xact) لا نطاق-جلسة: يُحرَّر تلقائياً عند commit/rollback، بلا إلغاء قفل يدوي.
+const INVENTORY_NUMBER_ADVISORY_LOCK_KEY = 7727731;
+
 function badRequest(message) {
   const err = new Error(message);
   err.status = 400;
@@ -162,6 +173,10 @@ async function attemptReconciliation({ materialIdBigInt, materialIdStr, byStuden
       if (!latestByStudent.has(row.student_id)) latestByStudent.set(row.student_id, row);
     }
 
+    // يُسلسِل حساب nextSeq + إدراج كل حركات هذا الاستدعاء بالكامل ضد أي استدعاء آخر متزامن
+    // (نفس مادة أو مادة مختلفة — الترقيم عالمي) — الحامل وحده يقرأ MAX ويكتب، والبقية
+    // تُحجَب خلفه بدل أن تتسابق معه. انظر توضيح INVENTORY_NUMBER_ADVISORY_LOCK_KEY أعلاه.
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${INVENTORY_NUMBER_ADVISORY_LOCK_KEY})`;
     let nextSeq = await computeNextSeq(tx);
     const results = [];
 

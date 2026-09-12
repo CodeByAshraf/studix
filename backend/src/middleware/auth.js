@@ -26,6 +26,7 @@ import { verifySession, SESSION_COOKIE_NAME } from '../lib/session.js';
 import { verifySupportSessionToken, SUPPORT_SESSION_COOKIE_NAME } from '../lib/supportSession.js';
 import { isSupportSessionActive } from '../lib/supportAccessCache.js';
 import { getAuthState } from '../lib/authCache.js';
+import { asyncHandler } from './errorHandler.js';
 
 function parseCookies(header) {
   const out = {};
@@ -49,7 +50,14 @@ export function requireAuth(req, res, next) {
 }
 
 export function requireRole(...roles) {
-  return async (req, res, next) => {
+  // asyncHandler (نفس الغلاف المستخدَم بالفعل في كل route handler، ونفس الإصلاح المطبَّق
+  // على requirePermission في middleware/permissions.js لنفس السبب بالضبط): خطأ غير متوقَّع
+  // من getAuthState (عطل عابر في Postgres أثناء قراءة authCache) كان سيصل كاستثناء غير
+  // مُلتقَط → unhandled promise rejection → registerFatalErrorHandlers في server.js يُوقِف
+  // الخادم بأكمله. asyncHandler يُحوِّله بدلاً من ذلك إلى next(err) العادي → errorHandler.js
+  // المركزي (500 عام، بلا تسريب تفاصيل Prisma) — لا يغيّر استجابات 401/403 الحالية (return
+  // عادي هنا، لا استثناء).
+  return asyncHandler(async (req, res, next) => {
     if (!req.user) {
       return res.status(403).json({ ok: false, error: 'لا تملك صلاحية الوصول لهذا الإجراء.' });
     }
@@ -76,7 +84,7 @@ export function requireRole(...roles) {
     }
 
     next();
-  };
+  });
 }
 
 export function requireSupportSession(req, res, next) {

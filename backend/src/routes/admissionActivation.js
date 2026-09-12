@@ -25,6 +25,7 @@ import crypto from 'crypto';
 import { runInTransaction } from '../lib/transaction.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { snakeToCamel } from '../lib/caseMapper.js';
+import { computeNextStudentCode } from '../lib/studentCode.js';
 
 function badRequest(message) {
   const err = new Error(message);
@@ -47,21 +48,10 @@ function serializeBigInt(input) {
   return input;
 }
 
-// نفس صيغة generateCode('TC', seq) الحالية في src/utils/helpers.js (الفرونت-إند) — لا
-// نغيّر الصيغة، فقط نحسبها هنا من جهة الخادم داخل المعاملة (tx) — نفس مبدأ computeNextSeq
-// في materialDistribution.js بالضبط. يحلّ خطر تعارض students.code (UNIQUE) الموجود مسبقاً
-// في createStudent() المحلي (existingStudents.length + 1 — عدّاد محلي قد يكون قديماً).
-async function computeNextStudentCode(tx) {
-  const year = new Date().getFullYear();
-  const rows = await tx.students.findMany({ select: { code: true } });
-  let max = 0;
-  const re = /-(\d+)$/;
-  for (const { code } of rows) {
-    const m = re.exec(code || '');
-    if (m) max = Math.max(max, parseInt(m[1], 10));
-  }
-  return `TC-${year}-${String(max + 1).padStart(4, '0')}`;
-}
+// computeNextStudentCode (لا تعريف محلي هنا بعد الآن — انتقلت إلى backend/src/lib/
+// studentCode.js لتُشارَك مع مسار إنشاء الطالب المباشر أيضاً، Production hardening pass).
+// نفس الخوارزمية بالضبط، نفس المبدأ (نُحسَب من جهة الخادم داخل المعاملة tx، لا عدّاد محلي
+// قد يكون قديماً) — راجع الملف المشترك للشرح الكامل.
 
 // gender/enrollDate/code/id/createdAt/updatedAt غير مُدرَجة عمداً: gender لا عمود له
 // إطلاقاً في students (نفس الاستبعاد الصامت الحالي عبر الـ CRUD العام)، والباقي مُدار

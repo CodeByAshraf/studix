@@ -46,7 +46,7 @@ function parseIdParam(fields, rawId) {
 
 // يجهّز جسم الطلب للكتابة: camelCase→snake_case، إسقاط الحقول المُدارة من الخادم،
 // تحويل حقول BigInt (Prisma يرفض number/string خام لعمود BigInt).
-function prepareWriteData(modelName, body) {
+export function prepareWriteData(modelName, body) {
   const fields = getModelFields(modelName);
   const snake = camelToSnake(body || {});
   const data = {};
