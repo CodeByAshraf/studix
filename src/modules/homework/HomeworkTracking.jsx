@@ -4,9 +4,10 @@ import { useState, useMemo, useCallback } from 'react';
 import { useAppStore } from '../../store/app.store';
 import { useToast } from '../../components/Toast';
 import Button       from '../../components/ui/Button';
-import { SUB_STATUS } from '../../services/homeworkService';
+import { SUB_STATUS, getHomeworkEligibleStudents } from '../../services/homeworkService';
 import { pgSaveHwSubmissions } from '../../services/api';
 import { formatDate } from '../../utils/helpers';
+import { openHomeworkReportPrint } from './buildHomeworkReport';
 
 const AV_PAL = [
   {bg:'rgba(59,130,246,.18)',color:'#3b82f6'},{bg:'rgba(16,185,129,.18)',color:'#10b981'},
@@ -128,24 +129,30 @@ export default function HomeworkTracking({ hw, onClose }) {
   const hwSubmissions        = useAppStore((s) => s.hwSubmissions);
   const setHwSubmissions     = useAppStore((s) => s.setHwSubmissions);
   const students             = useAppStore((s) => s.students);
+  const centerProfile        = useAppStore((s) => s.centerProfile);
   const toast = useToast();
   const [saving, setSaving] = useState(false);
   const [search, setSearch] = useState('');
 
+  // ◈ في رأس الصفحة أدناه (وفي التقرير المطبوع) يبقى عرضاً تاريخياً لِمجموعة الواجب
+  // الأصلية (إن وُجدت) — لا علاقة له بتحديد من هو المؤهَّل هنا (ذلك grade-based الآن).
   const group = groups.find(g => g.id === hw.groupId);
-  const groupStudents = useMemo(() =>
-    students.filter(s => s.groupId === hw.groupId && s.status === 'active'),
-  [students, hw.groupId]);
+  // Homework 2.0 Phase 2: eligibility is grade-based (getHomeworkEligibleStudents), never
+  // Group-based — this is the roster that actually determines both the tracking table AND
+  // the exact payload sent to pgSaveHwSubmissions below (localSubs is seeded from it).
+  const eligibleStudents = useMemo(() =>
+    getHomeworkEligibleStudents(hw, students),
+  [students, hw.grade]);
 
   const filtered = useMemo(() => {
     const q = search.toLowerCase();
-    return q ? groupStudents.filter(s => s.name.toLowerCase().includes(q)) : groupStudents;
-  }, [groupStudents, search]);
+    return q ? eligibleStudents.filter(s => s.name.toLowerCase().includes(q)) : eligibleStudents;
+  }, [eligibleStudents, search]);
 
   // Local submissions map: { [studentId]: sub }
   const [localSubs, setLocalSubs] = useState(() => {
     const map = {};
-    groupStudents.forEach(s => {
+    eligibleStudents.forEach(s => {
       const existing = hwSubmissions.find(x => x.hwId === hw.id && x.studentId === s.id);
       map[s.id] = existing || { hwId: hw.id, studentId: s.id, status: 'missing', submittedAt: null, score: null, notes: '' };
     });
@@ -160,12 +167,12 @@ export default function HomeworkTracking({ hw, onClose }) {
   const stats = useMemo(() => {
     const values = Object.values(localSubs);
     return {
-      total:     groupStudents.length,
+      total:     eligibleStudents.length,
       submitted: values.filter(s => s.status === 'submitted').length,
       late:      values.filter(s => s.status === 'late').length,
       missing:   values.filter(s => s.status === 'missing').length,
     };
-  }, [localSubs, groupStudents]);
+  }, [localSubs, eligibleStudents]);
 
   // Phase 3B-6: PostgreSQL هو مصدر الحقيقة الآن — الحفظ يذهب للخادم أولاً (معاملة
   // ذرّية واحدة تستبدل كل حالات تسليم الواجب)، ولا يُطبَّق أي تغيير على الحالة
@@ -199,7 +206,7 @@ export default function HomeworkTracking({ hw, onClose }) {
 
   const markAll = (status) => {
     const updated = {};
-    groupStudents.forEach(s => {
+    eligibleStudents.forEach(s => {
       updated[s.id] = {
         ...localSubs[s.id],
         status,
@@ -304,6 +311,12 @@ export default function HomeworkTracking({ hw, onClose }) {
           <span style={{ color:'#ef4444', fontWeight:700 }}>{stats.missing}</span> لم يُسلَّم
         </div>
         <div style={{ display:'flex', gap:8 }}>
+          {/* يطبع من hwSubmissions المحفوظة فعلياً في المتجر — وليس localSubs (تعديلات
+              غير محفوظة بعد) — لا يُعرَض في التقرير ما لم يُحفَظ أولاً عبر "💾 حفظ الحالات". */}
+          <Button variant="secondary"
+            onClick={() => openHomeworkReportPrint({ hw, group, students: eligibleStudents, hwSubmissions, profile: centerProfile })}>
+            🖨 طباعة تقرير الدرجات
+          </Button>
           <Button variant="secondary" onClick={onClose}>إغلاق</Button>
           <Button variant="primary" loading={saving} onClick={handleSave}>💾 حفظ الحالات</Button>
         </div>

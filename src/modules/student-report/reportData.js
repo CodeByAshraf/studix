@@ -7,6 +7,8 @@
 import { getAttendanceStats } from '../../services/attendanceService';
 import { scorePercent, gradeStatus } from '../../services/examService';
 import { getStudentFee, getRefundedAmount } from '../../services/paymentService';
+import { deriveMatDist } from '../../services/materialService';
+import { formatCurrency } from '../../utils/helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // تجميع كل بيانات الطالب من الـ store
@@ -120,10 +122,25 @@ export function gatherStudentData(studentId, store) {
   // المطابقة القديمة بالاسم وحدها كانت تُفقِد كل تسليم مُهاجَر بصمت. student_id أولاً
   // (يطابق الهجرة)، وrecipient يبقى احتياطاً فقط لحركات ما قبل 3B-12 التي لا student_id
   // لها إطلاقاً — لا حذف لهذا المسار، حتى لا تختفي مذكرات قديمة مسجَّلة بهذا الشكل فقط.
+  // تُثرَى كل حركة بسعر المذكرة وحالة الدفع/المتبقي الحقيقية — legacyMetadata.paidAmount
+  // مصدره الآن دفعات حقيقية مربوطة بحركة خزنة فعلية (materialDistribution.js)، لا رقم محلي
+  // بحت كما كان سابقاً؛ material قد يكون null لمذكرة حُذفت لاحقاً — الحقول تبقى null حينها.
   const bookletDeliveries = (store.inventoryTxn || []).filter((t) => {
     if (t.type !== 'studentDelivery') return false;
     if (t.studentId === studentId) return true;
     return !!(t.recipient && student.name && t.recipient.includes(student.name));
+  }).map((t) => {
+    const material = (store.invMaterials || []).find((m) => m.id === t.materialId) || null;
+    const price = Number(material?.price) || 0;
+    const paidAmount = Number(t.legacyMetadata?.paidAmount) || 0;
+    return {
+      ...t,
+      materialName: material?.name || null,
+      price,
+      payStatus: t.legacyMetadata?.payStatus || 'unpaid',
+      paidAmount,
+      remaining: Math.max(0, price - paidAmount),
+    };
   });
 
   return {
@@ -246,19 +263,17 @@ export function computeHealthScore(data) {
     breakdown.push({ label: 'الامتحانات', score: 0, max: 35 });
   }
 
-  // الواجبات (15)
+  // الواجبات (15) — لا بيانات = صفر، لا اختراع نشاط إيجابي (انظر تقرير التدقيق).
   if (hwRate != null) {
     const s = Math.round((hwRate / 100) * 15);
     score += s;
     breakdown.push({ label: 'الواجبات', score: s, max: 15 });
   } else {
-    // بدون واجبات: توزيع محايد (نصف الدرجة) حتى لا يُعاقب الطالب
-    score += 8;
-    breakdown.push({ label: 'الواجبات', score: 8, max: 15 });
+    breakdown.push({ label: 'الواجبات', score: 0, max: 15 });
   }
 
-  // الانضباط المالي (10)
-  let finScore = 10;
+  // الانضباط المالي (10) — بلا رسوم مطبَّقة (monthlyFee<=0) = صفر، لا 10/10 افتراضية.
+  let finScore = 0;
   if (monthlyFee > 0) {
     const ratio = Math.max(0, Math.min(1, netPaid / monthlyFee));
     finScore = Math.round(ratio * 10);
@@ -266,8 +281,8 @@ export function computeHealthScore(data) {
   score += finScore;
   breakdown.push({ label: 'الانضباط المالي', score: finScore, max: 10 });
 
-  // التواصل (10)
-  const commScore = communications.length > 0 ? 10 : 5;
+  // التواصل (10) — لا سجلات تواصل = صفر، لا اختراع نصف درجة.
+  const commScore = communications.length > 0 ? 10 : 0;
   score += commScore;
   breakdown.push({ label: 'التواصل', score: commScore, max: 10 });
 
@@ -323,4 +338,111 @@ export function buildAiSummary(data) {
 
   if (notes.length === 0) notes.push('لا توجد ملاحظات جوهرية — الوضع مستقر.');
   return notes;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// buildInteractiveReportData — Scalability Architecture Phase 4 (StudentReportPage
+// التفاعلية). محوّل نقي: يحوّل حزمة تقرير طالب واحد مُصفّاة من الخادم (GET /students/
+// :id/report-data، pgGetStudentReportData) — نفس bundle الذي يُغذّي gatherStudentData
+// أدناه بالفعل للتقرير الاحترافي/واتساب — إلى نفس الشكل بالضبط الذي كانت StudentReportPage
+// .jsx تحسبه محلياً من مصفوفات payments/attendance/exams/grades/homeworks/hwSubmissions/
+// invMaterials/inventoryTxn/treasuryTxn الكاملة من الـ store، بلا أي تغيير على أي حساب —
+// فقط تغيير مصدر البيانات من الـ store الكامل إلى حزمة مُصفّاة لطالب واحد.
+//
+// يستخدم gatherStudentData(studentId, bundle) للحضور/المدفوعات/الاسترداد (منطق مطابق
+// تماماً بالفعل، مُثبَت في reportData.scopedBundle.test.js) — بلا أي تعديل على
+// gatherStudentData نفسها (لا تُغيَّر أي قيمة/سلوك حالي لها، ولا لمستهلكيها الآخرين:
+// buildStudentReport.js/studentWhatsappService.js). الامتحانات/الواجبات/المذكرات تُعاد
+// بناؤها هنا مباشرة من bundle الخام، لا من مخرجات gatherStudentData — لأن gatherStudentData
+// تحسبها لغرض مختلف تماماً (hwRate رقم واحد من hwSubmissions فقط، بلا صفوف/بلا
+// bundle.homeworks؛ examRows بلا subject/absent؛ bookletDeliveries بلا استبعاد
+// الحركات الملغاة ولا دمج آخر حالة نشطة لكل (مذكرة،طالب) الذي تحتاجه هذه الشاشة بالضبط
+// — انظر تقرير تنفيذ هذه المرحلة للتفصيل الكامل). المنطق المنقول هنا حرفي 1:1 من
+// StudentReportPage.jsx الأصلي، فقط استبدال متغيرات الـ store الكاملة بحقول bundle.
+const INTERACTIVE_MONTHS_AR = ['يناير','فبراير','مارس','أبريل','مايو','يونيو',
+                                'يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
+const INTERACTIVE_HW_META = {
+  submitted: { label: 'سُلِّم',    c: '#10b981' },
+  late:      { label: 'متأخر',    c: '#f59e0b' },
+  missing:   { label: 'لم يُسلَّم', c: '#ef4444' },
+};
+
+export function buildInteractiveReportData(studentId, bundle) {
+  const gathered = gatherStudentData(studentId, bundle);
+  if (!gathered) return null;
+
+  const { student, group, attendance, attRecords, payments, paidTotal, refundTotal, netPaid } = gathered;
+
+  // ── الحضور ──
+  const attAll     = attRecords;
+  const attPresent = attendance.present;
+  const attAbsent  = attendance.absent;
+  const attLate    = attendance.late;
+  const attPct     = attendance.pct;
+  // monthlyAttendance مُرتَّبة تصاعدياً بالفعل (attRecords مُرتَّبة قبل بنائها) — إعادة
+  // تسمية الحقول فقط لتطابق attTrend الحالي بالضبط.
+  const attTrend = gathered.monthlyAttendance.map((m) => ({ label: m.month.slice(5), val: m.pct }));
+
+  // ── الامتحانات ──
+  const grades = (bundle.grades || []).filter((g) => g.studentId === studentId);
+  const exams  = bundle.exams || [];
+  const examRows = grades.map((g) => {
+    const exam = exams.find((e) => e.id === g.examId);
+    if (!exam) return null;
+    const pct = g.absent ? null : Math.round(g.score / exam.total * 100);
+    return { exam, score: g.score, total: exam.total, pct, absent: g.absent, pass: exam.pass };
+  }).filter(Boolean).sort((a, b) => a.exam.date.localeCompare(b.exam.date));
+  const validExams  = examRows.filter((r) => !r.absent && r.pct != null);
+  const avgExamPct  = validExams.length ? Math.round(validExams.reduce((s, r) => s + r.pct, 0) / validExams.length) : null;
+  const passedExams = validExams.filter((r) => r.score >= r.pass).length;
+
+  // ── الواجبات ── (كل واجب في صف الطالب، بما فيها التي لم تُسلَّم إطلاقاً)
+  // Homework 2.0 Phase 2: الهدف الأكاديمي أصبح الصف لا المجموعة — h.grade===student.grade
+  // بدل h.groupId===student.groupId (لا علاقة بأي مجموعة إضافية/رئيسية للطالب هنا إطلاقاً).
+  const hwSubmissions = (bundle.hwSubmissions || []).filter((s) => s.studentId === studentId);
+  const gradeHomeworks = (bundle.homeworks || []).filter((h) => h.grade === student.grade);
+  const hwRows = gradeHomeworks.map((hw) => {
+    const sub = hwSubmissions.find((s) => s.hwId === hw.id && s.studentId === studentId);
+    return { hw, status: sub?.status || 'missing', submittedAt: sub?.submittedAt, score: sub?.score };
+  }).sort((a, b) => a.hw.dueDate.localeCompare(b.hw.dueDate));
+  const hwSubmitted = hwRows.filter((r) => r.status === 'submitted').length;
+  const hwLate      = hwRows.filter((r) => r.status === 'late').length;
+  const hwMissing   = hwRows.filter((r) => r.status === 'missing').length;
+
+  // ── المذكرات ── (remaining من سعر المذكرة الحقيقي ناقص المدفوع الفعلي)
+  const matDist = deriveMatDist(bundle.inventoryTxn || []);
+  const matRows = matDist.filter((d) => d.studentId === studentId).map((d) => {
+    const mat = (bundle.invMaterials || []).find((m) => m.id === d.matId);
+    return mat ? { ...d, mat, remaining: Math.max(0, (Number(mat.price) || 0) - (Number(d.paidAmount) || 0)) } : null;
+  }).filter(Boolean);
+  const matReceived = matRows.filter((r) => r.received).length;
+  const matPaid     = matRows.filter((r) => r.payStatus === 'paid').length;
+  const matTotal    = matRows.reduce((s, r) => s + (r.paidAmount || 0), 0);
+
+  // ── المدفوعات ── (payments/paidTotal/refundTotal/netPaid من gatherStudentData بالضبط
+  // — لا طرح استرداد إضافي، لا فلترة جديدة؛ payments هناك غير مُرتَّبة، تُرتَّب هنا فقط)
+  const payRows = [...payments].sort((a, b) => a.date.localeCompare(b.date));
+  const totalPaid     = paidTotal;
+  const refundedTotal = refundTotal;
+  const paidCount = payRows.filter((p) => p.status === 'paid').length;
+
+  // ── الخط الزمني ── (نفس منطق الدمج/الفرز الأصلي حرفياً)
+  const timeline = [
+    { date: student.enrollDate, icon: '🎓', title: 'التسجيل في المركز', sub: group?.name, color: '#0d9488', type: 'enroll' },
+    ...payRows.map((p) => ({ date: p.date, icon: '💰', title: `دفع ${formatCurrency(p.amount)}`, sub: INTERACTIVE_MONTHS_AR[(p.month || 1) - 1], color: '#10b981', type: 'payment' })),
+    ...attAll.filter((r) => r.status !== 'present').map((r) => ({ date: r.date, icon: r.status === 'absent' ? '✗' : '⏱', title: r.status === 'absent' ? 'غياب' : 'حضور متأخر', sub: null, color: r.status === 'absent' ? '#ef4444' : '#f59e0b', type: 'attendance' })),
+    ...examRows.map((r) => ({ date: r.exam.date, icon: '📝', title: r.exam.name, sub: r.absent ? 'غائب' : `${r.score}/${r.total}`, color: r.pct >= 60 ? '#8b5cf6' : '#ef4444', type: 'exam' })),
+    ...hwRows.filter((r) => r.submittedAt).map((r) => ({ date: r.submittedAt, icon: '📋', title: `تسليم: ${r.hw.title}`, sub: INTERACTIVE_HW_META[r.status]?.label, color: INTERACTIVE_HW_META[r.status]?.c || '#94a3b8', type: 'hw' })),
+    ...matRows.filter((r) => r.receivedAt).map((r) => ({ date: r.receivedAt, icon: '📚', title: `استلام: ${r.mat.name}`, sub: r.mat.subject, color: '#3b82f6', type: 'material' })),
+  ].filter((t) => t.date).sort((a, b) => b.date.localeCompare(a.date));
+
+  return {
+    student, group,
+    attAll, attPresent, attAbsent, attLate, attPct, attTrend,
+    examRows, avgExamPct, passedExams, validExams,
+    hwRows, hwSubmitted, hwLate, hwMissing,
+    matRows, matReceived, matPaid, matTotal,
+    payRows, totalPaid, refundedTotal, netPaid, paidCount,
+    timeline,
+  };
 }

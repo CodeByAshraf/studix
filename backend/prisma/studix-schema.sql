@@ -2,14 +2,14 @@
 -- تم توليده تلقائياً بواسطة backend/scripts/generateSchemaArtifact.js — لا تُعدِّله يدوياً.
 -- لإعادة التوليد بعد أي تغيير حقيقي في schema.prisma أو الـ triggers/constraints:
 --   node backend/scripts/generateSchemaArtifact.js
--- تاريخ التوليد: 2026-08-25T12:39:48.850Z
+-- تاريخ التوليد: 2026-09-19T12:12:31.324Z
 -- المصدر: قاعدة scratch معزولة (db push + DDL كامل)، وليس أي قاعدة تطوير حقيقية — لا بيانات إطلاقاً.
 
 --
 -- PostgreSQL database dump
 --
 
-\restrict mIwcjFOUFHuFOhBmLoZUxMXIK0T517sVc0Nt3eAxValpky8ayH4OwYZZSoCZB7Y
+\restrict fJtRVhQxdXq2OL4L6heJWyJRudbzd1SWVUJncLc3H5c5ueGGekQ0ZIe9DmyJY3t
 
 -- Dumped from database version 18.6
 -- Dumped by pg_dump version 18.6
@@ -408,7 +408,9 @@ CREATE TABLE public.homeworks (
     description text,
     subject text,
     teacher text,
-    group_id text NOT NULL,
+    group_id text,
+    grade text,
+    academic_year text,
     total_score numeric(6,2) DEFAULT 10 NOT NULL,
     due_date date NOT NULL,
     created_at timestamp(6) with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
@@ -615,6 +617,26 @@ CREATE TABLE public.roles (
     permissions jsonb,
     description text,
     auth_version integer DEFAULT 1 NOT NULL
+);
+
+
+--
+-- Name: student_group_enrollments; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.student_group_enrollments (
+    id text NOT NULL,
+    student_id text NOT NULL,
+    group_id text NOT NULL,
+    role text NOT NULL,
+    status text NOT NULL,
+    start_date date NOT NULL,
+    end_date date,
+    attend_days jsonb,
+    created_at timestamp(6) with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at timestamp(6) with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT chk_enrollment_role CHECK ((role = ANY (ARRAY['primary'::text, 'additional'::text]))),
+    CONSTRAINT chk_enrollment_status CHECK ((status = ANY (ARRAY['active'::text, 'withdrawn'::text, 'transferred'::text])))
 );
 
 
@@ -959,6 +981,14 @@ ALTER TABLE ONLY public.payments
 
 ALTER TABLE ONLY public.roles
     ADD CONSTRAINT roles_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: student_group_enrollments student_group_enrollments_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.student_group_enrollments
+    ADD CONSTRAINT student_group_enrollments_pkey PRIMARY KEY (id);
 
 
 --
@@ -1318,6 +1348,20 @@ CREATE UNIQUE INDEX uq_hwsub_hw_student ON public.hw_submissions USING btree (ho
 
 
 --
+-- Name: uq_student_group_enrollments_student_group_active; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_student_group_enrollments_student_group_active ON public.student_group_enrollments USING btree (student_id, group_id) WHERE (status = 'active'::text);
+
+
+--
+-- Name: uq_student_group_enrollments_student_primary_active; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_student_group_enrollments_student_primary_active ON public.student_group_enrollments USING btree (student_id) WHERE ((status = 'active'::text) AND (role = 'primary'::text));
+
+
+--
 -- Name: uq_treasury_one_payment; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1420,6 +1464,13 @@ CREATE TRIGGER trg_parents_updated BEFORE UPDATE ON public.parents FOR EACH ROW 
 --
 
 CREATE TRIGGER trg_payment_needs_treasury BEFORE INSERT ON public.payments FOR EACH ROW EXECUTE FUNCTION public.enforce_payment_treasury();
+
+
+--
+-- Name: student_group_enrollments trg_student_group_enrollments_updated; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_student_group_enrollments_updated BEFORE UPDATE ON public.student_group_enrollments FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 
 --
@@ -1741,6 +1792,22 @@ ALTER TABLE ONLY public.payments
 
 
 --
+-- Name: student_group_enrollments student_group_enrollments_group_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.student_group_enrollments
+    ADD CONSTRAINT student_group_enrollments_group_id_fkey FOREIGN KEY (group_id) REFERENCES public.groups(id);
+
+
+--
+-- Name: student_group_enrollments student_group_enrollments_student_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.student_group_enrollments
+    ADD CONSTRAINT student_group_enrollments_student_id_fkey FOREIGN KEY (student_id) REFERENCES public.students(id);
+
+
+--
 -- Name: students students_group_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1808,5 +1875,5 @@ ALTER TABLE ONLY public.wa_report_log
 -- PostgreSQL database dump complete
 --
 
-\unrestrict mIwcjFOUFHuFOhBmLoZUxMXIK0T517sVc0Nt3eAxValpky8ayH4OwYZZSoCZB7Y
+\unrestrict fJtRVhQxdXq2OL4L6heJWyJRudbzd1SWVUJncLc3H5c5ueGGekQ0ZIe9DmyJY3t
 

@@ -22,11 +22,14 @@ export const SUBJECTS = [
 // مصدر التحقّق الوحيد لكل من HomeworkForm (عبر useForm) و createHomework/updateHomework —
 // كانا يستخدمان قبل ذلك مسارَين منفصلَين غير متطابقين (هذا الملف يدوياً، والآخر عبر
 // homeworkSchema العام)؛ تم توحيدهما هنا.
+// Homework 2.0 Phase 2: الهدف الأكاديمي أصبح "السنة الدراسية + الصف" لا المجموعة —
+// grade أصبح الحقل المطلوب بدل groupId (المجموعة أصبحت اختيارية تماماً، تُحتفَظ بها فقط
+// كمرجع تاريخي — انظر getHomeworkEligibleStudents أدناه وschema.prisma).
 export function validateHomework(data) {
   const errors = {};
   if (!data.title?.trim())       errors.title    = 'عنوان الواجب مطلوب';
   if (!data.subject)             errors.subject  = 'اختر المادة';
-  if (!data.groupId)             errors.groupId  = 'اختر المجموعة';
+  if (!data.grade)               errors.grade    = 'اختر الصف';
   if (!data.dueDate)             errors.dueDate  = 'موعد التسليم مطلوب';
   if (!data.createdAt)           errors.createdAt= 'تاريخ الإنشاء مطلوب';
   // > 0 صراحةً — يطابق قيد القاعدة chk_hw_score (وليس >= 0 فقط)
@@ -38,6 +41,9 @@ export function validateHomework(data) {
 }
 
 // ── Create ──────────────────────────────────────────────────
+// grade/academicYear: Homework 2.0 targeting fields. groupId is preserved as an optional
+// historical reference (schema.prisma: homeworks.group_id is now nullable) — never
+// required, never read for eligibility (see getHomeworkEligibleStudents below).
 export function createHomework(data) {
   const errors = validateHomework(data);
   if (hasErrors(errors)) throw { type: 'VALIDATION', errors };
@@ -48,7 +54,9 @@ export function createHomework(data) {
     description: clean.description?.trim() || '',
     subject:     clean.subject,
     teacher:     clean.teacher || '',
-    groupId:     clean.groupId,
+    grade:       clean.grade,
+    academicYear: clean.academicYear || '',
+    groupId:     clean.groupId || null,
     totalScore:  Number(clean.totalScore) || 10,
     dueDate:     clean.dueDate,
     status:      'active',
@@ -65,7 +73,8 @@ export function updateHomework(id, data) {
   const clean = sanitizeFormData(data, ['title','description']);
   return {
     id, title: clean.title?.trim(), description: clean.description?.trim() || '',
-    subject: clean.subject, teacher: clean.teacher || '', groupId: clean.groupId,
+    subject: clean.subject, teacher: clean.teacher || '',
+    grade: clean.grade, academicYear: clean.academicYear || '', groupId: clean.groupId || null,
     totalScore: Number(clean.totalScore), dueDate: clean.dueDate, status: clean.status,
     // كان مفقوداً سابقاً — يمنع تعديل تاريخ الإنشاء رغم أن الحقل معروض كقابل للتعديل بالنموذج
     createdAt: clean.createdAt,
@@ -73,15 +82,29 @@ export function updateHomework(id, data) {
   };
 }
 
+// ── Homework 2.0 Phase 2 — grade-based eligibility (single source of truth) ──────────
+// Replaces five independent Group-based roster copies (HomeworkTracking.jsx,
+// HomeworkPage.jsx, buildHomeworkReport.js, HomeworkReports.jsx,
+// reportData.js/studentReport.js). Deliberately never reads groupId or
+// student_group_enrollments — filters the flat students array directly, so a student can
+// only ever appear once (there is no join here that could produce a duplicate), regardless
+// of how many Groups (Primary/Additional) they hold or whether they hold any at all.
+export function getHomeworkEligibleStudents(homework, students) {
+  return students.filter(s => s.status === 'active' && s.grade === homework.grade);
+}
+
 // ── Stats for a single homework ──────────────────────────────
+// Homework 2.0 Phase 2: now grade-based via getHomeworkEligibleStudents (was previously
+// dead code with a pre-existing bug — s.groupId compared against hw.id instead of
+// hw.groupId — confirmed zero callers anywhere before this fix).
 export function getHomeworkStats(hw, submissions, students) {
-  const groupStudents = students.filter(s => s.groupId === hw.id && s.status === 'active');
+  const eligibleStudents = getHomeworkEligibleStudents(hw, students);
   const hwSubs = submissions.filter(s => s.hwId === hw.id);
 
   const submitted = hwSubs.filter(s => s.status === 'submitted').length;
   const late      = hwSubs.filter(s => s.status === 'late').length;
   const missing   = hwSubs.filter(s => s.status === 'missing').length;
-  const total     = groupStudents.length;
+  const total     = eligibleStudents.length;
   const notSubmitted = total - submitted - late;
 
   const scores    = hwSubs.filter(s => s.score !== null && s.score !== undefined).map(s => s.score);

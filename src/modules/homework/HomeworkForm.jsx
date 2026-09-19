@@ -3,6 +3,7 @@ import { useEffect } from 'react';
 import { useAppStore } from '../../store/app.store';
 import useForm      from '../../hooks/useForm';
 import { validateHomework, SUBJECTS } from '../../services/homeworkService';
+import { GRADES } from '../../services/groupService';
 import Button from '../../components/ui/Button';
 
 const BASE = {
@@ -26,10 +27,10 @@ function F({ label, required, error, children }) {
   );
 }
 
-const I = ({ name, value, onChange, placeholder, type='text', invalid, min, max }) => (
-  <input name={name} type={type} value={value||''} min={min} max={max} onChange={onChange} placeholder={placeholder}
-    style={{ ...BASE, borderColor:invalid?'var(--red)':'var(--border)', background:invalid?'rgba(239,68,68,.05)':'var(--surface2)' }}
-    onFocus={fo} onBlur={bl(invalid)}/>
+const I = ({ name, value, onChange, placeholder, type='text', invalid, min, max, disabled }) => (
+  <input name={name} type={type} value={value||''} min={min} max={max} onChange={onChange} placeholder={placeholder} disabled={disabled}
+    style={{ ...BASE, borderColor:invalid?'var(--red)':'var(--border)', background:invalid?'rgba(239,68,68,.05)':'var(--surface2)', opacity:disabled?0.65:1, cursor:disabled?'default':'text' }}
+    onFocus={disabled?undefined:fo} onBlur={disabled?undefined:bl(invalid)}/>
 );
 
 const S = ({ name, value, onChange, children, invalid }) => (
@@ -39,15 +40,19 @@ const S = ({ name, value, onChange, children, invalid }) => (
   >{children}</select>
 );
 
+// Homework 2.0 Phase 2: academicYear is never a form input — there is no per-student or
+// per-homework choice to make (the whole center tracks a single current value,
+// centerProfile.academic_year); it is stamped automatically from that value at creation
+// (see homeworkService.js's createHomework) and simply displayed here read-only.
 const EMPTY = {
-  title:'', description:'', subject:'', teacher:'', groupId:'',
+  title:'', description:'', subject:'', teacher:'', grade:'',
   totalScore:'10', createdAt:new Date().toISOString().split('T')[0],
   dueDate:'', status:'active', notes:'',
 };
 
 export default function HomeworkForm({ initialValues, editId, onSubmit, onCancel, loading }) {
-  const groups               = useAppStore((s) => s.groups);
-  const { values, errors, touched, handleChange, validate, reset, setField } = useForm(EMPTY, validateHomework);
+  const centerProfile        = useAppStore((s) => s.centerProfile);
+  const { values, errors, touched, handleChange, validate, reset } = useForm(EMPTY, validateHomework);
 
   useEffect(() => {
     if (initialValues) {
@@ -56,7 +61,7 @@ export default function HomeworkForm({ initialValues, editId, onSubmit, onCancel
         description: initialValues.description || '',
         subject:     initialValues.subject     || '',
         teacher:     initialValues.teacher     || '',
-        groupId:     initialValues.groupId     || '',
+        grade:       initialValues.grade       || '',
         totalScore:  initialValues.totalScore  != null ? String(initialValues.totalScore) : '10',
         createdAt:   initialValues.createdAt   || new Date().toISOString().split('T')[0],
         dueDate:     initialValues.dueDate     || '',
@@ -66,14 +71,6 @@ export default function HomeworkForm({ initialValues, editId, onSubmit, onCancel
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editId]);
-
-  // Auto-fill teacher when group is selected
-  const handleGroupChange = (e) => {
-    handleChange(e);
-    const g = groups.find(g => g.id === e.target.value);
-    if (g?.teacher && !values.teacher) setField('teacher', g.teacher);
-    if (g?.subject && !values.subject) setField('subject', g.subject);
-  };
 
   const err  = f => touched[f] && errors[f];
   const isEr = f => !!(touched[f] && errors[f]);
@@ -89,12 +86,19 @@ export default function HomeworkForm({ initialValues, editId, onSubmit, onCancel
           </F>
         </div>
 
-        {/* المجموعة */}
-        <F label="المجموعة / الصف" required error={err('groupId')}>
-          <S name="groupId" value={values.groupId} onChange={handleGroupChange} invalid={isEr('groupId')}>
-            <option value="">اختر المجموعة...</option>
-            {groups.map(g => <option key={g.id} value={g.id}>{g.name} — {g.grade}</option>)}
+        {/* الصف — Homework 2.0: الهدف الأكاديمي (لا المجموعة) */}
+        <F label="الصف" required error={err('grade')}>
+          <S name="grade" value={values.grade} onChange={handleChange} invalid={isEr('grade')}>
+            <option value="">اختر الصف...</option>
+            {GRADES.map(g => <option key={g} value={g}>{g}</option>)}
           </S>
+        </F>
+
+        {/* السنة الدراسية — عرض فقط، من إعدادات المركز (centerProfile.academicYear) —
+            لا اختيار هنا: قيمة واحدة للمركز بأكمله، تُختَم تلقائياً عند الإنشاء ولا تتغيّر
+            عند التعديل (انظر onSubmit أدناه). */}
+        <F label="السنة الدراسية">
+          <I name="academicYearDisplay" value={editId ? (initialValues?.academicYear || '—') : (centerProfile?.academicYear || '—')} onChange={() => {}} disabled/>
         </F>
 
         {/* المادة */}
@@ -150,7 +154,20 @@ export default function HomeworkForm({ initialValues, editId, onSubmit, onCancel
 
       <div style={{ display:'flex', justifyContent:'flex-end', gap:10, marginTop:20, paddingTop:16, borderTop:'1px solid var(--border)' }}>
         <Button variant="secondary" onClick={onCancel}>إلغاء</Button>
-        <Button variant="primary" loading={loading} onClick={() => { if (validate()) onSubmit(values); }}>
+        <Button variant="primary" loading={loading} onClick={() => {
+          if (!validate()) return;
+          // academicYear is never edited by the user — stamped once from the center's
+          // current setting at creation, and preserved unchanged on every later edit
+          // (never silently overwritten to "today's" value just because the homework was
+          // touched for something unrelated, e.g. changing its status).
+          const academicYear = editId ? (initialValues?.academicYear || '') : (centerProfile?.academicYear || '');
+          // groupId: no longer collected by this form at all (Homework 2.0 — Group is not
+          // the target). An existing homework's historical group_id must survive an
+          // unrelated edit untouched, not be silently nulled out just because this form no
+          // longer has a field for it — a brand-new homework simply has none (null).
+          const groupId = editId ? (initialValues?.groupId ?? null) : null;
+          onSubmit({ ...values, academicYear, groupId });
+        }}>
           💾 {editId ? 'حفظ التعديلات' : 'إنشاء الواجب'}
         </Button>
       </div>

@@ -7,7 +7,7 @@ import { Modal, ConfirmModal } from '../../components/ui/Modal';
 import Button        from '../../components/ui/Button';
 import { useToast }  from '../../components/Toast';
 import { useErrorHandler } from '../../hooks/useErrorHandler';
-import { createHomework, updateHomework, HW_STATUS, SUB_STATUS, isOverdue, daysUntilDue } from '../../services/homeworkService';
+import { createHomework, updateHomework, getHomeworkEligibleStudents, HW_STATUS, SUB_STATUS, isOverdue, daysUntilDue } from '../../services/homeworkService';
 import { pgCreateHomework, pgUpdateHomework, pgDeleteHomework } from '../../services/api';
 import { formatDate } from '../../utils/helpers';
 import HomeworkForm     from './HomeworkForm';
@@ -121,7 +121,7 @@ function HomeworkCard({ hw, group, stats, onEdit, onDelete, onTrack }) {
           { icon:'🗑',  label:'حذف',   action:onDelete, danger:true },
         ].map((btn, i) => (
           <button key={i} onClick={btn.action}
-            style={{ flex:1, padding:'9px 4px', fontSize:'0.7rem', fontWeight:600, cursor:'pointer', fontFamily:'Cairo,sans-serif', transition:'all .12s', background:'transparent', borderRight:i<2?'1px solid var(--border)':'none', display:'flex', flexDirection:'column', alignItems:'center', gap:2, color:btn.danger?'var(--red)':'var(--text2)', border:'none', borderRight:i<2?'1px solid var(--border)':'none' }}
+            style={{ flex:1, padding:'9px 4px', fontSize:'0.7rem', fontWeight:600, cursor:'pointer', fontFamily:'Cairo,sans-serif', transition:'all .12s', background:'transparent', borderRight:i<2?'1px solid var(--border)':'none', display:'flex', flexDirection:'column', alignItems:'center', gap:2, color:btn.danger?'var(--red)':'var(--text2)', border:'none' }}
             onMouseOver={e => { e.currentTarget.style.background=btn.danger?'rgba(239,68,68,.08)':'var(--surface2)'; e.currentTarget.style.color=btn.danger?'#ef4444':'var(--text)'; }}
             onMouseOut={e  => { e.currentTarget.style.background='transparent'; e.currentTarget.style.color=btn.danger?'var(--red)':'var(--text2)'; }}
           >
@@ -187,11 +187,14 @@ export default function HomeworkPage() {
   const subjects = useMemo(() => [...new Set(homeworks.map(h=>h.subject))], [homeworks]);
 
   // ── Stats per homework ────────────────────────────────────
+  // Homework 2.0 Phase 2: eligibility is grade-based (getHomeworkEligibleStudents), never
+  // Group-based — a student with Primary + Additional Groups still counts once, since this
+  // filters the flat students array directly and never reads groupId at all.
   const getHwStats = useCallback((hw) => {
-    const grpStudents = students.filter(s => s.groupId===hw.groupId && s.status==='active');
+    const eligibleStudents = getHomeworkEligibleStudents(hw, students);
     const subs = hwSubmissions.filter(s => s.hwId===hw.id);
     return {
-      total:     grpStudents.length,
+      total:     eligibleStudents.length,
       submitted: subs.filter(s=>s.status==='submitted').length,
       late:      subs.filter(s=>s.status==='late').length,
       missing:   subs.filter(s=>s.status==='missing').length,

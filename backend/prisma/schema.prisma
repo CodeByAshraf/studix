@@ -256,27 +256,28 @@ model grades {
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model groups {
-  id             String           @id
-  name           String
-  subject        String?
-  grade          String?
-  teacher_id     BigInt?
-  teacher_name   String?
-  time           String?
-  days           Json?
-  price          Decimal          @default(0) @db.Decimal(12, 2)
-  created_at     DateTime         @default(now()) @db.Timestamptz(6)
-  max            Int?
-  color          String?
-  notes          String?
-  admissions     admissions[]
-  attendance     attendance[]
-  communications communications[]
-  exams          exams[]
-  teachers       teachers?        @relation(fields: [teacher_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
-  homeworks      homeworks[]
-  payments       payments[]
-  students       students[]
+  id                        String                      @id
+  name                      String
+  subject                   String?
+  grade                     String?
+  teacher_id                BigInt?
+  teacher_name              String?
+  time                      String?
+  days                      Json?
+  price                     Decimal                     @default(0) @db.Decimal(12, 2)
+  created_at                DateTime                    @default(now()) @db.Timestamptz(6)
+  max                       Int?
+  color                     String?
+  notes                     String?
+  admissions                admissions[]
+  attendance                attendance[]
+  communications            communications[]
+  exams                     exams[]
+  teachers                  teachers?                   @relation(fields: [teacher_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  homeworks                 homeworks[]
+  payments                  payments[]
+  student_group_enrollments student_group_enrollments[]
+  students                  students[]
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
@@ -286,13 +287,15 @@ model homeworks {
   description    String?
   subject        String?
   teacher        String?
-  group_id       String
+  group_id       String?
+  grade          String?
+  academic_year  String?
   total_score    Decimal          @default(10) @db.Decimal(6, 2)
   due_date       DateTime         @db.Date
   created_at     DateTime         @default(now()) @db.Timestamptz(6)
   assigned_date  DateTime         @default(dbgenerated("CURRENT_DATE")) @db.Date
   status         String           @default("active")
-  groups         groups           @relation(fields: [group_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  groups         groups?          @relation(fields: [group_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
   hw_submissions hw_submissions[]
 }
 
@@ -373,16 +376,16 @@ model inventory_txn {
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model license_config {
-  id                    Int       @id @default(1) @db.SmallInt
-  licensing_public_key  String?
-  license_artifact      String?
-  license_id            String?
-  product               String?
-  expires_at            DateTime? @db.Timestamptz(6)
-  features              Json?
-  activated_at          DateTime? @db.Timestamptz(6)
-  created_at            DateTime  @default(now()) @db.Timestamptz(6)
-  updated_at            DateTime  @default(now()) @db.Timestamptz(6)
+  id                       Int       @id @default(1) @db.SmallInt
+  licensing_public_key     String?
+  license_artifact         String?
+  license_id               String?
+  product                  String?
+  expires_at               DateTime? @db.Timestamptz(6)
+  features                 Json?
+  activated_at             DateTime? @db.Timestamptz(6)
+  created_at               DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at               DateTime  @default(now()) @db.Timestamptz(6)
   // Phase 5e — clock-rollback mitigation only (never proof of validity on its own — see
   // backend/migrations/004_licensing_clock_guard.sql and lib/license.js's
   // checkClockAndUpdateHighWaterMark for the full explanation). NULL until the first
@@ -448,31 +451,32 @@ model roles {
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model students {
-  id             String           @id
-  code           String           @unique
-  name           String
-  phone          String?
-  parent_id      BigInt?
-  grade          String?
-  group_id       String?
-  school         String?
-  notes          String?
-  status         String           @default("active")
-  monthly_fee    Decimal?         @db.Decimal(12, 2)
-  enroll_date    DateTime         @default(dbgenerated("CURRENT_DATE")) @db.Date
-  created_at     DateTime         @default(now()) @db.Timestamptz(6)
-  updated_at     DateTime         @default(now()) @db.Timestamptz(6)
-  parent_phone   String?
-  admissions     admissions[]
-  attendance     attendance[]
-  communications communications[]
-  grades         grades[]
-  hw_submissions hw_submissions[]
-  inventory_txn  inventory_txn[]
-  payments       payments[]
-  groups         groups?          @relation(fields: [group_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
-  parents        parents?         @relation(fields: [parent_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
-  wa_report_log  wa_report_log[]
+  id                        String                      @id
+  code                      String                      @unique
+  name                      String
+  phone                     String?
+  parent_id                 BigInt?
+  grade                     String?
+  group_id                  String?
+  school                    String?
+  notes                     String?
+  status                    String                      @default("active")
+  monthly_fee               Decimal?                    @db.Decimal(12, 2)
+  enroll_date               DateTime                    @default(dbgenerated("CURRENT_DATE")) @db.Date
+  created_at                DateTime                    @default(now()) @db.Timestamptz(6)
+  updated_at                DateTime                    @default(now()) @db.Timestamptz(6)
+  parent_phone              String?
+  admissions                admissions[]
+  attendance                attendance[]
+  communications            communications[]
+  grades                    grades[]
+  hw_submissions            hw_submissions[]
+  inventory_txn             inventory_txn[]
+  payments                  payments[]
+  student_group_enrollments student_group_enrollments[]
+  groups                    groups?                     @relation(fields: [group_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  parents                   parents?                    @relation(fields: [parent_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  wa_report_log             wa_report_log[]
 
   @@index([group_id], map: "idx_students_group")
   @@index([parent_id], map: "idx_students_parent")
@@ -482,7 +486,7 @@ model students {
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model support_access_config {
   id                 Int      @id @default(1) @db.SmallInt
-  installation_id    String   @unique @default(dbgenerated("gen_random_uuid()::text"))
+  installation_id    String   @unique @default(dbgenerated("(gen_random_uuid())::text"))
   support_public_key String?
   created_at         DateTime @default(now()) @db.Timestamptz(6)
 }
@@ -570,4 +574,20 @@ model wa_report_log {
   students     students? @relation(fields: [student_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
 
   @@index([student_id], map: "idx_wa_student")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model student_group_enrollments {
+  id          String    @id
+  student_id  String
+  group_id    String
+  role        String
+  status      String
+  start_date  DateTime  @db.Date
+  end_date    DateTime? @db.Date
+  attend_days Json?
+  created_at  DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at  DateTime  @default(now()) @db.Timestamptz(6)
+  groups      groups    @relation(fields: [group_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  students    students  @relation(fields: [student_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
 }

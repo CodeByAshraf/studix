@@ -60,7 +60,7 @@ export async function saveHwSubmissions({ homeworkId, records }) {
   if (typeof homeworkId !== 'string' || !homeworkId.trim()) throw badRequest('homeworkId مطلوب.');
   if (!Array.isArray(records)) throw badRequest('records يجب أن تكون مصفوفة.');
 
-  const hw = await prisma.homeworks.findUnique({ where: { id: homeworkId }, select: { id: true, total_score: true } });
+  const hw = await prisma.homeworks.findUnique({ where: { id: homeworkId }, select: { id: true, total_score: true, grade: true } });
   if (!hw) throw badRequest('الواجب غير موجود.');
   const totalScore = Number(hw.total_score); // Decimal → number، للتحقّق هنا فقط
 
@@ -88,6 +88,32 @@ export async function saveHwSubmissions({ homeworkId, records }) {
   }
 
   const result = await runInTransaction(async (tx) => {
+    // Homework 2.0 Phase 2 — the client-provided student list is no longer trusted
+    // blindly: every studentId must reference an active student whose grade matches this
+    // homework's grade (never Group membership — see homeworkService.js's
+    // getHomeworkEligibleStudents for the same rule on the frontend). Checked before any
+    // write, inside this same transaction, so an invalid student rejects the WHOLE save
+    // atomically — matches this function's existing all-or-nothing semantics exactly.
+    // A homework with no grade set at all (legacy/edge case — should not occur for any
+    // row after the Homework 2.0 backfill, but defensively handled) skips the grade check
+    // rather than rejecting every submission outright; active status is still enforced.
+    const studentIds = [...byStudent.keys()];
+    const foundStudents = await tx.students.findMany({
+      where: { id: { in: studentIds } },
+      select: { id: true, status: true, grade: true },
+    });
+    const foundById = new Map(foundStudents.map((s) => [s.id, s]));
+    const invalid = studentIds.filter((id) => {
+      const s = foundById.get(id);
+      if (!s) return true;
+      if (s.status !== 'active') return true;
+      if (hw.grade && s.grade !== hw.grade) return true;
+      return false;
+    });
+    if (invalid.length) {
+      throw badRequest(`طالب/طلاب غير مؤهَّلين لهذا الواجب (نشط + نفس الصف مطلوب): ${invalid.join(', ')}`);
+    }
+
     const existing = await tx.hw_submissions.findMany({
       where: { homework_id: homeworkId },
       select: { id: true, student_id: true },

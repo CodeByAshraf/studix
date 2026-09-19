@@ -14,8 +14,10 @@ vi.mock('../../services/api', async () => {
   return { ...actual, pgCreateHomework: vi.fn(), pgUpdateHomework: vi.fn(), pgDeleteHomework: vi.fn() };
 });
 import { pgCreateHomework, pgDeleteHomework } from '../../services/api';
+import { GRADES } from '../../services/groupService';
 
 const GROUP_ID = 'g1';
+const GRADE = GRADES[0];
 
 function renderPage() {
   return render(
@@ -33,6 +35,7 @@ function seedStore() {
     students: [],
     homeworks: [],
     hwSubmissions: [],
+    centerProfile: { academicYear: '2025/2026' },
   });
 }
 
@@ -52,7 +55,7 @@ describe('HomeworkPage — server-truth write path', () => {
     const modalBody = document.querySelector('.modal-body');
     fireEvent.change(within(modalBody).getByPlaceholderText('مثال: تدريبات المعادلات التربيعية'), { target: { value: 'واجب اختبار', name: 'title' } });
     const formSelects = within(modalBody).getAllByRole('combobox');
-    fireEvent.change(formSelects[0], { target: { value: GROUP_ID, name: 'groupId' } }); // المجموعة
+    fireEvent.change(formSelects[0], { target: { value: GRADE, name: 'grade' } }); // الصف (Homework 2.0 — لا مجموعة)
     fireEvent.change(formSelects[1], { target: { value: 'رياضيات', name: 'subject' } }); // المادة
     fireEvent.change(modalBody.querySelector('input[name="dueDate"]'), { target: { value: '2026-12-01', name: 'dueDate' } });
 
@@ -60,7 +63,7 @@ describe('HomeworkPage — server-truth write path', () => {
 
     expect(useAppStore.getState().homeworks).toEqual([]);
 
-    const saved = { id: 'srv-hw1', title: 'واجب اختبار', groupId: GROUP_ID, subject: 'رياضيات', dueDate: '2026-12-01', createdAt: '2026-08-18', totalScore: 10, status: 'active', description: '', teacher: '' };
+    const saved = { id: 'srv-hw1', title: 'واجب اختبار', grade: GRADE, academicYear: '2025/2026', groupId: null, subject: 'رياضيات', dueDate: '2026-12-01', createdAt: '2026-08-18', totalScore: 10, status: 'active', description: '', teacher: '' };
     resolveCall(saved);
 
     await waitFor(() => {

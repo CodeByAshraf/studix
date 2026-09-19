@@ -2,7 +2,7 @@
 import { useState, useMemo } from 'react';
 import { useAppStore } from '../../store/app.store';
 import { formatDate } from '../../utils/helpers';
-import { SUB_STATUS } from '../../services/homeworkService';
+import { SUB_STATUS, getHomeworkEligibleStudents } from '../../services/homeworkService';
 import { PrintHeader } from '../../components/shared';
 
 const TABS = [
@@ -70,12 +70,14 @@ export default function HomeworkReports({ onViewHomework }) {
   const [filterGroup, setFilterGroup] = useState('');
 
   // Build stats for a list of homeworks
+  // Homework 2.0 Phase 2: grade-based eligibility (getHomeworkEligibleStudents), never
+  // Group-based — the fifth (and last) independent copy of this roster logic, now unified.
   const getStats = (hwList) => hwList.map(hw => {
-    const grpStudents = students.filter(s => s.groupId === hw.groupId && s.status === 'active');
+    const eligibleStudents = getHomeworkEligibleStudents(hw, students);
     const subs = hwSubmissions.filter(s => s.hwId === hw.id);
     return {
       hw,
-      total:     grpStudents.length,
+      total:     eligibleStudents.length,
       submitted: subs.filter(s => s.status === 'submitted').length,
       late:      subs.filter(s => s.status === 'late').length,
       missing:   subs.filter(s => s.status === 'missing').length,
