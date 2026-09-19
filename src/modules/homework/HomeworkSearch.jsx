@@ -9,8 +9,11 @@ import { GRADES } from '../../services/groupService';
 import { SUB_STATUS } from '../../services/homeworkService';
 import { buildHomeworkSubmissionRows, filterHomeworkSubmissionRows } from '../../services/homeworkSearchService';
 import { openHomeworkSearchReportPrint } from './buildHomeworkSearchReport';
+import { getHomeworkContactPhone, buildHomeworkMessage, shouldShowHomeworkWhatsapp, openWhatsapp, copyMessage } from './homeworkWhatsappService';
+import WhatsappPreviewModal from '../student-report/WhatsappPreviewModal';
 import { formatDate } from '../../utils/helpers';
 import Button from '../../components/ui/Button';
+import { useToast } from '../../components/Toast';
 
 const SEL = { background:'var(--surface2)', border:'1px solid var(--border)', borderRadius:9, padding:'7px 11px', color:'var(--text)', fontFamily:'Cairo,sans-serif', fontSize:'0.82rem', outline:'none', cursor:'pointer', direction:'rtl' };
 const LBL = { fontSize:'0.7rem', fontWeight:700, color:'var(--text3)', display:'block', marginBottom:4 };
@@ -20,6 +23,9 @@ export default function HomeworkSearch() {
   const students       = useAppStore((s) => s.students);
   const hwSubmissions  = useAppStore((s) => s.hwSubmissions);
   const centerProfile  = useAppStore((s) => s.centerProfile);
+  const toast = useToast();
+
+  const [waPreview, setWaPreview] = useState(null);
 
   const [dateFrom, setDateFrom]         = useState('');
   const [dateTo, setDateTo]             = useState('');
@@ -46,6 +52,33 @@ export default function HomeworkSearch() {
 
   const hasFilters = !!(dateFrom || dateTo || academicYear || grade || status);
   const clearFilters = () => { setDateFrom(''); setDateTo(''); setAcademicYear(''); setGrade(''); setStatus(''); };
+
+  // Homework Phase 3B — نفس نمط StudentReportPage.jsx's ذو الخطوتين (معاينة ثم فتح
+  // صريح)، وليس نمط AbsenceFollowup.jsx المباشر — لا فتح واتساب قبل المعاينة إطلاقاً.
+  // لا استعلام بيانات جديد: الطالب الكامل (لهاتف ولي الأمر) يُقرَأ من `students` الموجودة
+  // أصلاً في الشاشة، وباقي محتوى الرسالة يأتي حرفياً من صف بحث الواجبات (Phase 3A).
+  const openWaPreview = (row) => {
+    const student = students.find((s) => s.id === row.studentId);
+    const parentPhone = getHomeworkContactPhone(student);
+    const message = buildHomeworkMessage({
+      studentName: row.studentName,
+      homeworkTitle: row.homeworkTitle,
+      subject: row.subject,
+      homeworkDate: row.homeworkDate,
+      status: row.status,
+      score: row.score,
+      totalScore: row.totalScore,
+    });
+    setWaPreview({ studentName: row.studentName, parentPhone, message });
+  };
+
+  const handleWaOpen = () => {
+    if (!waPreview) return;
+    const res = openWhatsapp(waPreview.parentPhone, waPreview.message);
+    if (!res.ok) { toast.error(res.error); return; }
+    toast.success('تم فتح واتساب بالرسالة الجاهزة');
+    setWaPreview(null);
+  };
 
   return (
     <div>
@@ -99,7 +132,7 @@ export default function HomeworkSearch() {
           <table style={{ width:'100%', borderCollapse:'collapse', fontSize:'0.82rem' }}>
             <thead>
               <tr style={{ background:'var(--surface2)' }}>
-                {['تاريخ الواجب','عنوان الواجب','الطالب','الصف','الحالة','الدرجة'].map((h) => (
+                {['تاريخ الواجب','عنوان الواجب','الطالب','الصف','الحالة','الدرجة',''].map((h) => (
                   <th key={h} style={{ padding:'9px 14px', fontSize:'0.65rem', fontWeight:700, color:'var(--text3)', textAlign:'right', borderBottom:'1px solid var(--border)', textTransform:'uppercase', letterSpacing:'0.07em', whiteSpace:'nowrap' }}>{h}</th>
                 ))}
               </tr>
@@ -121,12 +154,33 @@ export default function HomeworkSearch() {
                     <td style={{ padding:'10px 14px', borderBottom:'1px solid var(--border)', fontSize:'0.78rem' }}>
                       {r.score != null ? `${r.score}/${r.totalScore ?? '—'}` : '—'}
                     </td>
+                    <td style={{ padding:'10px 14px', borderBottom:'1px solid var(--border)' }}>
+                      {shouldShowHomeworkWhatsapp(r) && (
+                        <button onClick={() => openWaPreview(r)}
+                          style={{ background:'none', border:'none', cursor:'pointer', fontSize:'1rem' }}
+                          aria-label="📲 متابعة عبر واتساب"
+                        >
+                          📲
+                        </button>
+                      )}
+                    </td>
                   </tr>
                 );
               })}
             </tbody>
           </table>
         </div>
+      )}
+
+      {waPreview && (
+        <WhatsappPreviewModal
+          studentName={waPreview.studentName}
+          parentPhone={waPreview.parentPhone}
+          message={waPreview.message}
+          onCopy={copyMessage}
+          onOpen={handleWaOpen}
+          onClose={() => setWaPreview(null)}
+        />
       )}
     </div>
   );
