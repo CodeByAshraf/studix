@@ -33,6 +33,9 @@ export function validateExam(data) {
 }
 
 // ── Create exam ─────────────────────────────────────────────
+// grade/academicYear: Exams Phase 2 targeting fields. groupId is preserved as an optional
+// historical reference (schema.prisma: exams.group_id is now nullable) — never required,
+// never read for eligibility (see getExamEligibleStudents below).
 export function createExam(data) {
   const errors = validateExam(data);
   if (hasErrors(errors)) throw { type: 'VALIDATION', errors };
@@ -42,7 +45,9 @@ export function createExam(data) {
   return {
     id:      `e${Date.now()}`,
     name:    clean.name?.trim(),
-    groupId: clean.groupId,
+    grade:       clean.grade,
+    academicYear: clean.academicYear || '',
+    groupId:     clean.groupId || null,
     subject: clean.subject || '',
     date:    clean.date,
     total:   Number(clean.total),
@@ -61,10 +66,21 @@ export function updateExam(id, data) {
   const clean = sanitizeFormData(data, ['name','teacher']);
   return {
     id, name: clean.name?.trim(), subject: clean.subject, date: clean.date,
+    grade: clean.grade, academicYear: clean.academicYear || '', groupId: clean.groupId || null,
     total: Number(clean.total), pass: Number(clean.pass),
     type: clean.type, teacher: clean.teacher?.trim() || '', status: clean.status,
     updatedAt: new Date().toISOString(),
   };
+}
+
+// ── Exams Phase 2 — grade-based eligibility (single source of truth) ────────────────
+// Replaces independent Group-based roster copies across GradeEntry.jsx, ExamResults.jsx,
+// buildExamReport.js. Deliberately never reads groupId or student_group_enrollments —
+// filters the flat students array directly, so a student can only ever appear once,
+// regardless of how many Groups (Primary/Additional) they hold or whether they hold any
+// at all. Mirrors homeworkService.js's getHomeworkEligibleStudents exactly.
+export function getExamEligibleStudents(exam, students) {
+  return students.filter(s => s.status === 'active' && s.grade === exam.grade);
 }
 
 // ── Grade helpers ────────────────────────────────────────────

@@ -223,19 +223,21 @@ model communications {
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model exams {
-  id         String   @id
-  name       String
-  group_id   String
-  subject    String?
-  date       DateTime @db.Date
-  total      Decimal  @db.Decimal(6, 2)
-  pass       Decimal  @default(50) @db.Decimal(6, 2)
-  created_at DateTime @default(now()) @db.Timestamptz(6)
-  type       String   @default("monthly")
-  teacher    String?
-  status     String   @default("upcoming")
-  groups     groups   @relation(fields: [group_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
-  grades     grades[]
+  id            String   @id
+  name          String
+  group_id      String?
+  grade         String?
+  academic_year String?
+  subject       String?
+  date          DateTime @db.Date
+  total         Decimal  @db.Decimal(6, 2)
+  pass          Decimal  @default(50) @db.Decimal(6, 2)
+  created_at    DateTime @default(now()) @db.Timestamptz(6)
+  type          String   @default("monthly")
+  teacher       String?
+  status        String   @default("upcoming")
+  groups        groups?  @relation(fields: [group_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  grades        grades[]
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.

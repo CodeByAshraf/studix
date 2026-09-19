@@ -163,11 +163,14 @@ export function sanitizeFormData(data, textFields = []) {
 
 // ── Pre-built schemas للاستخدام المباشر ──────────────────────────────────────
 
+// Phase 3B (Multi-Group Enrollment UI): groupId (Primary Group) is intentionally absent
+// from this schema — a student may have zero Primary Groups. Additional Groups are managed
+// separately through the Phase 3A enrollment API (pgAddAdditionalGroup/pgWithdrawEnrollment),
+// never through this field.
 export const studentSchema = {
   name:    compose(validators.required('اسم الطالب'), validators.minWords(2), validators.noScript),
   phone:   compose(validators.required('رقم الهاتف'), validators.egyptPhone),
   grade:   validators.required('السنة الدراسية'),
-  groupId: validators.required('المجموعة'),
 };
 
 export const groupSchema = {
@@ -196,9 +199,12 @@ export const attendanceSchema = {
   sessionTime: validators.required('وقت الحصة'),
 };
 
+// Exams Phase 2: academic targeting moves from Group to Grade — mirrors Homework 2.0
+// (homeworkService.js's validateHomework). groupId is preserved on the exam record as an
+// optional historical reference only, never required and never validated here.
 export const examSchema = {
   name:    compose(validators.required('اسم الامتحان'), validators.noScript),
-  groupId: validators.required('المجموعة'),
+  grade:   validators.required('الصف'),
   date:    compose(validators.required('التاريخ'), validators.dateString),
   total:   compose(validators.required('الدرجة الكلية'), validators.positiveNumber('الدرجة الكلية')),
   pass:    compose(validators.required('درجة النجاح'), validators.nonNegative('درجة النجاح')),

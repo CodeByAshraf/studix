@@ -1,9 +1,14 @@
 // src/modules/exams/buildExamReport.js
 // ─────────────────────────────────────────────────────────────────────────────
 // تقرير درجات الامتحانات — بخيارين:
-//   1) بالطالب: طالب واحد في كل امتحاناته.
-//   2) بالمجموعة + امتحان معيّن: كل طلاب المجموعة في امتحان محدد، مرتّبين.
+//   1) بالطالب: طالب واحد في كل امتحاناته (بحسب صفه).
+//   2) بامتحان معيّن: كل الطلاب المؤهَّلين لهذا الامتحان، مرتّبين.
 // يستخدم النظام الموحّد للطباعة (printStyles).
+//
+// Exams Phase 2: الأهلية أصبحت عبر getExamEligibleStudents(exam, students) المشتركة
+// (examService.js) — active && student.grade===exam.grade — لا المجموعة إطلاقاً.
+// `group` يبقى مُمرَّراً في كلتا الدالتين فقط لعرضه كوسم تاريخي/مرجعي في رأس التقرير
+// (قد يكون غائباً تماماً للامتحانات الجديدة)، مستقلاً تماماً عن حساب الأهلية.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import {
@@ -11,6 +16,7 @@ import {
   basePrintCSS, reportHeaderHTML, reportFooterHTML,
   kpiHTML, sectionTitleHTML, badgeHTML, toolbarHTML,
 } from '../../utils/printStyles';
+import { getExamEligibleStudents } from '../../services/examService';
 
 function pct(score, total) {
   if (total == null || score == null) return null;
@@ -63,9 +69,11 @@ function openWin(html) {
 export function openStudentExamReport({ student, group, exams, grades, profile }) {
   if (!student) return;
 
-  // امتحانات مجموعة الطالب التي له فيها درجة
+  // Exams Phase 2: امتحانات صف الطالب (student.grade) التي له فيها درجة — لا المجموعة.
+  // group يبقى مُمرَّراً فقط لعرضه في رأس التقرير (وسم تاريخي/مرجعي)، مستقلاً تماماً عن
+  // هذا الفلتر.
   const studentExams = exams
-    .filter(e => e.groupId === student.groupId)
+    .filter(e => e.grade === student.grade)
     .map(e => {
       const g = grades.find(gr => gr.examId === e.id && gr.studentId === student.id);
       const absent = g?.absent || false;
@@ -124,12 +132,15 @@ export function openStudentExamReport({ student, group, exams, grades, profile }
 // 2) تقرير بالمجموعة + امتحان معيّن — كل الطلاب مرتّبين
 // ═══════════════════════════════════════════════════════════════════════════
 export function openGroupExamReport({ group, exam, students, grades, profile }) {
-  if (!group || !exam) return;
+  if (!exam) return;
 
-  const groupStudents = students.filter(s => s.groupId === group.id && s.status === 'active');
+  // Exams Phase 2: الأهلية عبر getExamEligibleStudents(exam, students) — active &&
+  // student.grade===exam.grade — لا المجموعة إطلاقاً. group يبقى مُمرَّراً فقط لعرضه في
+  // رأس التقرير (وسم تاريخي/مرجعي)، مستقلاً تماماً عن هذا الفلتر.
+  const eligibleStudents = getExamEligibleStudents(exam, students);
 
   // لكل طالب درجته في هذا الامتحان
-  const rows = groupStudents.map(s => {
+  const rows = eligibleStudents.map(s => {
     const g = grades.find(gr => gr.examId === exam.id && gr.studentId === s.id);
     const absent = g?.absent || false;
     const score  = absent ? null : (g?.score ?? null);
@@ -166,7 +177,7 @@ export function openGroupExamReport({ group, exam, students, grades, profile }) 
 
   const bodyHTML = `
     ${reportHeaderHTML(profile)}
-    <div class="report-title">${esc(exam.name)} — ${esc(group.name)}</div>
+    <div class="report-title">${esc(exam.name)}${group?.name ? ` — ${esc(group.name)}` : ''}</div>
 
     <div style="text-align:center;color:${PALETTE.textSoft};font-size:12px;margin-bottom:16px">
       ${esc(exam.subject || '')} · ${fmtDateShort(exam.date)} · الدرجة من ${esc(String(exam.total))} · النجاح من ${esc(String(exam.pass))}
@@ -180,7 +191,7 @@ export function openGroupExamReport({ group, exam, students, grades, profile }) 
     </div>
 
     <div class="section avoid-break">
-      ${sectionTitleHTML('🏆', 'ترتيب الطلاب', groupStudents.length)}
+      ${sectionTitleHTML('🏆', 'ترتيب الطلاب', eligibleStudents.length)}
       <table class="report-table">
         <thead><tr>
           <th class="num">الترتيب</th><th>الطالب</th><th>الكود</th>
@@ -193,5 +204,5 @@ export function openGroupExamReport({ group, exam, students, grades, profile }) 
     ${reportFooterHTML(profile)}
   `;
 
-  openWin(wrapHTML({ title: `${exam.name} — ${group.name}`, bodyHTML }));
+  openWin(wrapHTML({ title: group?.name ? `${exam.name} — ${group.name}` : exam.name, bodyHTML }));
 }

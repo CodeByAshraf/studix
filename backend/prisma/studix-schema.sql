@@ -2,14 +2,14 @@
 -- تم توليده تلقائياً بواسطة backend/scripts/generateSchemaArtifact.js — لا تُعدِّله يدوياً.
 -- لإعادة التوليد بعد أي تغيير حقيقي في schema.prisma أو الـ triggers/constraints:
 --   node backend/scripts/generateSchemaArtifact.js
--- تاريخ التوليد: 2026-09-19T12:12:31.324Z
+-- تاريخ التوليد: 2026-09-19T13:30:35.160Z
 -- المصدر: قاعدة scratch معزولة (db push + DDL كامل)، وليس أي قاعدة تطوير حقيقية — لا بيانات إطلاقاً.
 
 --
 -- PostgreSQL database dump
 --
 
-\restrict fJtRVhQxdXq2OL4L6heJWyJRudbzd1SWVUJncLc3H5c5ueGGekQ0ZIe9DmyJY3t
+\restrict fbMliBXobC8n1JWZ0vReGdbhejYqeXAOsZFPMB9Nd0VWbRNY7byXVlHabphVP9H
 
 -- Dumped from database version 18.6
 -- Dumped by pg_dump version 18.6
@@ -345,7 +345,9 @@ CREATE TABLE public.communications (
 CREATE TABLE public.exams (
     id text NOT NULL,
     name text NOT NULL,
-    group_id text NOT NULL,
+    group_id text,
+    grade text,
+    academic_year text,
     subject text,
     date date NOT NULL,
     total numeric(6,2) NOT NULL,
@@ -1875,5 +1877,5 @@ ALTER TABLE ONLY public.wa_report_log
 -- PostgreSQL database dump complete
 --
 
-\unrestrict fJtRVhQxdXq2OL4L6heJWyJRudbzd1SWVUJncLc3H5c5ueGGekQ0ZIe9DmyJY3t
+\unrestrict fbMliBXobC8n1JWZ0vReGdbhejYqeXAOsZFPMB9Nd0VWbRNY7byXVlHabphVP9H
 

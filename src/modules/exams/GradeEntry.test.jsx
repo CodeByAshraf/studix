@@ -2,6 +2,10 @@
 // Phase 3B-5 — نفس عقد SessionMarking.test.jsx: الحالة المحلية (Zustand) لا تتغيّر
 // إلا بعد نجاح الخادم، وتُطابق استجابة الخادم بالضبط عند النجاح، وتبقى دون تغيير
 // عند الفشل.
+//
+// Exams Phase 2: الروستر أصبح grade-based (getExamEligibleStudents) — EXAM/S1/S2 لهما
+// نفس GRADE صراحةً هنا (لا صدفة قيمتين undefined متطابقتين)، وS3 له صف مختلف ليثبت
+// الاستبعاد فعلياً، لا مجرد المجموعة (groupId مُبقًى على EXAM فقط كمرجع تاريخي، غير مقروء).
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom';
@@ -17,9 +21,12 @@ vi.mock('../../services/api', async () => {
 import { pgSaveExamGrades } from '../../services/api';
 
 const GROUP_ID = 'g1';
-const EXAM = { id: 'e1', groupId: GROUP_ID, name: 'Test Exam', total: 100, pass: 50 };
+const GRADE_6 = 'الصف السادس الابتدائي';
+const GRADE_7 = 'الصف الأول الإعدادي';
+const EXAM = { id: 'e1', groupId: GROUP_ID, grade: GRADE_6, name: 'Test Exam', total: 100, pass: 50 };
 const S1 = 's1';
 const S2 = 's2';
+const S3 = 's3'; // wrong grade — must never appear in the roster or the save payload
 
 function renderPage() {
   return render(
@@ -34,8 +41,9 @@ function renderPage() {
 function seedStore() {
   useAppStore.setState({
     students: [
-      { id: S1, name: 'Student One', code: 'C1', groupId: GROUP_ID, status: 'active' },
-      { id: S2, name: 'Student Two', code: 'C2', groupId: GROUP_ID, status: 'active' },
+      { id: S1, name: 'Student One', code: 'C1', grade: GRADE_6, status: 'active' },
+      { id: S2, name: 'Student Two', code: 'C2', grade: GRADE_6, status: 'active' },
+      { id: S3, name: 'Student Three', code: 'C3', grade: GRADE_7, status: 'active' },
     ],
     grades: [],
   });
@@ -92,6 +100,14 @@ describe('GradeEntry — server-truth write path', () => {
       { studentId: S1, score: null, absent: false },
       { studentId: S2, score: null, absent: false },
     ]);
+    expect(records.some(r => r.studentId === S3)).toBe(false); // grade 7 — excluded
+  });
+
+  it('Exams Phase 2: only matching-grade students are rendered in the roster — a different-grade student never appears', () => {
+    renderPage();
+    expect(screen.getByText('Student One')).toBeInTheDocument();
+    expect(screen.getByText('Student Two')).toBeInTheDocument();
+    expect(screen.queryByText('Student Three')).not.toBeInTheDocument();
   });
 
   it('replaces only the grades for this examId, preserving unrelated existing local grades', async () => {

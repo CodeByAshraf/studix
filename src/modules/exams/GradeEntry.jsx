@@ -4,7 +4,7 @@ import { useAppStore } from '../../store/app.store';
 import { useAuth }     from '../../store/auth.context';
 import { useToast } from '../../components/Toast';
 import Button       from '../../components/ui/Button';
-import { scorePercent, scoreColor, scoreGrade } from '../../services/examService';
+import { scorePercent, scoreColor, scoreGrade, getExamEligibleStudents } from '../../services/examService';
 import { pgSaveExamGrades } from '../../services/api';
 import { useAvatarStyle } from '../students/components/StudentAvatar';
 
@@ -135,19 +135,22 @@ export default function GradeEntry({ exam, onClose }) {
   const [saving, setSaving] = useState(false);
   const [search, setSearch] = useState('');
 
-  const groupStudents = useMemo(() =>
-    students.filter(s => s.groupId === exam.groupId && s.status === 'active'),
-  [students, exam.groupId]);
+  // Exams Phase 2: eligibility is grade-based (getExamEligibleStudents), never
+  // Group-based — the roster that determines both the grade-entry table AND the exact
+  // payload sent to pgSaveExamGrades below (localGrades is seeded from it).
+  const eligibleStudents = useMemo(() =>
+    getExamEligibleStudents(exam, students),
+  [students, exam.grade]);
 
   const filtered = useMemo(() => {
     const q = search.toLowerCase();
-    return q ? groupStudents.filter(s => s.name.toLowerCase().includes(q)) : groupStudents;
-  }, [groupStudents, search]);
+    return q ? eligibleStudents.filter(s => s.name.toLowerCase().includes(q)) : eligibleStudents;
+  }, [eligibleStudents, search]);
 
   // Local grade state — keyed by studentId
   const [localGrades, setLocalGrades] = useState(() => {
     const map = {};
-    groupStudents.forEach(s => {
+    eligibleStudents.forEach(s => {
       const existing = grades.find(g => g.examId === exam.id && g.studentId === s.id);
       map[s.id] = existing ? { score: existing.score, absent: existing.absent } : { score: null, absent: false };
     });
@@ -160,7 +163,7 @@ export default function GradeEntry({ exam, onClose }) {
 
   // Live stats
   const liveStats = useMemo(() => {
-    const valid = groupStudents.map(s => localGrades[s.id]).filter(g => g && !g.absent && g.score !== null && g.score !== '');
+    const valid = eligibleStudents.map(s => localGrades[s.id]).filter(g => g && !g.absent && g.score !== null && g.score !== '');
     if (!valid.length) return null;
     const scores = valid.map(g => g.score);
     const passed  = valid.filter(g => g.score >= exam.pass).length;
@@ -170,10 +173,10 @@ export default function GradeEntry({ exam, onClose }) {
       lowest:   Math.min(...scores),
       passed,
       failed:   valid.length - passed,
-      absent:   groupStudents.filter(s => localGrades[s.id]?.absent).length,
+      absent:   eligibleStudents.filter(s => localGrades[s.id]?.absent).length,
       entered:  valid.length,
     };
-  }, [localGrades, groupStudents, exam.pass]);
+  }, [localGrades, eligibleStudents, exam.pass]);
 
   // Phase 3B-5: PostgreSQL هو مصدر الحقيقة الآن — الحفظ يذهب للخادم أولاً (معاملة
   // ذرّية واحدة تستبدل كل درجات الامتحان)، ولا يُطبَّق أي تغيير على الحالة المحلية
@@ -181,7 +184,7 @@ export default function GradeEntry({ exam, onClose }) {
   const handleSave = async () => {
     setSaving(true);
     try {
-      const records = groupStudents.map(s => {
+      const records = eligibleStudents.map(s => {
         const lg = localGrades[s.id];
         return {
           studentId: s.id,
@@ -210,7 +213,7 @@ export default function GradeEntry({ exam, onClose }) {
 
   const fillAll = (score) => {
     const updated = {};
-    groupStudents.forEach(s => { updated[s.id] = { score, absent: false }; });
+    eligibleStudents.forEach(s => { updated[s.id] = { score, absent: false }; });
     setLocalGrades(prev => ({ ...prev, ...updated }));
   };
 
@@ -223,7 +226,7 @@ export default function GradeEntry({ exam, onClose }) {
           <div style={{ fontSize:'0.75rem', color:'var(--text3)', display:'flex', gap:10 }}>
             <span>الدرجة: <span style={{ fontFamily:'Cairo,sans-serif', fontWeight:700, color:'var(--text)' }}>{exam.total}</span></span>
             <span>النجاح: <span style={{ fontFamily:'Cairo,sans-serif', fontWeight:700, color:'var(--green)' }}>{exam.pass}</span></span>
-            <span>{groupStudents.length} طالب</span>
+            <span>{eligibleStudents.length} طالب</span>
           </div>
         </div>
         {liveStats && (

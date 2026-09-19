@@ -15,8 +15,10 @@ vi.mock('../../services/api', async () => {
   return { ...actual, pgCreateExam: vi.fn(), pgUpdateExam: vi.fn(), pgDeleteExam: vi.fn() };
 });
 import { pgCreateExam, pgDeleteExam } from '../../services/api';
+import { GRADES } from '../../services/groupService';
 
 const GROUP_ID = 'g1';
+const GRADE = GRADES[0];
 
 function renderPage() {
   return render(
@@ -34,6 +36,7 @@ function seedStore() {
     students: [],
     exams: [],
     grades: [],
+    centerProfile: { academicYear: '2025/2026' },
   });
 }
 
@@ -55,14 +58,14 @@ describe('ExamsPage — server-truth write path', () => {
     const modalBody = document.querySelector('.modal-body');
     fireEvent.change(within(modalBody).getByPlaceholderText('مثال: امتحان شهري مارس — رياضيات'), { target: { value: 'اختبار', name: 'name' } });
     const formSelects = within(modalBody).getAllByRole('combobox');
-    fireEvent.change(formSelects[0], { target: { value: GROUP_ID, name: 'groupId' } }); // المجموعة
+    fireEvent.change(formSelects[0], { target: { value: GRADE, name: 'grade' } }); // الصف (Exams Phase 2 — لا مجموعة)
     fireEvent.change(formSelects[1], { target: { value: 'رياضيات', name: 'subject' } }); // المادة
 
     fireEvent.click(within(modalBody).getByRole('button', { name: /إنشاء الامتحان/ }));
 
     expect(useAppStore.getState().exams).toEqual([]);
 
-    const saved = { id: 'srv-e1', name: 'اختبار', groupId: GROUP_ID, subject: 'رياضيات', date: '2026-01-01', total: 100, pass: 50, type: 'monthly', teacher: '', status: 'upcoming' };
+    const saved = { id: 'srv-e1', name: 'اختبار', grade: GRADE, academicYear: '2025/2026', groupId: null, subject: 'رياضيات', date: '2026-01-01', total: 100, pass: 50, type: 'monthly', teacher: '', status: 'upcoming' };
     resolveCall(saved);
 
     await waitFor(() => {

@@ -1,7 +1,7 @@
 // src/modules/exams/ExamResults.jsx
 import { useMemo } from 'react';
 import { useAppStore } from '../../store/app.store';
-import { scorePercent, scoreColor, scoreGrade, getExamStatsWithPass, EXAM_TYPES } from '../../services/examService';
+import { scorePercent, scoreColor, scoreGrade, getExamStatsWithPass, getExamEligibleStudents, EXAM_TYPES } from '../../services/examService';
 import { formatDate } from '../../utils/helpers';
 // avatar helper (no hook — safe inside .map())
 const AV_PAL = [
@@ -27,9 +27,13 @@ export default function ExamResults({ exam }) {
   const grades               = useAppStore((s) => s.grades);
   const students             = useAppStore((s) => s.students);
 
-  const groupStudents = useMemo(() =>
-    students.filter(s => s.groupId === exam.groupId),
-  [students, exam.groupId]);
+  // Exams Phase 2: eligibility is grade-based (getExamEligibleStudents), never
+  // Group-based. This also fixes a pre-existing bug where this roster (unlike
+  // GradeEntry.jsx's) never filtered by status==='active' — getExamEligibleStudents
+  // always enforces active-only.
+  const eligibleStudents = useMemo(() =>
+    getExamEligibleStudents(exam, students),
+  [students, exam.grade]);
 
   const examGrades = useMemo(() =>
     grades.filter(g => g.examId === exam.id),
@@ -41,7 +45,7 @@ export default function ExamResults({ exam }) {
 
   // Build ranked results
   const ranked = useMemo(() => {
-    return groupStudents
+    return eligibleStudents
       .map(s => {
         const grade = examGrades.find(g => g.studentId === s.id);
         const score  = grade?.score ?? null;
@@ -56,7 +60,7 @@ export default function ExamResults({ exam }) {
         if (a.score !== null && b.score === null) return -1;
         return (b.score ?? -1) - (a.score ?? -1);
       });
-  }, [groupStudents, examGrades, exam]);
+  }, [eligibleStudents, examGrades, exam]);
 
   const passRate = stats.count > 0 ? Math.round(stats.passed / stats.count * 100) : null;
   const passColor = passRate === null ? 'var(--text3)' : passRate >= 80 ? '#10b981' : passRate >= 50 ? '#f59e0b' : '#ef4444';

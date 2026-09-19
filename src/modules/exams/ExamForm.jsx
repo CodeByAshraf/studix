@@ -3,6 +3,7 @@ import { useEffect } from 'react';
 import { useAppStore } from '../../store/app.store';
 import useForm       from '../../hooks/useForm';
 import { validateExam, EXAM_TYPES, EXAM_STATUS } from '../../services/examService';
+import { GRADES } from '../../services/groupService';
 import Button        from '../../components/ui/Button';
 
 const SUBJECTS = ['رياضيات','فيزياء','كيمياء','أحياء','إنجليزية','عربي','تاريخ','جغرافيا','فلسفة','حاسب','أخرى'];
@@ -28,10 +29,10 @@ function F({ label, required, error, children }) {
   );
 }
 
-const I = ({name,value,onChange,placeholder,type='text',invalid,min,max}) => (
-  <input name={name} type={type} value={value||''} min={min} max={max} onChange={onChange} placeholder={placeholder}
-    style={{...BASE, borderColor:invalid?'var(--red)':'var(--border)', background:invalid?'rgba(239,68,68,.05)':'var(--surface2)'}}
-    onFocus={fo} onBlur={bl(invalid)}/>
+const I = ({name,value,onChange,placeholder,type='text',invalid,min,max,disabled}) => (
+  <input name={name} type={type} value={value||''} min={min} max={max} onChange={onChange} placeholder={placeholder} disabled={disabled}
+    style={{...BASE, borderColor:invalid?'var(--red)':'var(--border)', background:invalid?'rgba(239,68,68,.05)':'var(--surface2)', opacity:disabled?0.65:1, cursor:disabled?'default':'text'}}
+    onFocus={disabled?undefined:fo} onBlur={disabled?undefined:bl(invalid)}/>
 );
 
 const S = ({name,value,onChange,children,invalid}) => (
@@ -41,20 +42,24 @@ const S = ({name,value,onChange,children,invalid}) => (
   >{children}</select>
 );
 
+// Exams Phase 2: academicYear is never a form input — there is no per-student or
+// per-exam choice to make (the whole center tracks a single current value,
+// centerProfile.academic_year); it is stamped automatically from that value at creation
+// (see examService.js's createExam) and simply displayed here read-only.
 const EMPTY = {
-  name:'', groupId:'', subject:'', date:new Date().toISOString().split('T')[0],
+  name:'', grade:'', subject:'', date:new Date().toISOString().split('T')[0],
   total:'100', pass:'50', type:'monthly', teacher:'', status:'upcoming', notes:'',
 };
 
 export default function ExamForm({ initialValues, editId, onSubmit, onCancel, loading }) {
-  const groups               = useAppStore((s) => s.groups);
+  const centerProfile        = useAppStore((s) => s.centerProfile);
   const { values, errors, touched, handleChange, validate, reset } = useForm(EMPTY, validateExam);
 
   useEffect(() => {
     if (initialValues) {
       reset({
         name:    initialValues.name    || '',
-        groupId: initialValues.groupId || '',
+        grade:   initialValues.grade   || '',
         subject: initialValues.subject || '',
         date:    initialValues.date    || new Date().toISOString().split('T')[0],
         total:   String(initialValues.total || 100),
@@ -80,11 +85,17 @@ export default function ExamForm({ initialValues, editId, onSubmit, onCancel, lo
           </F>
         </div>
 
-        <F label="المجموعة" required error={err('groupId')}>
-          <S name="groupId" value={values.groupId} onChange={handleChange} invalid={isEr('groupId')}>
-            <option value="">اختر المجموعة...</option>
-            {groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+        {/* الصف — Exams Phase 2: الهدف الأكاديمي (لا المجموعة) */}
+        <F label="الصف" required error={err('grade')}>
+          <S name="grade" value={values.grade} onChange={handleChange} invalid={isEr('grade')}>
+            <option value="">اختر الصف...</option>
+            {GRADES.map(g => <option key={g} value={g}>{g}</option>)}
           </S>
+        </F>
+
+        {/* السنة الدراسية — عرض فقط، من إعدادات المركز (centerProfile.academicYear) */}
+        <F label="السنة الدراسية">
+          <I name="academicYearDisplay" value={editId ? (initialValues?.academicYear || '—') : (centerProfile?.academicYear || '—')} onChange={() => {}} disabled/>
         </F>
 
         <F label="المادة" required error={err('subject')}>
@@ -135,7 +146,18 @@ export default function ExamForm({ initialValues, editId, onSubmit, onCancel, lo
 
       <div style={{ display:'flex', justifyContent:'flex-end', gap:10, marginTop:20, paddingTop:16, borderTop:'1px solid var(--border)' }}>
         <Button variant="secondary" onClick={onCancel}>إلغاء</Button>
-        <Button variant="primary" loading={loading} onClick={() => { if (validate()) onSubmit(values); }}>
+        <Button variant="primary" loading={loading} onClick={() => {
+          if (!validate()) return;
+          // academicYear is never edited by the user — stamped once from the center's
+          // current setting at creation, and preserved unchanged on every later edit.
+          const academicYear = editId ? (initialValues?.academicYear || '') : (centerProfile?.academicYear || '');
+          // groupId: no longer collected by this form at all (Exams Phase 2 — Group is
+          // not the target). An existing exam's historical group_id must survive an
+          // unrelated edit untouched, not be silently nulled out — a brand-new exam
+          // simply has none (null).
+          const groupId = editId ? (initialValues?.groupId ?? null) : null;
+          onSubmit({ ...values, academicYear, groupId });
+        }}>
           💾 {editId ? 'حفظ التعديلات' : 'إنشاء الامتحان'}
         </Button>
       </div>

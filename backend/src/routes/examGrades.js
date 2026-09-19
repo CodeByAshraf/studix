@@ -6,6 +6,9 @@
 // نفس معمارية backend/src/routes/attendanceSessions.js تماماً، بلا حاجة لتطبيع
 // تاريخ (grades ليس لها عمود @db.Date).
 //
+// Exams Phase 2: يتحقّق الآن من أهلية كل طالب مُرسَل (نشط + نفس صف الامتحان) قبل أي
+// كتابة، داخل نفس المعاملة — نفس نمط hwSubmissions.js's saveHwSubmissions بالضبط.
+//
 // الدلالة: "استبدل درجات هذا الامتحان بالكامل بالسجلات المُرسَلة الآن":
 //   - upsert لكل طالب في records (يعتمد على القيد الفريد exam_id+student_id،
 //     فلا يتعارض أبداً مع إعادة حفظ roster موجود — P2002 غير ممكن هنا).
@@ -42,7 +45,7 @@ export async function saveExamGrades({ examId, records }) {
   if (typeof examId !== 'string' || !examId.trim()) throw badRequest('examId مطلوب.');
   if (!Array.isArray(records)) throw badRequest('records يجب أن تكون مصفوفة.');
 
-  const exam = await prisma.exams.findUnique({ where: { id: examId }, select: { id: true, total: true } });
+  const exam = await prisma.exams.findUnique({ where: { id: examId }, select: { id: true, total: true, grade: true } });
   if (!exam) throw badRequest('الامتحان غير موجود.');
   const examTotal = Number(exam.total); // Decimal → number؛ يُستخدَم فقط للتحقّق هنا
 
@@ -67,6 +70,32 @@ export async function saveExamGrades({ examId, records }) {
   }
 
   const result = await runInTransaction(async (tx) => {
+    // Exams Phase 2 — the client-provided student list is no longer trusted blindly:
+    // every studentId must reference an active student whose grade matches this exam's
+    // grade (never Group membership — see examService.js's getExamEligibleStudents for
+    // the same rule on the frontend). Checked before any write, inside this same
+    // transaction, so an invalid student rejects the WHOLE save atomically — matches
+    // this function's existing all-or-nothing semantics exactly (same pattern as
+    // hwSubmissions.js's saveHwSubmissions). An exam with no grade set at all
+    // (legacy/edge case) skips the grade check rather than rejecting every submission
+    // outright; active status is still enforced.
+    const studentIds = [...byStudent.keys()];
+    const foundStudents = await tx.students.findMany({
+      where: { id: { in: studentIds } },
+      select: { id: true, status: true, grade: true },
+    });
+    const foundById = new Map(foundStudents.map((s) => [s.id, s]));
+    const invalid = studentIds.filter((id) => {
+      const s = foundById.get(id);
+      if (!s) return true;
+      if (s.status !== 'active') return true;
+      if (exam.grade && s.grade !== exam.grade) return true;
+      return false;
+    });
+    if (invalid.length) {
+      throw badRequest(`طالب/طلاب غير مؤهَّلين لهذا الامتحان (نشط + نفس الصف مطلوب): ${invalid.join(', ')}`);
+    }
+
     const existing = await tx.grades.findMany({
       where: { exam_id: examId },
       select: { id: true, student_id: true },
