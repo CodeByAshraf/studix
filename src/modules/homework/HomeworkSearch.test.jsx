@@ -10,6 +10,11 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import HomeworkSearch from './HomeworkSearch';
 import { useAppStore } from '../../store/app.store';
+import { ToastProvider } from '../../components/Toast';
+
+function renderSearch() {
+  return render(<ToastProvider><HomeworkSearch /></ToastProvider>);
+}
 
 let writtenHtml;
 function mockWindow() {
@@ -56,7 +61,7 @@ describe('HomeworkSearch — Homework Phase 3A', () => {
 
   it('with no filters, shows one row per (homework, eligible student) pair, including historical records with a blank academic year', () => {
     seed();
-    render(<HomeworkSearch />);
+    renderSearch();
     // hw1: s1+s2 eligible (grade 6). hw2: s3 eligible (grade 7). hw3: s1+s2 eligible (grade 6).
     expect(screen.getAllByText('أحمد علي')).toHaveLength(2); // hw1 + hw3
     expect(screen.getAllByText('سارة محمد')).toHaveLength(2); // hw1 + hw3
@@ -66,14 +71,14 @@ describe('HomeworkSearch — Homework Phase 3A', () => {
 
   it('does not render any Group filter as an eligibility/filter dimension', () => {
     seed();
-    render(<HomeworkSearch />);
+    renderSearch();
     expect(screen.queryByLabelText('المجموعة')).not.toBeInTheDocument();
     expect(screen.queryByText('كل المجموعات')).not.toBeInTheDocument();
   });
 
   it('filters by Grade', () => {
     seed();
-    render(<HomeworkSearch />);
+    renderSearch();
     selectByLabel('الصف', GRADE_7);
     expect(screen.getByText('منى فتحي')).toBeInTheDocument();
     expect(screen.queryByText('أحمد علي')).not.toBeInTheDocument();
@@ -82,7 +87,7 @@ describe('HomeworkSearch — Homework Phase 3A', () => {
 
   it('filters by date range', () => {
     seed();
-    render(<HomeworkSearch />);
+    renderSearch();
     fireEvent.change(screen.getByLabelText('من تاريخ'), { target: { value: '2026-03-01' } });
     fireEvent.change(screen.getByLabelText('إلى تاريخ'), { target: { value: '2026-03-31' } });
     expect(screen.getAllByText('واجب مارس')).toHaveLength(2); // s1+s2 rows
@@ -92,7 +97,7 @@ describe('HomeworkSearch — Homework Phase 3A', () => {
 
   it('filters by Academic Year', () => {
     seed();
-    render(<HomeworkSearch />);
+    renderSearch();
     selectByLabel('السنة الدراسية', '2025/2026');
     expect(screen.getAllByText('واجب مارس')).toHaveLength(2); // s1+s2 rows
     expect(screen.queryByText('واجب قديم')).not.toBeInTheDocument(); // academicYear: '' excluded
@@ -100,7 +105,7 @@ describe('HomeworkSearch — Homework Phase 3A', () => {
 
   it('filters by Submission Status — "لم يُسلَّم فقط" shows only students who never submitted', () => {
     seed();
-    render(<HomeworkSearch />);
+    renderSearch();
     selectByLabel('حالة التسليم', 'not_submitted');
     expect(screen.getAllByText('سارة محمد')).toHaveLength(2); // missing for hw1 AND hw3
     expect(screen.queryByText('منى فتحي')).not.toBeInTheDocument(); // submitted for hw2
@@ -108,7 +113,7 @@ describe('HomeworkSearch — Homework Phase 3A', () => {
 
   it('filters by Submission Status — "تم التسليم فقط" shows only students with an actual submission', () => {
     seed();
-    render(<HomeworkSearch />);
+    renderSearch();
     selectByLabel('حالة التسليم', 'submitted');
     expect(screen.getByText('منى فتحي')).toBeInTheDocument();
     // أحمد علي مؤهَّل مرتين (hw1 submitted, hw3 missing) — يجب أن يظهر مرة واحدة فقط (صف hw1)
@@ -118,7 +123,7 @@ describe('HomeworkSearch — Homework Phase 3A', () => {
 
   it('combines Grade + Date Range + Submission Status (the documented "Grade 6 + March + Not Submitted" example)', () => {
     seed();
-    render(<HomeworkSearch />);
+    renderSearch();
     selectByLabel('الصف', GRADE_6);
     fireEvent.change(screen.getByLabelText('من تاريخ'), { target: { value: '2026-03-01' } });
     fireEvent.change(screen.getByLabelText('إلى تاريخ'), { target: { value: '2026-03-31' } });
@@ -130,7 +135,7 @@ describe('HomeworkSearch — Homework Phase 3A', () => {
 
   it('shows an empty-state message when no row matches the combined filters', () => {
     seed();
-    render(<HomeworkSearch />);
+    renderSearch();
     selectByLabel('الصف', GRADE_7);
     selectByLabel('حالة التسليم', 'not_submitted');
     expect(screen.getByText(/لا توجد نتائج/)).toBeInTheDocument();
@@ -139,13 +144,13 @@ describe('HomeworkSearch — Homework Phase 3A', () => {
   it('changing a student\'s groupId has no effect on results — grade/eligibility only', () => {
     seed();
     useAppStore.setState({ students: [{ ...S1_SUBMITTED, groupId: 'totally-different-group' }, S2_MISSING, S3_G7] });
-    render(<HomeworkSearch />);
+    renderSearch();
     expect(screen.getAllByText('أحمد علي')).toHaveLength(2);
   });
 
   it('print uses exactly the current filtered dataset shown on screen — an excluded student never appears in the printed output', () => {
     seed();
-    render(<HomeworkSearch />);
+    renderSearch();
     selectByLabel('الصف', GRADE_7);
 
     fireEvent.click(screen.getByRole('button', { name: /طباعة/ }));
