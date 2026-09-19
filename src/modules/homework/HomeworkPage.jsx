@@ -13,11 +13,13 @@ import { formatDate } from '../../utils/helpers';
 import HomeworkForm     from './HomeworkForm';
 import HomeworkTracking from './HomeworkTracking';
 import HomeworkReports  from './HomeworkReports';
+import HomeworkSearch   from './HomeworkSearch';
 
 const VIEWS = [
   { id:'list',     icon:'📋', label:'قائمة الواجبات' },
   { id:'tracking', icon:'📊', label:'متابعة الحالات'  },
   { id:'reports',  icon:'📈', label:'التقارير'         },
+  { id:'search',   icon:'🔎', label:'بحث الواجبات'    },
 ];
 
 // ── Palette for avatars ──────────────────────────────────────
@@ -416,6 +418,9 @@ export default function HomeworkPage() {
           {view === 'reports' && (
             <HomeworkReports onViewHomework={(hw) => { setTrackHw(hw); setView('tracking'); }}/>
           )}
+
+          {/* ── SEARCH VIEW ─────────────────── */}
+          {view === 'search' && <HomeworkSearch/>}
 
         </SectionBoundary>
       </div>
