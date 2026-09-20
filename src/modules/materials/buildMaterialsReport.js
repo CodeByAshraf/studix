@@ -1,24 +1,123 @@
-// src/modules/homework/buildHomeworkSearchReport.js
+// src/modules/materials/buildMaterialsReport.js
 // ─────────────────────────────────────────────────────────────────────────────
-// Homework Phase 3A print — prints exactly the `rows` array it is given (already filtered by
-// homeworkSearchService.filterHomeworkSubmissionRows on the search screen). No independent
-// filtering logic exists here, so print can never diverge from what is on screen. Reuses the
-// same unified print system (printStyles) as buildHomeworkReport.js/buildExamReport.js.
+// تقرير استلام/دفع مذكرة (بوكليت) — لمذكرة محددة، مع تصفية اختيارية بمجموعة.
+// يستخدم النظام الموحّد للطباعة (printStyles) لضمان مظهر احترافي فاتح متناسق، بنفس
+// أسلوب buildPaymentsReport.js/buildExamReport.js بالضبط.
+//
+// أهلية الطلاب: نفس قاعدة العمل الموجودة بالفعل في MaterialDistribution.jsx —
+// student.grade === material.grade أولاً وأساساً؛ المجموعة (لو مُرِّرت) فلتر ثانوي
+// اختياري فقط فوق هذه القائمة، لا نموذج أهلية بديل بالمجموعة.
+//
+// بيانات التوزيع/الدفع: نفس deriveMatDist(inventoryTxn) الموجودة بالفعل في
+// materialService.js — بلا أي اشتقاق أو حقل جديد. "المتبقي" = material.price -
+// paidAmount، ونفس معنى "المتوقَّع" المستخدَم بالفعل في MaterialReports.jsx's
+// summary (عدد المستلمين × سعر المذكرة، لا كل المؤهَّلين × السعر).
 // ─────────────────────────────────────────────────────────────────────────────
 
 import {
-  PALETTE, esc, fmtDateShort,
+  PALETTE, esc, fmtDateShort, fmtMoney,
   basePrintCSS, reportHeaderHTML, reportFooterHTML,
-  sectionTitleHTML, badgeHTML, toolbarHTML,
+  kpiHTML, sectionTitleHTML, badgeHTML, toolbarHTML,
 } from '../../utils/printStyles';
-import { SUB_STATUS } from '../../services/homeworkService';
+import { deriveMatDist, PAY_STATUS } from '../../services/materialService';
 
-function wrapHTML({ title, bodyHTML }) {
-  return `<!DOCTYPE html>
+const STATUS_META = {
+  paid:    { l: PAY_STATUS.paid.label,    c: PALETTE.green },
+  partial: { l: PAY_STATUS.partial.label, c: PALETTE.amber },
+  unpaid:  { l: PAY_STATUS.unpaid.label,  c: PALETTE.red   },
+};
+
+/**
+ * @param {object} args
+ * @param {object} args.material     المذكرة المختارة (name, subject, grade, price, teacher)
+ * @param {object} [args.group]      مجموعة اختيارية لتصفية الطلاب المؤهَّلين إضافياً
+ * @param {array}  args.students     كل الطلاب
+ * @param {array}  args.inventoryTxn كل حركات المخزون (يُشتَقّ منها matDist هنا فقط)
+ * @param {object} args.profile      بيانات المركز (centerProfile — الاسم يُعرَض كما هو حرفياً)
+ */
+export function openMaterialReportPrint({ material, group, students, inventoryTxn, profile }) {
+  if (!material) return;
+
+  const dist = deriveMatDist(inventoryTxn || []).filter(d => d.matId === material.id);
+
+  // نفس فلتر الأهلية في MaterialDistribution.jsx بالضبط: الصف الدراسي أولاً، والمجموعة
+  // (لو مُرِّرت) تضييق اختياري فوقه — لا تُعامَل كنموذج أهلية بديل.
+  const eligible = students.filter(s =>
+    s.status === 'active' &&
+    s.grade === material.grade &&
+    (!group || s.groupId === group.id)
+  );
+
+  const rows = eligible.map(s => {
+    const d = dist.find(x => x.studentId === s.id) || { received: false, payStatus: 'unpaid', paidAmount: 0 };
+    const paid      = Number(d.paidAmount) || 0;
+    const remaining = Math.max(0, (material.price || 0) - paid);
+    return {
+      student:  s,
+      received: !!d.received,
+      receivedAt: d.receivedAt || null,
+      payStatus: d.payStatus || 'unpaid',
+      paid,
+      remaining,
+    };
+  });
+
+  const receivedRows = rows.filter(r => r.received);
+  const collected = rows.reduce((s, r) => s + r.paid, 0);
+  // "المتوقَّع" = نفس صيغة MaterialReports.jsx's summary بالضبط: عدد من استلم فعلاً ×
+  // سعر المذكرة (لا كل المؤهَّلين) — لا صيغة مالية جديدة.
+  const expected = receivedRows.length * (material.price || 0);
+  const collectRate = expected > 0 ? Math.round(collected / expected * 100) : 0;
+
+  const tableRows = rows.map(r => {
+    const st = STATUS_META[r.payStatus] || STATUS_META.unpaid;
+    return `
+      <tr>
+        <td>${esc(r.student.name)}</td>
+        <td>${esc(r.student.code)}</td>
+        <td class="num">${badgeHTML(r.received ? 'استلم' : 'لم يستلم', r.received ? PALETTE.green : PALETTE.textFaint)}</td>
+        <td class="num">${r.receivedAt ? fmtDateShort(r.receivedAt) : '—'}</td>
+        <td class="num">${fmtMoney(material.price || 0)}</td>
+        <td class="num">${fmtMoney(r.paid)}</td>
+        <td class="num">${r.remaining > 0 ? `<span style="color:${PALETTE.red};font-weight:700">${fmtMoney(r.remaining)}</span>` : '—'}</td>
+        <td class="num">${badgeHTML(st.l, st.c)}</td>
+      </tr>`;
+  }).join('');
+
+  const bodyHTML = `
+    ${reportHeaderHTML(profile)}
+    <div class="report-title">تقرير استلام ودفع — ${esc(material.name)}</div>
+
+    <div style="text-align:center;color:${PALETTE.textSoft};font-size:12px;margin-bottom:16px">
+      ${esc(material.subject || '')} · ${esc(material.grade || '')}${group ? ` · ${esc(group.name)}` : ''}${material.teacher ? ` · ${esc(material.teacher)}` : ''}
+    </div>
+
+    <div class="kpi-row">
+      ${kpiHTML('المحصّل', fmtMoney(collected), PALETTE.green, `من ${fmtMoney(expected)}`)}
+      ${kpiHTML('نسبة التحصيل', collectRate + '%', collectRate >= 80 ? PALETTE.green : collectRate >= 50 ? PALETTE.amber : PALETTE.red)}
+      ${kpiHTML('استلموا', `${receivedRows.length}/${eligible.length}`, PALETTE.green)}
+      ${kpiHTML('سعر المذكرة', fmtMoney(material.price || 0), PALETTE.blue)}
+    </div>
+
+    <div class="section avoid-break">
+      ${sectionTitleHTML('📚', 'كل الطلاب', eligible.length)}
+      <table class="report-table">
+        <thead><tr>
+          <th>الطالب</th><th>الكود</th><th class="num">الاستلام</th><th class="num">تاريخ الاستلام</th>
+          <th class="num">السعر</th><th class="num">المدفوع</th><th class="num">المتبقي</th><th class="num">حالة الدفع</th>
+        </tr></thead>
+        <tbody>${tableRows || '<tr><td colspan="8" style="text-align:center;color:#94a3b8">لا يوجد طلاب مؤهَّلون لهذه المذكرة</td></tr>'}</tbody>
+      </table>
+    </div>
+
+    ${reportFooterHTML(profile)}
+  `;
+
+  const html = `<!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
   <meta charset="UTF-8"/>
-  <title>${esc(title)}</title>
+  <title>تقرير مذكرة ${esc(material.name)}</title>
   <style>
     /* Cairo — محلي بالكامل (بلا إنترنت). نفس الملفات الثلاثة المُجمَّعة فعلاً تحت
        public/fonts/cairo/ (انظر src/styles/styles.css) — نافذة الطباعة هذه مفتوحة
@@ -51,55 +150,10 @@ function wrapHTML({ title, bodyHTML }) {
   <script>window.focus();</script>
 </body>
 </html>`;
-}
 
-function openWin(html) {
   const win = window.open('', '_blank', 'width=900,height=1000');
   if (!win) { alert('يرجى السماح بالنوافذ المنبثقة لطباعة التقرير.'); return; }
   win.document.open();
   win.document.write(html);
   win.document.close();
-}
-
-/**
- * @param {object} args
- * @param {array}  args.rows     الصفوف المفلترة بالضبط كما تُعرَض على شاشة البحث — لا يُعاد فلترتها هنا إطلاقاً
- * @param {object} args.profile  بيانات المركز (centerProfile)
- */
-export function openHomeworkSearchReportPrint({ rows, profile }) {
-  const list = rows || [];
-
-  const tableRows = list.map((r) => {
-    const st = SUB_STATUS[r.status] || SUB_STATUS.missing;
-    // لا تُلفَّق أي درجة لواجب لم يُصحَّح — score تأتي حرفياً كما هي (null => "—")
-    const scoreLabel = r.score != null ? `${r.score}/${r.totalScore ?? '—'}` : '—';
-    return `
-    <tr>
-      <td>${esc(fmtDateShort(r.homeworkDate))}</td>
-      <td>${esc(r.homeworkTitle)}</td>
-      <td>${esc(r.studentName)}</td>
-      <td>${esc(r.grade || '—')}</td>
-      <td class="num">${badgeHTML(st.label, st.color)}</td>
-      <td class="num">${scoreLabel}</td>
-    </tr>`;
-  }).join('');
-
-  const bodyHTML = `
-    ${reportHeaderHTML(profile)}
-    <div class="report-title">بحث الواجبات</div>
-
-    <div class="section avoid-break">
-      ${sectionTitleHTML('🔎', 'نتائج البحث', list.length)}
-      <table class="report-table">
-        <thead><tr>
-          <th>تاريخ الواجب</th><th>عنوان الواجب</th><th>الطالب</th><th>الصف</th><th class="num">الحالة</th><th class="num">الدرجة</th>
-        </tr></thead>
-        <tbody>${tableRows || `<tr><td colspan="6" style="text-align:center;color:${PALETTE.textFaint}">لا توجد نتائج مطابقة</td></tr>`}</tbody>
-      </table>
-    </div>
-
-    ${reportFooterHTML(profile)}
-  `;
-
-  openWin(wrapHTML({ title: 'بحث الواجبات', bodyHTML }));
 }
