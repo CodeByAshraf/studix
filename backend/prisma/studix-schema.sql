@@ -2,14 +2,14 @@
 -- تم توليده تلقائياً بواسطة backend/scripts/generateSchemaArtifact.js — لا تُعدِّله يدوياً.
 -- لإعادة التوليد بعد أي تغيير حقيقي في schema.prisma أو الـ triggers/constraints:
 --   node backend/scripts/generateSchemaArtifact.js
--- تاريخ التوليد: 2026-09-19T13:30:35.160Z
+-- تاريخ التوليد: 2026-09-19T13:54:29.479Z
 -- المصدر: قاعدة scratch معزولة (db push + DDL كامل)، وليس أي قاعدة تطوير حقيقية — لا بيانات إطلاقاً.
 
 --
 -- PostgreSQL database dump
 --
 
-\restrict fbMliBXobC8n1JWZ0vReGdbhejYqeXAOsZFPMB9Nd0VWbRNY7byXVlHabphVP9H
+\restrict OCWGWwGUxDEDMOtfR4mKHN93za512LrM7lgcbucHjU4LJ785HVb0HZG1crgZ1od
 
 -- Dumped from database version 18.6
 -- Dumped by pg_dump version 18.6
@@ -356,6 +356,9 @@ CREATE TABLE public.exams (
     type text DEFAULT 'monthly'::text NOT NULL,
     teacher text,
     status text DEFAULT 'upcoming'::text NOT NULL,
+    scheduled_time text,
+    duration_minutes integer,
+    actual_started_at timestamp(6) with time zone,
     CONSTRAINT chk_exam_pass CHECK (((pass >= (0)::numeric) AND (pass <= total))),
     CONSTRAINT chk_exam_status CHECK ((status = ANY (ARRAY['upcoming'::text, 'grading'::text, 'done'::text]))),
     CONSTRAINT chk_exam_total CHECK ((total > (0)::numeric)),
@@ -1877,5 +1880,5 @@ ALTER TABLE ONLY public.wa_report_log
 -- PostgreSQL database dump complete
 --
 
-\unrestrict fbMliBXobC8n1JWZ0vReGdbhejYqeXAOsZFPMB9Nd0VWbRNY7byXVlHabphVP9H
+\unrestrict OCWGWwGUxDEDMOtfR4mKHN93za512LrM7lgcbucHjU4LJ785HVb0HZG1crgZ1od
 

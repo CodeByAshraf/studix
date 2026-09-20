@@ -55,6 +55,10 @@ export function createExam(data) {
     type:    clean.type || 'monthly',
     teacher: clean.teacher?.trim() || '',
     status,
+    // Exams Phase 3C — scheduling fields (display/admin-only, no timer/Start logic yet).
+    // Both optional; empty stays null, never fabricated.
+    scheduledTime:    clean.scheduledTime || null,
+    durationMinutes:  clean.durationMinutes ? Number(clean.durationMinutes) : null,
     createdAt: new Date().toISOString(),
   };
 }
@@ -67,6 +71,8 @@ export function updateExam(id, data) {
   return {
     id, name: clean.name?.trim(), subject: clean.subject, date: clean.date,
     grade: clean.grade, academicYear: clean.academicYear || '', groupId: clean.groupId || null,
+    scheduledTime:    clean.scheduledTime || null,
+    durationMinutes:  clean.durationMinutes ? Number(clean.durationMinutes) : null,
     total: Number(clean.total), pass: Number(clean.pass),
     type: clean.type, teacher: clean.teacher?.trim() || '', status: clean.status,
     updatedAt: new Date().toISOString(),
@@ -186,4 +192,53 @@ export function getWeakStudents(students, grades, exams, threshold = 60) {
     })
     .filter(s => s && s.avgPct < threshold)
     .sort((a, b) => a.avgPct - b.avgPct);
+}
+
+// ── Exams Phase 3C — end time (display only, never persisted) ───────────────────────
+// Pure calculation from scheduled_time + duration_minutes. exams.actual_started_at (the
+// real administrative timer) does not exist yet — this is purely for showing the planned
+// end time next to the two scheduling fields in ExamForm.jsx. Wraps correctly past
+// midnight (e.g. 23:30 + 60min → 00:30, crossesMidnight: true).
+export function computeExamEndTime(scheduledTime, durationMinutes) {
+  if (!scheduledTime || !durationMinutes) return null;
+  const [h, m] = scheduledTime.split(':').map(Number);
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+  const startMinutes = h * 60 + m;
+  const endMinutesTotal = startMinutes + Number(durationMinutes);
+  const endMinutesOfDay = endMinutesTotal % 1440;
+  const crossesMidnight = endMinutesTotal >= 1440;
+  const endH = String(Math.floor(endMinutesOfDay / 60)).padStart(2, '0');
+  const endM = String(endMinutesOfDay % 60).padStart(2, '0');
+  return { time: `${endH}:${endM}`, crossesMidnight };
+}
+
+// ── Exams Phase 3D — administrative timer state (display only) ──────────────────────
+// Mirrors backend/src/routes/examStart.js's computeTimerState exactly (no shared package
+// exists between backend/ and src/, so this is deliberately duplicated — kept small and
+// in lockstep rather than introducing a cross-package abstraction for one calculation).
+// `now` defaults to Date.now() but is injectable for deterministic tests and for a
+// ticking UI component to pass its own current tick.
+//
+// Four states: 'not_scheduled' (no duration at all — every historical/legacy exam),
+// 'ready_to_start' (has a duration, not started yet), 'in_progress', 'time_finished'.
+export function computeExamTimerState({ actualStartedAt, durationMinutes }, now = Date.now()) {
+  if (!durationMinutes) return { phase: 'not_scheduled', remainingSeconds: null };
+  if (!actualStartedAt) return { phase: 'ready_to_start', remainingSeconds: null };
+  const startMs = new Date(actualStartedAt).getTime();
+  const endMs = startMs + durationMinutes * 60_000;
+  const remainingSeconds = Math.max(0, Math.round((endMs - now) / 1000));
+  return { phase: remainingSeconds > 0 ? 'in_progress' : 'time_finished', remainingSeconds };
+}
+
+// Pure display formatting for the countdown — "H:MM:SS" once an hour or more remains,
+// "MM:SS" otherwise. null (not_scheduled/ready_to_start have no remainingSeconds) → '—'.
+export function formatRemainingSeconds(remainingSeconds) {
+  if (remainingSeconds == null) return '—';
+  const s = Math.max(0, Math.floor(remainingSeconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  const mm = String(m).padStart(2, '0');
+  const ss = String(sec).padStart(2, '0');
+  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
 }

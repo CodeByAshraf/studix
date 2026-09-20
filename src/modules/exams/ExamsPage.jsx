@@ -14,6 +14,7 @@ import ExamForm      from './ExamForm';
 import GradeEntry    from './GradeEntry';
 import ExamResults   from './ExamResults';
 import ExamReports   from './ExamReports';
+import ExamTimer     from './ExamTimer';
 
 const VIEWS = [
   { id:'list',    icon:'📋', label:'الامتحانات'   },
@@ -56,6 +57,10 @@ function ExamCard({ exam, group, stats, onEdit, onDelete, onGrades, onResults })
           <span>الدرجة: <strong style={{ fontFamily:'Cairo,sans-serif' }}>{exam.total}</strong></span>
           <span>النجاح: <strong style={{ fontFamily:'Cairo,sans-serif', color:'var(--green)' }}>{exam.pass}</strong></span>
         </div>
+
+        {/* Exams Phase 3D — administrative Start/countdown, purely additive, never
+            required (renders quietly for historical exams with no scheduling data). */}
+        <ExamTimer exam={exam}/>
 
         {/* Stats row */}
         {stats.count > 0 ? (

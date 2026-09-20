@@ -35,6 +35,7 @@ import setupRouter from './routes/setup.js';
 import { makeCrudRouter } from './routes/crud.js';
 import attendanceSessionsRouter from './routes/attendanceSessions.js';
 import examDeleteRouter from './routes/examDelete.js';
+import examStartRouter from './routes/examStart.js';
 import examGradesRouter from './routes/examGrades.js';
 import homeworkDeleteRouter from './routes/homeworkDelete.js';
 import hwSubmissionsRouter from './routes/hwSubmissions.js';
@@ -168,6 +169,12 @@ app.use('/api/attendance-sessions', requireAuth, requirePermission('attendance')
 // الـ CRUD العام في الحلقة أدناه. أي GET/POST/PUT على /api/exams لا يطابق أي route هنا
 // (الراوتر يعرّف DELETE فقط) فيمرّ تلقائياً للـ CRUD العام كما هو دون أي تغيير.
 app.use('/api/exams', requireAuth, requirePermission('exams'), examDeleteRouter);
+
+// ── Exams Phase 3D: بدء الامتحان (مؤقّت إداري فقط) ──
+// يُعترَض هنا فقط POST /api/exams/:id/start — نفس تقنية الاعتراض حسب method+path أعلاه.
+// GET/POST /api/exams (بلا id)/PUT/DELETE /api/exams/:id لا تطابق هذا الراوتر (يعرّف
+// POST /:id/start فقط) فتمرّ تلقائياً كما هي.
+app.use('/api/exams', requireAuth, requirePermission('exams'), examStartRouter);
 
 // ── Phase 3B-5: استبدال درجات امتحان كامل بمعاملة ذرّية واحدة ──
 // مسار منفصل عن /api/grades العام لنفس سبب /api/attendance-sessions — GradeEntry

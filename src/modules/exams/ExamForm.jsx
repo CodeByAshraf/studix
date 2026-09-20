@@ -2,7 +2,7 @@
 import { useEffect } from 'react';
 import { useAppStore } from '../../store/app.store';
 import useForm       from '../../hooks/useForm';
-import { validateExam, EXAM_TYPES, EXAM_STATUS } from '../../services/examService';
+import { validateExam, computeExamEndTime, EXAM_TYPES, EXAM_STATUS } from '../../services/examService';
 import { GRADES } from '../../services/groupService';
 import Button        from '../../components/ui/Button';
 
@@ -49,6 +49,10 @@ const S = ({name,value,onChange,children,invalid}) => (
 const EMPTY = {
   name:'', grade:'', subject:'', date:new Date().toISOString().split('T')[0],
   total:'100', pass:'50', type:'monthly', teacher:'', status:'upcoming', notes:'',
+  // Exams Phase 3C — both optional; scheduling/administrative display only, no timer/Start
+  // logic exists yet. Empty string here (not null) matches every other optional text/select
+  // field's local form-state convention.
+  scheduledTime:'', durationMinutes:'',
 };
 
 export default function ExamForm({ initialValues, editId, onSubmit, onCancel, loading }) {
@@ -68,6 +72,8 @@ export default function ExamForm({ initialValues, editId, onSubmit, onCancel, lo
         teacher: initialValues.teacher || '',
         status:  initialValues.status  || 'upcoming',
         notes:   initialValues.notes   || '',
+        scheduledTime:   initialValues.scheduledTime   || '',
+        durationMinutes: initialValues.durationMinutes != null ? String(initialValues.durationMinutes) : '',
       });
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -75,6 +81,10 @@ export default function ExamForm({ initialValues, editId, onSubmit, onCancel, lo
 
   const err  = f => touched[f] && errors[f];
   const isEr = f => !!(touched[f] && errors[f]);
+
+  // Exams Phase 3C — display-only, never persisted (see examService.js's createExam/
+  // updateExam: only scheduledTime/durationMinutes themselves are ever sent to the server).
+  const endTime = computeExamEndTime(values.scheduledTime, values.durationMinutes);
 
   return (
     <div>
@@ -126,6 +136,24 @@ export default function ExamForm({ initialValues, editId, onSubmit, onCancel, lo
         <F label="المدرس / المصحح">
           <I name="teacher" value={values.teacher} onChange={handleChange} placeholder="اسم المدرس..."/>
         </F>
+
+        {/* الجدولة — Exams Phase 3C: اختيارية بالكامل، عرض/مرجع إداري فقط (لا مؤقّت،
+            لا إجراء بدء بعد). موعد النهاية محسوب فقط، لا يُحفَظ إطلاقاً. */}
+        <F label="وقت الامتحان (اختياري)" error={err('scheduledTime')}>
+          <I name="scheduledTime" value={values.scheduledTime} onChange={handleChange} type="time" invalid={isEr('scheduledTime')}/>
+        </F>
+
+        <F label="المدة (دقائق، اختياري)" error={err('durationMinutes')}>
+          <I name="durationMinutes" value={values.durationMinutes} onChange={handleChange} type="number" min="1" placeholder="مثال: 60" invalid={isEr('durationMinutes')}/>
+        </F>
+
+        {endTime && (
+          <div style={{ gridColumn:'1/-1' }}>
+            <F label="موعد الانتهاء المتوقَّع">
+              <I name="endTimeDisplay" value={`${endTime.time}${endTime.crossesMidnight ? ' (اليوم التالي)' : ''}`} onChange={() => {}} disabled/>
+            </F>
+          </div>
+        )}
 
         {editId && (
           <F label="حالة الامتحان">

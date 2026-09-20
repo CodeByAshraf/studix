@@ -5,7 +5,7 @@
 // student.grade === exam.grade — never Group membership. Mirrors
 // homeworkService.js's getHomeworkEligibleStudents exactly.
 import { describe, it, expect } from 'vitest';
-import { getExamEligibleStudents, validateExam, createExam, updateExam } from './examService';
+import { getExamEligibleStudents, validateExam, createExam, updateExam, computeExamEndTime, computeExamTimerState, formatRemainingSeconds } from './examService';
 
 const GRADE_6 = 'الصف السادس الابتدائي';
 const GRADE_7 = 'الصف الأول الإعدادي';
@@ -113,5 +113,152 @@ describe('createExam / updateExam — grade + academicYear targeting, groupId pr
     const exam = updateExam('e1', { ...VALID, academicYear: '2025/2026', groupId: 'g1', status: 'upcoming' });
     expect(exam.groupId).toBe('g1');
     expect(exam.grade).toBe(GRADE_6);
+  });
+
+  it('createExam persists scheduledTime/durationMinutes when provided', () => {
+    const exam = createExam({ ...VALID, scheduledTime: '09:00', durationMinutes: '60' });
+    expect(exam.scheduledTime).toBe('09:00');
+    expect(exam.durationMinutes).toBe(60);
+  });
+
+  it('createExam leaves scheduledTime/durationMinutes null when not provided (historical-style)', () => {
+    const exam = createExam({ ...VALID });
+    expect(exam.scheduledTime).toBeNull();
+    expect(exam.durationMinutes).toBeNull();
+  });
+
+  it('updateExam preserves scheduledTime/durationMinutes when passed through', () => {
+    const exam = updateExam('e1', { ...VALID, status: 'upcoming', scheduledTime: '14:30', durationMinutes: '45' });
+    expect(exam.scheduledTime).toBe('14:30');
+    expect(exam.durationMinutes).toBe(45);
+  });
+});
+
+describe('validateExam — scheduling fields (Exams Phase 3C)', () => {
+  const VALID = { name: 'امتحان 1', subject: 'رياضيات', grade: GRADE_6, date: '2026-02-01', total: '100', pass: '50' };
+
+  it('both scheduling fields are optional — neither is required', () => {
+    const errors = validateExam(VALID);
+    expect(errors.scheduledTime).toBeUndefined();
+    expect(errors.durationMinutes).toBeUndefined();
+  });
+
+  it('providing only scheduledTime (durationMinutes empty) is valid', () => {
+    const errors = validateExam({ ...VALID, scheduledTime: '09:00' });
+    expect(errors.scheduledTime).toBeUndefined();
+    expect(errors.durationMinutes).toBeUndefined();
+  });
+
+  it('providing only durationMinutes (scheduledTime empty) is valid', () => {
+    const errors = validateExam({ ...VALID, durationMinutes: '60' });
+    expect(errors.scheduledTime).toBeUndefined();
+    expect(errors.durationMinutes).toBeUndefined();
+  });
+
+  it('accepts valid HH:MM values across the full range', () => {
+    expect(validateExam({ ...VALID, scheduledTime: '00:00' }).scheduledTime).toBeUndefined();
+    expect(validateExam({ ...VALID, scheduledTime: '23:59' }).scheduledTime).toBeUndefined();
+    expect(validateExam({ ...VALID, scheduledTime: '09:05' }).scheduledTime).toBeUndefined();
+  });
+
+  it('rejects invalid time formats', () => {
+    expect(validateExam({ ...VALID, scheduledTime: '24:00' }).scheduledTime).toBeTruthy();
+    expect(validateExam({ ...VALID, scheduledTime: '9:00' }).scheduledTime).toBeTruthy();
+    expect(validateExam({ ...VALID, scheduledTime: '09:60' }).scheduledTime).toBeTruthy();
+    expect(validateExam({ ...VALID, scheduledTime: 'not-a-time' }).scheduledTime).toBeTruthy();
+  });
+
+  it('accepts a valid positive integer duration', () => {
+    expect(validateExam({ ...VALID, durationMinutes: '1' }).durationMinutes).toBeUndefined();
+    expect(validateExam({ ...VALID, durationMinutes: '90' }).durationMinutes).toBeUndefined();
+  });
+
+  it('rejects an invalid duration (zero, negative, non-integer)', () => {
+    expect(validateExam({ ...VALID, durationMinutes: '0' }).durationMinutes).toBeTruthy();
+    expect(validateExam({ ...VALID, durationMinutes: '-5' }).durationMinutes).toBeTruthy();
+    expect(validateExam({ ...VALID, durationMinutes: '1.5' }).durationMinutes).toBeTruthy();
+  });
+});
+
+describe('computeExamEndTime — pure display calculation, never persisted (Exams Phase 3C)', () => {
+  it('returns null when either input is missing', () => {
+    expect(computeExamEndTime('', 60)).toBeNull();
+    expect(computeExamEndTime('09:00', '')).toBeNull();
+    expect(computeExamEndTime(null, null)).toBeNull();
+  });
+
+  it('computes a same-day end time', () => {
+    expect(computeExamEndTime('09:00', 60)).toEqual({ time: '10:00', crossesMidnight: false });
+    expect(computeExamEndTime('14:15', 45)).toEqual({ time: '15:00', crossesMidnight: false });
+  });
+
+  it('crosses midnight correctly (23:30 + 60 minutes = 00:30 next day)', () => {
+    expect(computeExamEndTime('23:30', 60)).toEqual({ time: '00:30', crossesMidnight: true });
+  });
+
+  it('exactly reaching midnight is still flagged as crossing', () => {
+    expect(computeExamEndTime('23:00', 60)).toEqual({ time: '00:00', crossesMidnight: true });
+  });
+
+  it('a very long duration wrapping multiple times still resolves to a valid time-of-day', () => {
+    expect(computeExamEndTime('10:00', 1500)).toEqual({ time: '11:00', crossesMidnight: true }); // 25h later
+  });
+});
+
+describe('computeExamTimerState — pure administrative timer calculation (Exams Phase 3D)', () => {
+  it('"not_scheduled" when there is no duration at all (historical exams)', () => {
+    expect(computeExamTimerState({ actualStartedAt: null, durationMinutes: null })).toEqual({ phase: 'not_scheduled', remainingSeconds: null });
+    expect(computeExamTimerState({ actualStartedAt: null, durationMinutes: undefined })).toEqual({ phase: 'not_scheduled', remainingSeconds: null });
+  });
+
+  it('"ready_to_start" when duration is set but the exam has not been started yet', () => {
+    expect(computeExamTimerState({ actualStartedAt: null, durationMinutes: 60 })).toEqual({ phase: 'ready_to_start', remainingSeconds: null });
+  });
+
+  it('"in_progress" with the correct remainingSeconds partway through', () => {
+    const start = new Date('2026-01-01T09:00:00.000Z').toISOString();
+    const now = new Date('2026-01-01T09:10:00.000Z').getTime(); // 10 minutes in, 60-minute exam
+    const result = computeExamTimerState({ actualStartedAt: start, durationMinutes: 60 }, now);
+    expect(result.phase).toBe('in_progress');
+    expect(result.remainingSeconds).toBe(50 * 60);
+  });
+
+  it('"time_finished" with remainingSeconds 0 once the duration has fully elapsed', () => {
+    const start = new Date('2026-01-01T09:00:00.000Z').toISOString();
+    const now = new Date('2026-01-01T10:30:00.000Z').getTime(); // 90 minutes in, 60-minute exam
+    const result = computeExamTimerState({ actualStartedAt: start, durationMinutes: 60 }, now);
+    expect(result.phase).toBe('time_finished');
+    expect(result.remainingSeconds).toBe(0);
+  });
+
+  it('exactly at the end boundary is "time_finished", not "in_progress"', () => {
+    const start = new Date('2026-01-01T09:00:00.000Z').toISOString();
+    const now = new Date('2026-01-01T10:00:00.000Z').getTime(); // exactly 60 minutes
+    const result = computeExamTimerState({ actualStartedAt: start, durationMinutes: 60 }, now);
+    expect(result.phase).toBe('time_finished');
+    expect(result.remainingSeconds).toBe(0);
+  });
+
+  it('never returns a negative remainingSeconds', () => {
+    const start = new Date('2026-01-01T09:00:00.000Z').toISOString();
+    const now = new Date('2026-01-02T09:00:00.000Z').getTime(); // a full day later
+    const result = computeExamTimerState({ actualStartedAt: start, durationMinutes: 30 }, now);
+    expect(result.remainingSeconds).toBe(0);
+  });
+});
+
+describe('formatRemainingSeconds', () => {
+  it('formats under an hour as MM:SS', () => {
+    expect(formatRemainingSeconds(59)).toBe('00:59');
+    expect(formatRemainingSeconds(600)).toBe('10:00');
+  });
+  it('formats an hour or more as H:MM:SS', () => {
+    expect(formatRemainingSeconds(3661)).toBe('1:01:01');
+  });
+  it('returns "—" for null (not_scheduled/ready_to_start)', () => {
+    expect(formatRemainingSeconds(null)).toBe('—');
+  });
+  it('never shows negative time', () => {
+    expect(formatRemainingSeconds(-5)).toBe('00:00');
   });
 });
