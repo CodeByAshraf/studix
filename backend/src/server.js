@@ -39,22 +39,26 @@ import recitationsRouter from './routes/recitations.js';
 import examDeleteRouter from './routes/examDelete.js';
 import examStartRouter from './routes/examStart.js';
 import examGradesRouter from './routes/examGrades.js';
+import gradesRouter from './routes/grades.js';
 import homeworkDeleteRouter from './routes/homeworkDelete.js';
+import groupDeleteRouter from './routes/groupDelete.js';
 import hwSubmissionsRouter from './routes/hwSubmissions.js';
+import hwSubmissionsScopedGetRouter from './routes/hwSubmissionsScopedGet.js';
+import homeworksScopedGetRouter from './routes/homeworksScopedGet.js';
 import centerProfileRouter from './routes/centerProfile.js';
 import materialDistributionRouter from './routes/materialDistribution.js';
-import admissionActivationRouter from './routes/admissionActivation.js';
-import studentCreateRouter from './routes/studentCreate.js';
-import treasuryTxnRouter from './routes/treasuryTxn.js';
-import paymentsRouter from './routes/payments.js';
 import inventoryTxnRouter from './routes/inventoryTxn.js';
 import studentReportRouter from './routes/studentReport.js';
 import { studentEnrollmentsRouter, enrollmentRouter } from './routes/enrollments.js';
 import communicationsRouter from './routes/communications.js';
+import admissionActivationRouter from './routes/admissionActivation.js';
+import studentCreateRouter from './routes/studentCreate.js';
+import treasuryTxnRouter from './routes/treasuryTxn.js';
+import cashboxBalanceRouter from './routes/cashboxBalance.js';
+import paymentsRouter from './routes/payments.js';
 import admissionPaymentsRouter from './routes/admissionPayments.js';
 import admissionCancellationRouter from './routes/admissionCancellation.js';
 import activityLogsRouter from './routes/activityLogs.js';
-import cashboxBalanceRouter from './routes/cashboxBalance.js';
 import usersRouter from './routes/users.js';
 import rolesRouter from './routes/roles.js';
 import supportAccessRouter from './routes/supportAccess.js';
@@ -172,10 +176,6 @@ app.use('/api/setup', setupRouter);
 // ولا سلوك أي مسار مالي.
 app.use('/api/attendance-sessions', requireAuth, requirePermission('attendance'), attendanceSessionsRouter);
 
-// ── Phase 3B-5: حذف امتحان مع كل درجاته بمعاملة ذرّية واحدة ──
-// يُعترَض هنا فقط DELETE /api/exams/:id — نفس تقنية الاعتراض حسب method+path المستخدَمة
-// في Phase 3B-4 (attendance)، بفارق أنه هنا نفس المسار العام /api/exams، مركَّب قبل
-// الـ CRUD العام في الحلقة أدناه. أي GET/POST/PUT على /api/exams لا يطابق أي route هنا
 // ── Recitation Assessment Phase 2 — تقييم تسميع لكل طالب حاضر ضمن جلسة حضور مكتملة
 // موجودة بالفعل. صلاحية مخصَّصة ومنفصلة تماماً عن 'attendance' (قرار منتج صريح) —
 // لا تُمنَح تلقائياً لأي دور/مستخدم موجود، فتفشل مغلقة (403) لكل مستخدم حتى يُمنَحها
@@ -192,6 +192,10 @@ app.use('/api/recitation-sessions', requireAuth, requirePermission('recitation')
 // الخلفي فقط — هجرة المستهلكين ومسألة PG_COLLECTIONS مؤجَّلتان لمراحل لاحقة).
 app.use('/api/attendance', requireAuth, requirePermission('attendance'), attendanceRouter);
 
+// ── Phase 3B-5: حذف امتحان مع كل درجاته بمعاملة ذرّية واحدة ──
+// يُعترَض هنا فقط DELETE /api/exams/:id — نفس تقنية الاعتراض حسب method+path المستخدَمة
+// في Phase 3B-4 (attendance)، بفارق أنه هنا نفس المسار العام /api/exams، مركَّب قبل
+// الـ CRUD العام في الحلقة أدناه. أي GET/POST/PUT على /api/exams لا يطابق أي route هنا
 // (الراوتر يعرّف DELETE فقط) فيمرّ تلقائياً للـ CRUD العام كما هو دون أي تغيير.
 app.use('/api/exams', requireAuth, requirePermission('exams'), examDeleteRouter);
 
@@ -211,6 +215,12 @@ app.use('/api/exam-grades', requireAuth, requirePermission('exams'), examGradesR
 // تمرّ للـ CRUD العام دون تغيير.
 app.use('/api/homeworks', requireAuth, requirePermission('homework'), homeworkDeleteRouter);
 
+// ── Phase 2.1 (Homework behavioral cleanup): حارس الواجبات لحذف مجموعة، على الخادم ──
+// يُعترَض هنا فقط DELETE /api/groups/:id — يرفض (409) لو كان لصفّ المجموعة واجبات، وإلا
+// next() للـ CRUD العام كما هو. نفس صلاحية 'groups' التي تحرس الحذف العام نفسه — لا يتطلّب
+// صلاحية 'homework' (انظر groupDelete.js).
+app.use('/api/groups', requireAuth, requirePermission('groups'), groupDeleteRouter);
+
 // ── Phase 3B-6: استبدال حالات تسليم واجب كامل بمعاملة ذرّية واحدة ──
 // مسار منفصل عن /api/hwSubmissions العام لنفس سبب /api/exam-grades.
 app.use('/api/hw-submissions', requireAuth, requirePermission('homework'), hwSubmissionsRouter);
@@ -228,16 +238,6 @@ app.use('/api/centerProfile', requireAuth, requirePermission('settings'), center
 // الحالية، بلا دور إضافي.
 app.use('/api/material-distributions', requireAuth, requirePermission('materials'), materialDistributionRouter);
 
-// ── Phase 3B-13B (Stage ii): تفعيل سجل قبول (طالب + admissions + سجل نظامي) بمعاملة
-// ذرّية واحدة ──
-// يُعترَض هنا فقط PUT /api/admissions/:id/activate (segmentان بعد /api/admissions) —
-// الـ CRUD العام يعرّف فقط PUT /api/admissions/:id (segment واحد)، فلا تعارض إطلاقاً؛
-// أي مسار آخر على /api/admissions (GET/POST/PUT /:id العادي) يمرّ دون أي تغيير للحلقة
-// الديناميكية أدناه. نفس حراسة admissions الحالية (requireAuth فقط، بلا دور إضافي).
-app.use('/api/admissions', requireAuth, requirePermission('admissions'), admissionActivationRouter);
-
-// ── Phase 3B-14D: إلغاء حجز + استرداد كل دفعاته، بمعاملة ذرّية واحدة ──
-// يُعترَض هنا فقط PUT /api/admissions/:id/cancel-with-refund (segmentان بعد الـ id) —
 // ── State Synchronization Audit fix — POST يدوي لحركة مخزون (InventoryPage.jsx) ──
 // مركَّب هنا، قبل الحلقة الديناميكية أدناه، فيُعالِج POST /api/inventoryTxn حصراً (توليد
 // number الفريد بقفل استشاري — الـ CRUD العام لا يملك هذا المنطق). GET/PUT/PATCH/DELETE
@@ -272,6 +272,16 @@ app.use('/api/enrollments', requireAuth, requirePermission('students'), enrollme
 // صلاحية collection communications الحالية (COLLECTION_PERMISSIONS.communications='students').
 app.use('/api/communications', requireAuth, requirePermission('students'), communicationsRouter);
 
+// ── Phase 3B-13B (Stage ii): تفعيل سجل قبول (طالب + admissions + سجل نظامي) بمعاملة
+// ذرّية واحدة ──
+// يُعترَض هنا فقط PUT /api/admissions/:id/activate (segmentان بعد /api/admissions) —
+// الـ CRUD العام يعرّف فقط PUT /api/admissions/:id (segment واحد)، فلا تعارض إطلاقاً؛
+// أي مسار آخر على /api/admissions (GET/POST/PUT /:id العادي) يمرّ دون أي تغيير للحلقة
+// الديناميكية أدناه. نفس حراسة admissions الحالية (requireAuth فقط، بلا دور إضافي).
+app.use('/api/admissions', requireAuth, requirePermission('admissions'), admissionActivationRouter);
+
+// ── Phase 3B-14D: إلغاء حجز + استرداد كل دفعاته، بمعاملة ذرّية واحدة ──
+// يُعترَض هنا فقط PUT /api/admissions/:id/cancel-with-refund (segmentان بعد الـ id) —
 // لا تعارض مع admissionActivationRouter أعلاه (/:id/activate) ولا مع الـ CRUD العام
 // (PUT /:id، segment واحد). ملف منفصل عمداً عن admissionActivation.js — مسؤولية واحدة
 // لكل ملف (نفس نمط examDelete.js/examGrades.js الحالي).
@@ -301,6 +311,13 @@ app.use('/api/cashboxes', requireAuth, requirePermission('treasury'), (req, res,
   next();
 });
 
+// ── Scalability Architecture Phase 3 (Treasury Safety Gate) — GET /api/cashboxes/:id/
+// balance?asOf= ──
+// مسار قراءة فقط مستقل تماماً عن TreasuryPage.jsx (لا يُستهلَك من أي واجهة بعد) — يحسب
+// الرصيد من SQL aggregate بدل تحميل كل تاريخ الخزنة للمتصفح؛ لا تغيير على أي معاملة كتابة
+// مالية قائمة (createPayment/refundPayment/reverseTreasuryTxn/transferBetweenCashboxes).
+app.use('/api/cashboxes', requireAuth, requirePermission('treasury'), cashboxBalanceRouter);
+
 // ── Phase 3B-14B: treasury_txn — عكس/تحويل ذرّيان مخصّصان + حقن created_by + حظر
 // PUT/PATCH/DELETE على /:id ──
 // treasuryTxn.js يتولّى كل شيء تحتاجه هذه الـ collection غير القابل للـ CRUD العام
@@ -311,13 +328,6 @@ app.use('/api/cashboxes', requireAuth, requirePermission('treasury'), (req, res,
 // مضاعفاً: trg_no_delete_treasury في القاعدة أصلاً بلا استثناء، هذا الحارس يضيف 405
 // واضحاً عند حدود الـ API بدل استثناء القاعدة الخام). GET وPOST / (بعد الاعتراض) يمرّان
 // دون تغيير للحلقة الديناميكية أدناه، التي تتولّى POST / فعلياً عبر الـ CRUD العام —
-// ── Scalability Architecture Phase 3 (Treasury Safety Gate) — GET /api/cashboxes/:id/
-// balance?asOf= ──
-// مسار قراءة فقط مستقل تماماً عن TreasuryPage.jsx (لا يُستهلَك من أي واجهة بعد) — يحسب
-// الرصيد من SQL aggregate بدل تحميل كل تاريخ الخزنة للمتصفح؛ لا تغيير على أي معاملة كتابة
-// مالية قائمة (createPayment/refundPayment/reverseTreasuryTxn/transferBetweenCashboxes).
-app.use('/api/cashboxes', requireAuth, requirePermission('treasury'), cashboxBalanceRouter);
-
 // treasuryTxn ليست في PRESERVE_CLIENT_ID_COLLECTIONS، فتولّد UUID خادمياً دائماً.
 app.use('/api/treasuryTxn', requireAuth, requirePermission('treasury'), treasuryTxnRouter);
 
@@ -382,6 +392,21 @@ app.use('/api/db-switch', requireAuth, requireRole('admin'), dbSwitchRouter);
 // خارج نطاق هذه المرحلة). لا اتصال PostgreSQL من هذا المسار إطلاقاً — قراءة ملف فقط (انظر
 // dbIdentity.js). لا واجهة أمامية بعد تستخدم هذا المسار.
 app.use('/api/db-identity', requireAuth, requireRole('admin'), dbIdentityRouter);
+
+// ── Grades + Homework Submissions Backend Read Foundation (spec 003) — scoped
+// GET /api/grades?studentId=&examId= + GET /api/hwSubmissions?studentId=&homeworkId= +
+// GET /api/hwSubmissions/aggregate?groupBy=status|homework ──
+// مسارات مخصَّصة، مُركَّبة قبل الحلقة الديناميكية (نفس نمط attendance.js بالضبط)، نفس
+// صلاحيتي 'exams'/'homework' الحاليتين (COLLECTION_PERMISSIONS.grades/hwSubmissions). كل
+// راوتر يعرِّف GET فقط (و/aggregate لـ hwSubmissions) — أي POST/PUT/PATCH/DELETE يمرّ دون أي
+// تغيير للحلقة الديناميكية أدناه (makeCrudRouter)، ولا تغيير على /api/exam-grades أو
+// /api/hw-submissions (الراوترات الذرّية الحالية للكتابة). لا مستهلك أمامي بعد يستخدم أياً من
+// هذه المسارات (Backend Read Foundation فقط — هجرة المستهلكين مؤجَّلة لمراحل لاحقة).
+app.use('/api/grades', requireAuth, requirePermission('exams'), gradesRouter);
+app.use('/api/hwSubmissions', requireAuth, requirePermission('homework'), hwSubmissionsScopedGetRouter);
+// Phase 2 (Homework global-read migration) — GET /api/homeworks?grade= (GET / only; GET /:id,
+// POST/PUT/PATCH → CRUD العام، DELETE /:id → homeworkDeleteRouter أعلاه، كما كانت تماماً).
+app.use('/api/homeworks', requireAuth, requirePermission('homework'), homeworksScopedGetRouter);
 
 // ── تفعيل routes ديناميكياً (يتخطّى أي model ناقص بأمان) ──
 // كل /api/<collection> يتطلّب جلسة مصادَق عليها (requireAuth) — GET شاملاً — بالإضافة
