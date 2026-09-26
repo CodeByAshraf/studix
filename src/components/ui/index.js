@@ -6,3 +6,4 @@ export { default as Table }  from './Table.jsx';
 export { default as KpiCard, KpiGrid } from './KpiCard.jsx';
 export { default as Avatar, AvatarWithName } from './Avatar.jsx';
 export { default as Tabs }   from './Tabs.jsx';
+export { default as StudentSearchSelect } from './StudentSearchSelect.jsx';
