@@ -159,11 +159,18 @@ describe('POST /material-distributions/:materialId/students/:studentId/payment â
     const cashbox = await seedCashbox();
     const user = await seedUser(nextId('u'), ['materials', 'payments']);
 
+    // P2-2 â€” the route requires an idempotency key; without it nothing is created.
+    const path = `/api/material-distributions/${material.id}/students/${student.id}/payment`;
+    const headers = { 'x-test-user': JSON.stringify(user) };
+    const missingKey = await request(port, { method: 'POST', path, headers, body: { payStatus: 'paid', cashboxId: cashbox.id, date: '2026-01-05' } });
+    expect(missingKey.status).toBe(400);
+    expect(await client.payments.count({ where: { student_id: student.id } })).toBe(0);
+
     const res = await request(port, {
       method: 'POST',
-      path: `/api/material-distributions/${material.id}/students/${student.id}/payment`,
-      headers: { 'x-test-user': JSON.stringify(user) },
-      body: { payStatus: 'paid', cashboxId: cashbox.id, date: '2026-01-05' },
+      path,
+      headers,
+      body: { payStatus: 'paid', cashboxId: cashbox.id, date: '2026-01-05', clientRequestId: globalThis.crypto.randomUUID() },
     });
 
     expect(res.status).toBe(201);

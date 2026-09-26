@@ -199,9 +199,28 @@ describe('GET /api/admissionPayments — admissionId filter + unfiltered compati
     const cashbox = await seedCashbox();
     const admission = await seedAdmission();
 
+    const post = (payload) => new Promise((resolve, reject) => {
+      const req = http.request(
+        { host: '127.0.0.1', port, path: '/api/admissionPayments', method: 'POST', headers: { 'Content-Type': 'application/json' } },
+        (res) => {
+          let raw = '';
+          res.on('data', (c) => { raw += c; });
+          res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(raw || '{}') }));
+        }
+      );
+      req.on('error', reject);
+      req.end(JSON.stringify(payload));
+    });
+
+    // P2-2 — the HTTP route requires the idempotency key; without it nothing is created.
+    const missingKey = await post({ admissionId: admission.id, type: 'deposit', amount: 150, date: '2026-01-12', cashboxId: cashbox.id });
+    expect(missingKey.status).toBe(400);
+    expect(await client.admission_payments.count({ where: { admission_id: admission.id } })).toBe(0);
+
     const res = await new Promise((resolve, reject) => {
       const body = JSON.stringify({
         admissionId: admission.id, type: 'deposit', amount: 150, date: '2026-01-12', cashboxId: cashbox.id,
+        clientRequestId: crypto.randomUUID(),
       });
       const req = http.request(
         { host: '127.0.0.1', port, path: '/api/admissionPayments', method: 'POST', headers: { 'Content-Type': 'application/json' } },

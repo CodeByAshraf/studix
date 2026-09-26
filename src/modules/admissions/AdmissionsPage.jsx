@@ -399,11 +399,12 @@ export default function AdmissionsPage() {
         materialId:  payment.materialId || null,
         cashboxId:   payment.cashboxId,
         // مفتاح idempotency — نفس محاولة الإرسال (نقرة مزدوجة/إعادة محاولة شبكة) تُعيد
-        // نفس السجل بدل تكراره؛ يولّده المستدعي (ReservedTab) مرة واحدة لكل نقرة "حفظ".
+        // نفس السجل بدل تكراره؛ يولّده المستدعي (ReservedTab) مرة واحدة لكل نافذة دفع (P2-2).
         clientRequestId: payment.clientRequestId,
       });
-      setAdmissionPayments(prev => [...prev, savedPayment]);
-      setTreasuryTxn(prev => [...prev, txn]);
+      // A replayed response (same clientRequestId) returns the same rows — never list them twice.
+      setAdmissionPayments(prev => [...prev.filter(p => p.id !== savedPayment.id), savedPayment]);
+      if (txn) setTreasuryTxn(prev => [...prev.filter(t => t.id !== txn.id), txn]);
       if (logs.length > 0) setAdmissionSystemLog(prev => [...prev, ...logs]);
       toast.success(`تم تسجيل ${label}: ${amount} ج.م ودخلت الخزنة ✓`);
       return true;
@@ -615,9 +616,13 @@ function ReservedTab({ records, onSelect, onConfirm, onCancel, onWaiting, onFrom
   // إعادة رندر React) يمنع تنفيذ نقرة ثانية بينما الأولى ما زالت قيد التنفيذ فعلياً؛
   // submittingPayment (state) لتعطيل الزر بصرياً وإظهار حالة الانتظار. الإغلاق الفوري
   // للمودال بلا انتظار (السلوك السابق) كان هو الفجوة الحقيقية: زر لا يُعطَّل أبداً على
-  // نتيجة خادم لم تصل بعد. clientRequestId يولَّد مرة واحدة هنا لكل نقرة "حفظ" ويُمرَّر
-  // للخادم كمفتاح idempotency (دفاع في العمق — لا يُعتمَد عليه وحده).
+  // نتيجة خادم لم تصل بعد. clientRequestId (paymentKeyRef أدناه) يولَّد مرة واحدة لكل نافذة
+  // دفع ويُمرَّر للخادم كمفتاح idempotency — الخادم هو الضامن النهائي (P2-2).
   const submittingPaymentRef = useRef(false);
+  // P2-2 — the key belongs to the payment DIALOG session, not to a click: a retry after a lost
+  // response must resend the same key, so the server replays instead of recording it twice.
+  // A newly opened dialog (a new payment) gets a new key.
+  const paymentKeyRef = useRef(null);
   const [submittingPayment, setSubmittingPayment] = useState(false);
   const activeCashboxes = (cashboxes || []).filter(cb => cb.active);
   // مذكرات سنة الطالب (تظهر عند اختيار نوع الدفع = مذكرات)
@@ -718,7 +723,7 @@ function ReservedTab({ records, onSelect, onConfirm, onCancel, onWaiting, onFrom
                   </>
                 )}
                 <button onClick={() => onCancel(r.id)} style={{ ...btnTiny, color: 'var(--red)', borderColor: 'rgba(239,68,68,.35)' }}>إلغاء</button>
-                <button onClick={() => { setPayFor(r); setPayForm({ type: PaymentType.DEPOSIT, amount: '', materialId: '', cashboxId: '' }); }} style={{ ...btnTiny, color: '#8b5cf6', borderColor: '#8b5cf655' }}>💰 تسجيل دفعة</button>
+                <button onClick={() => { paymentKeyRef.current = uuid(); setPayFor(r); setPayForm({ type: PaymentType.DEPOSIT, amount: '', materialId: '', cashboxId: '' }); }} style={{ ...btnTiny, color: '#8b5cf6', borderColor: '#8b5cf655' }}>💰 تسجيل دفعة</button>
               </div>
             </div>
           );
@@ -799,7 +804,7 @@ function ReservedTab({ records, onSelect, onConfirm, onCancel, onWaiting, onFrom
                 if (!payForm.cashboxId) { toast.error('اختر الخزنة أولاً'); return; }
                 submittingPaymentRef.current = true;
                 setSubmittingPayment(true);
-                const clientRequestId = uuid();
+                const clientRequestId = paymentKeyRef.current || (paymentKeyRef.current = uuid());
                 try {
                   const ok = await onAddPayment(payFor.id, { type: payForm.type, amount: Number(payForm.amount), materialId: payForm.materialId || null, at: new Date().toISOString().split('T')[0], cashboxId: payForm.cashboxId, clientRequestId });
                   if (ok) setPayFor(null); // يُغلَق فقط عند نجاح حقيقي — الفشل يُبقي المودال مفتوحاً مع toast.error الموجود بالفعل

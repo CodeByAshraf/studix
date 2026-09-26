@@ -165,6 +165,33 @@ describe('AdmissionsPage — admission payment creation (Phase 3B-14D)', () => {
     expect(useAppStore.getState().treasuryTxn).toEqual([]);
   });
 
+  // P2-2 — the key belongs to the dialog, not the click: a retry after a failed/lost response
+  // resends the same clientRequestId (the server replays instead of recording it twice).
+  it('a retry in the same payment dialog after a failure resends the same clientRequestId', async () => {
+    let attempt = 0;
+    const successResponder = postPaymentResponder;
+    postPaymentResponder = (body) => {
+      attempt += 1;
+      return attempt === 1 ? errJson(500, 'انقطاع مؤقت') : successResponder(body);
+    };
+
+    seedStore();
+    renderPage();
+    openPaymentModal();
+    const selects = screen.getAllByRole('combobox');
+    fireEvent.change(selects[selects.length - 1], { target: { value: 'cb1' } });
+    fireEvent.change(screen.getByPlaceholderText('200'), { target: { value: '200' } });
+    fireEvent.click(screen.getByText('حفظ الدفعة'));
+    await waitFor(() => expect(postPaymentCalls()).toHaveLength(1));
+    await waitFor(() => expect(screen.getByText('حفظ الدفعة').closest('button')).not.toBeDisabled());
+    fireEvent.click(screen.getByText('حفظ الدفعة'));
+    await waitFor(() => expect(postPaymentCalls()).toHaveLength(2));
+
+    const [k1, k2] = postPaymentCalls().map(([, o]) => JSON.parse(o.body).clientRequestId);
+    expect(k1).toBeTruthy();
+    expect(k2).toBe(k1);
+  });
+
   it('cashbox selection: no active cashbox blocks submission entirely — zero fetch calls', async () => {
     seedStore({ cashboxes: [{ ...CB1, active: false }] });
     renderPage();

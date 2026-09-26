@@ -29,7 +29,11 @@ import crypto from 'crypto';
 import { runInTransaction } from '../lib/transaction.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { requirePermission } from '../middleware/permissions.js';
-import { validatePaymentInput, createPaymentInTx, serializeBigInt } from './payments.js';
+import {
+  validatePaymentInput, createPaymentInTx, serializeBigInt,
+  normalizeClientRequestId, findPaymentByClientRequestId, idempotencyConflict,
+} from './payments.js';
+import { prisma } from '../prisma.js';
 import { snakeToCamel } from '../lib/caseMapper.js';
 
 const RELEVANT_TYPES = ['studentDelivery', 'reservation', 'reservationRelease', 'return']; // ⊂ chk_inv_type
@@ -297,10 +301,16 @@ function monthYearFromIsoDate(isoDate) {
 //
 // "غير مدفوع" لا يمرّ عبر هذه الدالة إطلاقاً — يبقى على مسار saveMaterialDistribution
 // العادي بلا أي كتابة مالية، تماماً كسلوكه الحالي.
+//
+// P2-2 — clientRequestId: the same idempotency contract as POST /api/payments (payments.js).
+// The key becomes payments.id; a retry of the same confirmation replays the original result,
+// checked right after the per-(material, student) advisory lock so it is serialized with any
+// concurrent attempt. A key reused for a different confirmation is rejected with 409.
 export async function confirmMaterialPayment(
-  { materialId, studentId, payStatus, amount, cashboxId, method = 'cash', date, notes = null },
-  { userId = null } = {}
+  { materialId, studentId, payStatus, amount, cashboxId, method = 'cash', date, notes = null, clientRequestId: rawKey },
+  { userId = null, requireKey = false } = {}
 ) {
+  const clientRequestId = normalizeClientRequestId(rawKey, { required: requireKey });
   if (typeof materialId !== 'string' || !/^\d+$/.test(materialId)) {
     throw badRequest('materialId يجب أن يكون رقماً صالحاً.');
   }
@@ -315,7 +325,30 @@ export async function confirmMaterialPayment(
   const paymentDate = date || todayIsoDate();
   const { year, month } = monthYearFromIsoDate(paymentDate);
 
-  const result = await runInTransaction(async (tx) => {
+  // The operation a clientRequestId identifies: this student, this material, this cashbox and
+  // method, and — for a partial payment — this amount ('paid' amounts are server-computed from
+  // the remaining balance, so they are not part of the request).
+  const matchesThisConfirmation = (existing) => existing.student_id === studentId
+    && existing.material_id === materialIdBigInt
+    && existing.pay_type === 'material'
+    && existing.method === method
+    && existing.treasury_txn_payments_treasury_txn_idTotreasury_txn?.cashbox_id === cashboxId
+    && (payStatus !== 'partial' || Number(existing.amount) === Number(amount));
+
+  const replayWithin = async (tx, existing) => {
+    if (!matchesThisConfirmation(existing)) throw idempotencyConflict();
+    const { treasury_txn_payments_treasury_txn_idTotreasury_txn: treasuryTxn, ...payment } = existing;
+    const [inventoryTxn] = await tx.inventory_txn.findMany({
+      where: { material_id: materialIdBigInt, student_id: studentId, type: { in: RELEVANT_TYPES }, status: { not: 'cancelled' } },
+      orderBy: { created_at: 'desc' },
+      take: 1,
+    });
+    return { payment, treasuryTxn, inventoryTxn: inventoryTxn || null, replay: true };
+  };
+
+  let result;
+  try {
+    result = await runInTransaction(async (tx) => {
     // قفل استشاري خاص بزوج (مذكرة، طالب) — يُسلسِل محاولات تأكيد الدفع المتزامنة لنفس
     // الالتزام المالي (نفس الطالب+نفس المذكرة)، بحيث تُقرَأ "المتبقي" أدناه دائماً مقابل
     // بيانات مُثبَّتة فعلياً لا بيانات قديمة قد تتجاوزها معاملة أخرى للتو — نفس مبدأ
@@ -324,6 +357,12 @@ export async function confirmMaterialPayment(
     // القفل هو أيضاً خط الدفاع الحقيقي ضد الإرسال المزدوج (نقرتان/إعادة محاولة شبكة):
     // الطلب الثاني يُحجَب حتى يُثبَّت الأول، ثم يرى remaining<=0 فيُرفَض بوضوح أدناه.
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`matpay:${materialId}:${studentId}`}))`;
+
+    // P2-2 — a retry of an already-committed confirmation (serialized by the lock above).
+    if (clientRequestId) {
+      const already = await findPaymentByClientRequestId(tx, clientRequestId);
+      if (already) return replayWithin(tx, already);
+    }
 
     const material = await tx.inv_materials.findUnique({ where: { id: materialIdBigInt } });
     if (!material) throw badRequest('المذكرة غير موجودة.');
@@ -371,7 +410,7 @@ export async function confirmMaterialPayment(
       notes,
       cashboxId,
     });
-    const { payment, treasuryTxn } = await createPaymentInTx(tx, normalized, { userId });
+    const { payment, treasuryTxn } = await createPaymentInTx(tx, normalized, { userId, paymentId: clientRequestId });
 
     const newPaidTotal = alreadyPaid + amt;
     const newPayStatus = newPaidTotal >= price ? 'paid' : 'partial';
@@ -421,12 +460,24 @@ export async function confirmMaterialPayment(
     }
 
     return { payment, treasuryTxn, inventoryTxn };
-  });
+    });
+  } catch (err) {
+    // The same key used concurrently for a DIFFERENT (material, student) pair is not serialized
+    // by the advisory lock — the primary key catches it; this transaction rolled back entirely.
+    if (clientRequestId && err.code === 'P2002') {
+      const winner = await findPaymentByClientRequestId(prisma, clientRequestId);
+      if (winner) result = await replayWithin(prisma, winner);
+      else throw err;
+    } else {
+      throw err;
+    }
+  }
 
   return {
     payment: snakeToCamel(serializeBigInt(result.payment)),
-    treasuryTxn: snakeToCamel(result.treasuryTxn),
-    inventoryTxn: snakeToCamel(serializeBigInt(result.inventoryTxn)),
+    treasuryTxn: result.treasuryTxn ? snakeToCamel(result.treasuryTxn) : null,
+    inventoryTxn: result.inventoryTxn ? snakeToCamel(serializeBigInt(result.inventoryTxn)) : null,
+    ...(result.replay ? { replay: true } : {}),
   };
 }
 
@@ -447,12 +498,12 @@ router.put('/:materialId', asyncHandler(async (req, res) => {
 // بوابة الصلاحيات المالية القائمة (نفس مبدأ عدم إضعاف الضوابط المالية الحالية).
 router.post('/:materialId/students/:studentId/payment', requirePermission('payments'), asyncHandler(async (req, res) => {
   const { materialId, studentId } = req.params;
-  const { payStatus, amount, cashboxId, method, date, notes } = req.body || {};
+  const { payStatus, amount, cashboxId, method, date, notes, clientRequestId } = req.body || {};
   const data = await confirmMaterialPayment(
-    { materialId, studentId, payStatus, amount, cashboxId, method, date, notes },
-    { userId: req.user?.id ?? null }
+    { materialId, studentId, payStatus, amount, cashboxId, method, date, notes, clientRequestId },
+    { userId: req.user?.id ?? null, requireKey: true }
   );
-  res.status(201).json({ ok: true, data });
+  res.status(data.replay ? 200 : 201).json({ ok: true, data });
 }));
 
 export default router;

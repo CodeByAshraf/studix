@@ -6,7 +6,7 @@ import Button       from '../../components/ui/Button';
 import { PAY_STATUS, deriveMatDist } from '../../services/materialService';
 import { pgSaveMaterialDistribution, pgGetCollection, pgConfirmMaterialPayment } from '../../services/api';
 import { mergeById, normalizeCollectionForMerge } from '../../store/db.middleware';
-import { formatDate, formatCurrency } from '../../utils/helpers';
+import { formatDate, formatCurrency, uuid } from '../../utils/helpers';
 import BookletPaymentModal from './BookletPaymentModal';
 
 const AV_PAL = [
@@ -252,7 +252,8 @@ export default function MaterialDistribution({ material, onClose }) {
 
   // "مدفوع"/"مدفوع جزئياً" — يفتح نافذة تأكيد الدفع بدل أي تعديل محلي فوري.
   const handleRequestPayment = useCallback((student, targetStatus, initialAmount) => {
-    setPaymentRequest({ student, targetStatus, initialAmount });
+    // P2-2 — one idempotency key per confirmation dialog: retries of this confirmation reuse it.
+    setPaymentRequest({ student, targetStatus, initialAmount, clientRequestId: uuid() });
   }, []);
 
   // تأكيد الدفع من النافذة: نداء واحد لنقطة نهاية ذرّية على الخادم (دفعة + حركة خزنة +
@@ -264,15 +265,17 @@ export default function MaterialDistribution({ material, onClose }) {
   // تحميل كاملة (boot-sync التالي). نفس النمط المُتَّبَع فعلاً في PaymentsPage.jsx
   // (setTreasuryTxn(prev => [...prev, newTxn])) وAdmissionsPage.jsx — لا نمط جديد.
   const handleConfirmPayment = async ({ amount, cashboxId }) => {
-    const { student, targetStatus } = paymentRequest;
+    const { student, targetStatus, clientRequestId } = paymentRequest;
     const { payment, treasuryTxn: newTxn } = await pgConfirmMaterialPayment(material.id, student.id, {
       payStatus: targetStatus,
       amount,
       cashboxId,
       date: new Date().toISOString().split('T')[0],
+      clientRequestId,
     });
-    setPayments(prev => [payment, ...prev]);
-    setTreasuryTxn(prev => [...prev, newTxn]);
+    // A replayed response returns the same rows — never list them twice.
+    setPayments(prev => [payment, ...prev.filter(p => p.id !== payment.id)]);
+    setTreasuryTxn(prev => [...prev.filter(t => t.id !== newTxn.id), newTxn]);
 
     const fresh = await pgGetCollection('inventoryTxn');
     setInventoryTxn((prev) => mergeById(prev, normalizeCollectionForMerge('inventoryTxn', fresh)));

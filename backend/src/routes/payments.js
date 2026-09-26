@@ -41,6 +41,78 @@ function badRequest(message) {
   return err;
 }
 
+// ── P2-2 — server-side idempotency for payment creation ────────────────────────────────────
+// Contract: every payment-creating request carries a client-generated `clientRequestId` — one
+// per logical operation (one "add payment" dialog submission), reused unchanged by any retry
+// of that same operation. The key BECOMES payments.id, so the existing primary key enforces
+// "one payment per key" at commit time, inside the same transaction as the linked treasury_txn
+// (no new column, no migration, no in-memory state — safe across restarts):
+//   * same key + same payload  -> the original payment/treasury_txn is returned (replay: true);
+//                                  nothing new is written, so the financial effect happens once.
+//   * same key + different payload -> 409, nothing written.
+//   * concurrent requests with one key -> the loser's INSERT hits the primary key, its whole
+//                                  transaction (including its treasury_txn) rolls back, and it
+//                                  then answers with the winner's result (or 409 on mismatch).
+//   * a failed transaction commits nothing, so the key stays free for a retry.
+export const CLIENT_REQUEST_ID_RE = /^[A-Za-z0-9-]{16,64}$/;
+
+export function normalizeClientRequestId(raw, { required = false } = {}) {
+  if (raw === undefined || raw === null || raw === '') {
+    if (required) throw badRequest('clientRequestId مطلوب لإنشاء دفعة (مفتاح منع التكرار).');
+    return null;
+  }
+  const key = typeof raw === 'string' ? raw.trim() : '';
+  if (!CLIENT_REQUEST_ID_RE.test(key)) throw badRequest('clientRequestId غير صالح.');
+  return key;
+}
+
+export function idempotencyConflict() {
+  const err = new Error('مفتاح الطلب (clientRequestId) استُخدِم بالفعل لدفعة مختلفة البيانات — لم تُسجَّل أي دفعة جديدة. أعد تحميل الصفحة للتحقّق من الدفعة المسجَّلة.');
+  err.status = 409;
+  err.expose = true;
+  return err;
+}
+
+function sameDecimal(a, b) {
+  return Number(a) === Number(b);
+}
+
+function sameDay(a, b) {
+  return a instanceof Date && b instanceof Date && a.toISOString().slice(0, 10) === b.toISOString().slice(0, 10);
+}
+
+// The stored payment (with its treasury_txn) matches the normalized request field-for-field.
+// status is server-derived and not part of the request, so it is not compared.
+export function paymentMatchesRequest(existing, normalized) {
+  const { studentId, groupId, materialIdBig, m, y, amt, method, payType, parsedDate, notes, cashboxId } = normalized;
+  return existing.student_id === studentId
+    && (existing.group_id ?? null) === (groupId ?? null)
+    && (existing.material_id ?? null) === (materialIdBig ?? null)
+    && existing.month === m
+    && existing.year === y
+    && sameDecimal(existing.amount, amt)
+    && existing.method === method
+    && existing.pay_type === payType
+    && sameDay(existing.date, parsedDate)
+    && (existing.notes ?? null) === (notes ?? null)
+    && existing.treasury_txn_payments_treasury_txn_idTotreasury_txn?.cashbox_id === cashboxId;
+}
+
+const PAYMENT_WITH_TXN = { treasury_txn_payments_treasury_txn_idTotreasury_txn: true };
+
+export function findPaymentByClientRequestId(db, clientRequestId) {
+  return db.payments.findUnique({ where: { id: clientRequestId }, include: PAYMENT_WITH_TXN });
+}
+
+function toPaymentReplay(existing) {
+  const { treasury_txn_payments_treasury_txn_idTotreasury_txn: treasuryTxn, ...payment } = existing;
+  return {
+    payment:     snakeToCamel(serializeBigInt(payment)),
+    treasuryTxn: treasuryTxn ? snakeToCamel(treasuryTxn) : null,
+    replay:      true,
+  };
+}
+
 // نفس تسلسل BigInt→نص المستخدَم في crud.js (serializeBigInt) — منسوخ محلياً هنا بدل
 // الاستيراد من crud.js (ممنوع تعديله/استيراد داخلياته صراحةً)؛ payments.material_id
 // عمود BigInt حقيقي (FK→inv_materials.id)، وJSON.stringify يرمي استثناءً على BigInt خام.
@@ -112,7 +184,9 @@ export function validatePaymentInput(input) {
 // جسم معاملة إنشاء الدفعة، مُستخرَج من createPayment ليقبل tx خارجياً — يسمح لمستهلك
 // آخر (materialDistribution.js) بتركيبه داخل معاملة Prisma أكبر (دفعة + حركة خزنة +
 // تسوية inventory_txn معاً، ذرّياً بالكامل)، بلا أي تغيير على سلوك createPayment نفسها.
-export async function createPaymentInTx(tx, normalized, { userId = null } = {}) {
+// paymentId (P2-2): the caller's validated clientRequestId, used as payments.id so the primary
+// key enforces idempotency; omitted -> a fresh UUID (unchanged behavior).
+export async function createPaymentInTx(tx, normalized, { userId = null, paymentId: requestedPaymentId = null } = {}) {
   const { studentId, groupId, materialIdBig, m, y, amt, method, payType, parsedDate, notes, cashboxId } = normalized;
 
   const student = await tx.students.findUnique({ where: { id: studentId } });
@@ -138,7 +212,7 @@ export async function createPaymentInTx(tx, normalized, { userId = null } = {}) 
   const status = fee === 0 ? 'paid' : amt >= fee ? 'paid' : 'partial';
 
   const meta = PAY_TYPE_TO_CATEGORY[payType] || PAY_TYPE_TO_CATEGORY.subscription;
-  const paymentId      = crypto.randomUUID();
+  const paymentId      = requestedPaymentId || crypto.randomUUID();
   const treasuryTxnId  = crypto.randomUUID();
   const label = material ? `${meta.label} — ${material.name}` : meta.label;
 
@@ -194,9 +268,35 @@ export async function createPaymentInTx(tx, normalized, { userId = null } = {}) 
 
 // يُصدَّر منفصلاً عن الـ router ليكون قابلاً للاختبار مباشرة بلا HTTP/auth، بنفس مبدأ
 // activateAdmission/reverseTreasuryTxn.
-export async function createPayment(input, { userId = null } = {}) {
+//
+// P2-2 — clientRequestId (see the idempotency contract at the top of this file). `requireKey`
+// is set by the HTTP route, which always demands a key; direct internal callers may omit it.
+export async function createPayment(input, { userId = null, requireKey = false } = {}) {
+  const clientRequestId = normalizeClientRequestId(input?.clientRequestId, { required: requireKey });
   const normalized = validatePaymentInput(input);
-  const result = await runInTransaction((tx) => createPaymentInTx(tx, normalized, { userId }));
+
+  const replayOrConflict = (existing) => {
+    if (!paymentMatchesRequest(existing, normalized)) throw idempotencyConflict();
+    return toPaymentReplay(existing);
+  };
+
+  if (clientRequestId) {
+    const existing = await findPaymentByClientRequestId(prisma, clientRequestId);
+    if (existing) return replayOrConflict(existing);
+  }
+
+  let result;
+  try {
+    result = await runInTransaction((tx) => createPaymentInTx(tx, normalized, { userId, paymentId: clientRequestId }));
+  } catch (err) {
+    // Concurrent request with the same key: this transaction lost the primary-key race and was
+    // rolled back entirely (its treasury_txn included) — answer with the committed winner.
+    if (clientRequestId && err.code === 'P2002') {
+      const existing = await findPaymentByClientRequestId(prisma, clientRequestId);
+      if (existing) return replayOrConflict(existing);
+    }
+    throw err;
+  }
 
   return {
     payment:     snakeToCamel(serializeBigInt(result.payment)),
@@ -510,8 +610,9 @@ router.get('/search', asyncHandler(async (req, res) => {
 }));
 
 router.post('/', asyncHandler(async (req, res) => {
-  const data = await createPayment(req.body, { userId: req.user?.id ?? null });
-  res.status(201).json({ ok: true, data });
+  const data = await createPayment(req.body, { userId: req.user?.id ?? null, requireKey: true });
+  // A replay returns the original result (same body shape, `replay: true`), 200 instead of 201.
+  res.status(data.replay ? 200 : 201).json({ ok: true, data });
 }));
 
 router.post('/:id/refund', asyncHandler(async (req, res) => {

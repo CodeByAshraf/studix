@@ -1,5 +1,5 @@
 // src/modules/payments/PaymentsPage.jsx
-import { useEffect, useState, useMemo, useCallback } from 'react';
+import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { useAppStore } from '../../store/app.store';
 import { useAuth }     from '../../store/auth.context';
 import { SectionBoundary } from '../../components/ErrorBoundary';
@@ -14,7 +14,7 @@ import {
 } from '../../services/paymentService';
 import { pgCreatePayment, pgRefundPayment, pgGetPayments, pgGetPaymentAggregates } from '../../services/api';
 import { useAsyncData } from '../../hooks/useAsyncData';
-import { formatCurrency }  from '../../utils/helpers';
+import { formatCurrency, uuid } from '../../utils/helpers';
 import PaymentForm    from './PaymentForm';
 import PaymentHistory from './PaymentHistory';
 import UnpaidStudents from './UnpaidStudents';
@@ -106,13 +106,20 @@ export default function PaymentsPage() {
   }, [currentMonthPayments, totalAgg, todayPayments, students, currentMonth, currentYear, treasuryTxn]);
 
   // ── Add payment ───────────────────────────────────────────
+  // P2-2 — one idempotency key per "add payment" dialog session: every submission of this
+  // dialog (double click, retry after a lost response) sends the SAME clientRequestId, so the
+  // server records the payment exactly once; a new dialog = a new payment = a new key.
+  const paymentKeyRef = useRef(null);
+
   const openAdd = useCallback((studentId = '') => {
+    paymentKeyRef.current = uuid();
     setPrefilledStudentId(studentId);
     setAddModalOpen(true);
     if (view !== 'add') setView('history');
   }, [view]);
 
   const closeAdd = useCallback(() => {
+    paymentKeyRef.current = null;
     setAddModalOpen(false);
     setPrefilledStudentId('');
   }, []);
@@ -137,10 +144,12 @@ export default function PaymentsPage() {
         date:       formData.date,
         notes:      formData.notes || null,
         cashboxId:  formData.cashboxId,
+        clientRequestId: paymentKeyRef.current || (paymentKeyRef.current = uuid()),
       });
 
-      setPayments(prev => [payment, ...prev]);
-      setTreasuryTxn(prev => [...prev, newTxn]);
+      // A replayed response returns the same payment/treasury rows — never list them twice.
+      setPayments(prev => [payment, ...prev.filter(p => p.id !== payment.id)]);
+      setTreasuryTxn(prev => [...prev.filter(t => t.id !== newTxn.id), newTxn]);
 
       addLog({ action:'create', module:'payments', entityType:'payment', entityId:payment.id, description:`دفعة: ${student?.name} — ${payment.amount} ج.م` })
         .catch((e) => toast.error(e.message || 'تعذّر تسجيل الحدث في سجل النشاط'));

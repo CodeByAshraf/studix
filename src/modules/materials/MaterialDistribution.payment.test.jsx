@@ -180,6 +180,27 @@ describe('MaterialDistribution — booklet payment confirmation dialog', () => {
     expect(useAppStore.getState().treasuryTxn).toEqual([]);
     expect(useAppStore.getState().payments).toEqual([]);
   });
+
+  // P2-2 — the confirmation dialog owns one idempotency key: a retry after a failed attempt
+  // resends the same clientRequestId, so the server can never record that payment twice.
+  it('a retry of the same confirmation dialog resends the same clientRequestId', async () => {
+    pgConfirmMaterialPayment
+      .mockRejectedValueOnce(new Error('انقطاع مؤقت'))
+      .mockResolvedValueOnce({ payment: { id: 'p-x' }, treasuryTxn: { id: 't-x' } });
+
+    renderPage();
+    fireEvent.click(screen.getByText('مدفوع'));
+    await screen.findByText('تأكيد دفع مذكرة');
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'cb1' } });
+    fireEvent.click(screen.getByText('💰 تأكيد الدفع'));
+    await screen.findByText(/انقطاع مؤقت/);
+    fireEvent.click(screen.getByText('💰 تأكيد الدفع'));
+    await waitFor(() => expect(pgConfirmMaterialPayment).toHaveBeenCalledTimes(2));
+
+    const [k1, k2] = pgConfirmMaterialPayment.mock.calls.map((c) => c[2].clientRequestId);
+    expect(k1).toMatch(/^[A-Za-z0-9-]{16,64}$/);
+    expect(k2).toBe(k1);
+  });
 });
 
 // Financial Integrity Fix — real defect: pgConfirmMaterialPayment's response (payment +

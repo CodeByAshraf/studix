@@ -243,6 +243,68 @@ describe('PaymentsPage — payments write flows (Phase 3B-14C)', () => {
     expect(useAppStore.getState().treasuryTxn).toEqual([]);
   });
 
+  // P2-2 — idempotency key lifecycle at the submission boundary.
+  it('sends a clientRequestId, and a retry of the SAME dialog after a failure reuses the same key', async () => {
+    let attempt = 0;
+    postPaymentResponder = (body) => {
+      attempt += 1;
+      if (attempt === 1) return errJson(500, 'انقطاع مؤقت');
+      return okJson({
+        payment: { id: body.clientRequestId, studentId: 's1', groupId: 'g1', materialId: null, month: body.month, year: body.year, amount: 300, method: 'cash', payType: 'subscription', date: body.date, status: 'paid', notes: null, treasuryTxnId: 'srv-tx-1', createdAt: '2026-01-10T00:00:00.000Z' },
+        treasuryTxn: { id: 'srv-tx-1', cashboxId: 'cb1', date: body.date, type: 'income', category: 'subscriptions', notes: 'x', amount: 300, method: 'cash', party: 'أحمد', refType: 'payment', refId: body.clientRequestId, paymentId: body.clientRequestId, status: 'active', createdBy: 'u1', createdAt: '2026-01-10T00:00:00.000Z' },
+      }, 201);
+    };
+
+    seedStore();
+    renderPage();
+    await fillAddForm();
+    fireEvent.click(screen.getByText('💰 تسجيل الدفعة'));
+    await waitFor(() => expect(postPaymentCalls()).toHaveLength(1));
+    await waitFor(() => expect(screen.getByText('💰 تسجيل الدفعة').closest('button')).not.toBeDisabled());
+    fireEvent.click(screen.getByText('💰 تسجيل الدفعة'));
+    await waitFor(() => expect(postPaymentCalls()).toHaveLength(2));
+
+    const [first, second] = postPaymentCalls().map(([, o]) => JSON.parse(o.body).clientRequestId);
+    expect(first).toMatch(/^[A-Za-z0-9-]{16,64}$/);
+    expect(second).toBe(first);
+    await waitFor(() => expect(useAppStore.getState().payments).toHaveLength(1));
+  });
+
+  it('a new "add payment" dialog (a new payment) gets a new clientRequestId', async () => {
+    seedStore();
+    renderPage();
+    await fillAddForm();
+    fireEvent.click(screen.getByText('💰 تسجيل الدفعة'));
+    await waitFor(() => expect(postPaymentCalls()).toHaveLength(1));
+    await waitFor(() => expect(useAppStore.getState().payments).toHaveLength(1));
+    // (the page's own same-month duplicate-subscription guard is orthogonal — clear it)
+    useAppStore.setState({ payments: [] });
+
+    await fillAddForm();
+    fireEvent.click(screen.getByText('💰 تسجيل الدفعة'));
+    await waitFor(() => expect(postPaymentCalls()).toHaveLength(2));
+    const [k1, k2] = postPaymentCalls().map(([, o]) => JSON.parse(o.body).clientRequestId);
+    expect(k1).toBeTruthy();
+    expect(k2).toBeTruthy();
+    expect(k2).not.toBe(k1);
+  });
+
+  it('a replayed server response (same payment id) is never listed twice locally', async () => {
+    // srv-p-1/srv-tx-1 are already in local state (an earlier month, so the page's own
+    // duplicate-subscription guard does not interfere); the server answers with exactly them.
+    seedStore({
+      payments: [{ ...EXISTING_PAYMENT, id: 'srv-p-1', month: 1, year: 2020, date: '2020-01-05' }],
+      treasuryTxn: [{ ...EXISTING_TXN, id: 'srv-tx-1', refId: 'srv-p-1', paymentId: 'srv-p-1' }],
+    });
+    renderPage();
+    await fillAddForm();
+    fireEvent.click(screen.getByText('💰 تسجيل الدفعة'));
+    await waitFor(() => expect(postPaymentCalls()).toHaveLength(1));
+    await waitFor(() => expect(screen.queryByText('💰 تسجيل الدفعة')).not.toBeInTheDocument());
+    expect(useAppStore.getState().payments.filter((p) => p.id === 'srv-p-1')).toHaveLength(1);
+    expect(useAppStore.getState().treasuryTxn.filter((t) => t.id === 'srv-tx-1')).toHaveLength(1);
+  });
+
   it('cashbox selection: no active cashbox available blocks submission entirely — zero fetch calls', async () => {
     seedStore({ cashboxes: [{ ...CB1, active: false }] });
     renderPage();

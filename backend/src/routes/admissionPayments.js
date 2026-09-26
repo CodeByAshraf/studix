@@ -24,6 +24,7 @@ import { asyncHandler } from '../middleware/errorHandler.js';
 import { snakeToCamel } from '../lib/caseMapper.js';
 import { parseTreasuryDate } from './treasuryTxn.js';
 import { prisma } from '../prisma.js';
+import { idempotencyConflict } from './payments.js';
 
 function badRequest(message) {
   const err = new Error(message);
@@ -96,19 +97,15 @@ function toReplayResult(existing) {
 }
 
 // يُصدَّر منفصلاً عن الـ router ليكون قابلاً للاختبار مباشرة بلا HTTP/auth.
-export async function createAdmissionPayment(input, { userId = null } = {}) {
+// requireKey (P2-2): set by the HTTP route — a request without clientRequestId is refused
+// there, so every client submission is idempotent server-side.
+export async function createAdmissionPayment(input, { userId = null, requireKey = false } = {}) {
   const {
     admissionId, type, amount, date, method = 'cash', notes = null, materialId = null, cashboxId,
     clientRequestId = null,
   } = input || {};
   const requestId = typeof clientRequestId === 'string' && clientRequestId.trim() ? clientRequestId.trim() : null;
-
-  // المسار السريع: إعادة إرسال متسلسلة (لا تزامن حقيقي) — الصف موجود بالفعل، لا داعي
-  // لبدء معاملة جديدة إطلاقاً.
-  if (requestId) {
-    const existing = await findExistingByClientRequestId(requestId);
-    if (existing) return toReplayResult(existing);
-  }
+  if (requireKey && !requestId) throw badRequest('clientRequestId مطلوب لإنشاء دفعة (مفتاح منع التكرار).');
 
   if (typeof admissionId !== 'string' || !admissionId.trim()) throw badRequest('سجل القبول مطلوب.');
   if (typeof cashboxId !== 'string' || !cashboxId.trim()) throw badRequest('الخزنة مطلوبة.');
@@ -127,6 +124,29 @@ export async function createAdmissionPayment(input, { userId = null } = {}) {
   if (materialId !== null && materialId !== undefined && materialId !== '') {
     try { materialIdBig = BigInt(materialId); }
     catch { throw badRequest('معرّف المذكرة غير صحيح.'); }
+  }
+
+  // P2-2 — a replay is only a replay of the SAME operation: the stored row must match this
+  // request field-for-field; the same key reused for a different payment is rejected (409)
+  // instead of silently answering with an unrelated earlier payment.
+  const replayOrConflict = (existing) => {
+    const same = existing.admission_id === admissionId
+      && existing.type === type
+      && Number(existing.amount) === amt
+      && existing.method === method
+      && (existing.material_id ?? null) === materialIdBig
+      && (existing.notes ?? null) === (notes ?? null)
+      && existing.date instanceof Date && existing.date.toISOString().slice(0, 10) === parsedDate.toISOString().slice(0, 10)
+      && existing.treasury_txn?.cashbox_id === cashboxId;
+    if (!same) throw idempotencyConflict();
+    return toReplayResult(existing);
+  };
+
+  // المسار السريع: إعادة إرسال متسلسلة (لا تزامن حقيقي) — الصف موجود بالفعل، لا داعي
+  // لبدء معاملة جديدة إطلاقاً.
+  if (requestId) {
+    const existing = await findExistingByClientRequestId(requestId);
+    if (existing) return replayOrConflict(existing);
   }
 
   let result;
@@ -218,7 +238,7 @@ export async function createAdmissionPayment(input, { userId = null } = {}) {
     // بدل فشل عام — نفس نمط ensureLicenseConfig (license.js:104) بالضبط.
     if (requestId && err.code === 'P2002') {
       const existing = await findExistingByClientRequestId(requestId);
-      if (existing) return toReplayResult(existing);
+      if (existing) return replayOrConflict(existing);
     }
     throw err;
   }
@@ -250,8 +270,8 @@ router.get('/', asyncHandler(async (req, res) => {
 }));
 
 router.post('/', asyncHandler(async (req, res) => {
-  const data = await createAdmissionPayment(req.body, { userId: req.user?.id ?? null });
-  res.status(201).json({ ok: true, data });
+  const data = await createAdmissionPayment(req.body, { userId: req.user?.id ?? null, requireKey: true });
+  res.status(data.replay ? 200 : 201).json({ ok: true, data });
 }));
 
 function blocked(message) {
