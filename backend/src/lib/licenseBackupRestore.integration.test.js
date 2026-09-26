@@ -26,6 +26,14 @@ import { checkPostgresReachable, setupScratchDb, teardownScratchDb } from '../te
 const TEST_MACHINE_ID = 'test-machine-fixed';
 vi.mock('./machineIdentity.js', () => ({ computeCurrentMachineId: () => TEST_MACHINE_ID }));
 
+// P1-3 — license.js only trusts the database key when it equals the release trust anchor
+// (licensingTrustAnchor.js). This file's own throwaway owner keypair plays that anchor.
+const trustAnchor = vi.hoisted(() => ({ pem: null }));
+vi.mock('./licensingTrustAnchor.js', async (importOriginal) => ({
+  ...(await importOriginal()),
+  getExpectedLicensingPublicKeyPem: () => trustAnchor.pem,
+}));
+
 const dbCheck = await checkPostgresReachable();
 
 function makeKeyPair() {
@@ -62,6 +70,7 @@ describe('Licensing backup/restore behavior — Phase 5e Area 3 (real scratch da
   beforeAll(async () => {
     scratch = await setupScratchDb('license_backuprestore');
     owner = makeKeyPair();
+    trustAnchor.pem = owner.publicKey; // P1-3: this test's key is the release anchor
     ({ PRODUCT_ID, buildLicenseArtifactPayload } = await import('../lib/licenseArtifactFormat.js'));
     ({ getLicenseStatus, verifyAndActivateLicense } = await import('./license.js'));
   }, 60_000);

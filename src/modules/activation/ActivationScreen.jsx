@@ -16,6 +16,7 @@ import { pgRequestLicenseActivationCode, pgActivateLicense } from '../../service
 
 const REASON_MESSAGES = {
   not_configured: 'لم يُهيَّأ التفعيل على هذا التثبيت بعد — لا يوجد مفتاح ترخيص مسجَّل.',
+  trust_anchor_mismatch: 'مفتاح الترخيص المسجَّل في هذا التثبيت لا يطابق مفتاح هذا الإصدار — أعد تشغيل مُثبِّت Studix لتصحيحه.',
   not_activated: 'لم يُفعَّل هذا التثبيت بعد.',
   expired: 'انتهت صلاحية الترخيص الحالي — يلزم تفعيل شهادة جديدة.',
   wrong_installation: 'شهادة الترخيص المخزَّنة غير مرتبطة بهذا التثبيت.',

@@ -11,6 +11,14 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vites
 import crypto from 'crypto';
 import { checkPostgresReachable, setupScratchDb, teardownScratchDb } from '../test-helpers/scratchDb.js';
 
+// P1-3 — license.js only trusts the database key when it equals the release trust anchor
+// (licensingTrustAnchor.js). This file's own throwaway owner keypair plays that anchor.
+const trustAnchor = vi.hoisted(() => ({ pem: null }));
+vi.mock('../lib/licensingTrustAnchor.js', async (importOriginal) => ({
+  ...(await importOriginal()),
+  getExpectedLicensingPublicKeyPem: () => trustAnchor.pem,
+}));
+
 const dbCheck = await checkPostgresReachable();
 
 // vi.mock factories may not close over an ordinary outer `let` (Vitest's hoisting forbids
@@ -75,6 +83,7 @@ describe('Machine binding — real enforcement pipeline (real scratch database)'
   beforeAll(async () => {
     scratch = await setupScratchDb('license_machinebinding');
     owner = makeOwnerKeyPair();
+    trustAnchor.pem = owner.publicKey; // P1-3: this test's key is the release anchor
     ({ PRODUCT_ID, buildLicenseArtifactPayload } = await import('../lib/licenseArtifactFormat.js'));
     ({ getLicenseStatus, verifyAndActivateLicense } = await import('../lib/license.js'));
     ({ requireActivation } = await import('../middleware/activation.js'));

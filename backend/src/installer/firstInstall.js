@@ -72,6 +72,7 @@ import {
 } from '../lib/windowsService.js';
 import { ensureStartupTask } from '../lib/scheduledTask.js';
 import { readRestoreState, RestoreStateError } from '../db/restoreState.js';
+import { provisionLicensingPublicKey } from '../lib/licensingTrustAnchor.js';
 
 export class FirstInstallError extends Error {
   constructor(step, cause) {
@@ -138,6 +139,7 @@ export async function runFirstInstall({
     createMigrationPrismaClientFn = defaultCreateMigrationPrismaClient,
     runMigrationsFn = runMigrations,
     backupFn = createPreMigrationBackup,
+    provisionLicensingPublicKeyFn = provisionLicensingPublicKey,
     ensureAppRoleFn = ensureAppRole,
     ensureProductionConfigFn = ensureProductionConfig,
     resolveProductionConfigPathFn = resolveProductionConfigPath,
@@ -237,9 +239,28 @@ export async function runFirstInstall({
   // short-lived admin-rooted client created and disconnected entirely within this one step.
   const migrationClient = createMigrationPrismaClientFn(adminUrl);
   try {
-    await runMigrationsFn(migrationClient, { databaseUrl: adminUrl, backup: backupFn });
-  } catch (err) {
-    throw new FirstInstallError('run_migrations', err);
+    try {
+      await runMigrationsFn(migrationClient, { databaseUrl: adminUrl, backup: backupFn });
+    } catch (err) {
+      throw new FirstInstallError('run_migrations', err);
+    }
+
+    // 4b. P1-3 — licensing trust anchor: write the release's licensing PUBLIC key
+    // (lib/licensingTrustAnchor.js) into license_config over the same short-lived admin
+    // client, replacing the former manual psql step. Idempotent on every install/upgrade:
+    // touches only licensing_public_key, never license/activation state; a divergent key is
+    // restored to the anchor and reported here.
+    try {
+      const provisioned = await provisionLicensingPublicKeyFn(migrationClient);
+      if (provisioned?.action === 'corrected') {
+        console.warn(
+          `[firstInstall] licensing_public_key did not match this release's trust anchor ` +
+          `(was ${provisioned.previousFingerprint ?? 'unparseable'}); restored to ${provisioned.fingerprint}.`
+        );
+      }
+    } catch (err) {
+      throw new FirstInstallError('provision_licensing_key', err);
+    }
   } finally {
     await migrationClient.$disconnect().catch(() => {});
   }

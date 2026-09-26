@@ -26,6 +26,16 @@ import {
   PRODUCT_ID, buildActivationRequestCode, verifyLicenseArtifact, parseLicenseArtifact,
 } from './licenseArtifactFormat.js';
 import { computeCurrentMachineId, MachineIdentityError } from './machineIdentity.js';
+import { getExpectedLicensingPublicKeyPem, isSamePublicKey } from './licensingTrustAnchor.js';
+
+// P1-3 — the database copy of the licensing public key is trusted only when it IS the release's
+// trust anchor (licensingTrustAnchor.js). Returns the anchor PEM to verify with, or null when
+// the database holds a different/unparseable key — callers then fail closed. The database can
+// therefore no longer be used on its own to make a self-signed license verify.
+function resolveTrustedPublicKey(config) {
+  const anchor = getExpectedLicensingPublicKeyPem();
+  return isSamePublicKey(config.licensing_public_key, anchor) ? anchor : null;
+}
 
 // resolveCurrentMachineId: the one place license.js turns "ask the platform for the current
 // machine fingerprint" into a licensing-domain result — MachineIdentityError (registry
@@ -117,6 +127,10 @@ export async function getLicenseStatus({ machineIdentity = computeCurrentMachine
   if (!config.licensing_public_key) {
     return { activated: false, reason: 'not_configured', payload: null };
   }
+  const trustedPublicKey = resolveTrustedPublicKey(config);
+  if (!trustedPublicKey) {
+    return { activated: false, reason: 'trust_anchor_mismatch', payload: null };
+  }
   if (!config.license_artifact) {
     return { activated: false, reason: 'not_activated', payload: null };
   }
@@ -146,7 +160,7 @@ export async function getLicenseStatus({ machineIdentity = computeCurrentMachine
     artifact: config.license_artifact,
     installationId: installation.installation_id,
     product: PRODUCT_ID,
-    publicKeyPem: config.licensing_public_key,
+    publicKeyPem: trustedPublicKey,
     currentMachineId: machineIdResult.machineId,
     now: clockCheck.now,
   });
@@ -194,6 +208,10 @@ export async function verifyAndActivateLicense({ artifact }, { machineIdentity =
   if (!config.licensing_public_key) {
     throw conflict('التفعيل غير مُهيَّأ على هذا التثبيت — لا يوجد مفتاح عام مسجَّل بعد.');
   }
+  const trustedPublicKey = resolveTrustedPublicKey(config);
+  if (!trustedPublicKey) {
+    throw conflict('المفتاح العام المسجَّل في هذا التثبيت لا يطابق مفتاح الترخيص الموثوق لهذا الإصدار — أعد تشغيل مُثبِّت Studix لتصحيحه.');
+  }
 
   const machineIdResult = resolveCurrentMachineId(machineIdentity);
   if (!machineIdResult.ok) {
@@ -202,7 +220,7 @@ export async function verifyAndActivateLicense({ artifact }, { machineIdentity =
 
   const installation = await ensureInstallationConfig();
   const check = verifyLicenseArtifact({
-    artifact, installationId: installation.installation_id, product: PRODUCT_ID, publicKeyPem: config.licensing_public_key,
+    artifact, installationId: installation.installation_id, product: PRODUCT_ID, publicKeyPem: trustedPublicKey,
     currentMachineId: machineIdResult.machineId,
   });
 

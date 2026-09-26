@@ -13,6 +13,14 @@ import { checkPostgresReachable, setupScratchDb, teardownScratchDb } from '../te
 const TEST_MACHINE_ID = 'test-machine-fixed';
 vi.mock('./machineIdentity.js', () => ({ computeCurrentMachineId: () => TEST_MACHINE_ID }));
 
+// P1-3 — license.js only trusts the database key when it equals the release trust anchor
+// (licensingTrustAnchor.js). This file's own throwaway owner keypair plays that anchor.
+const trustAnchor = vi.hoisted(() => ({ pem: null }));
+vi.mock('./licensingTrustAnchor.js', async (importOriginal) => ({
+  ...(await importOriginal()),
+  getExpectedLicensingPublicKeyPem: () => trustAnchor.pem,
+}));
+
 const dbCheck = await checkPostgresReachable();
 
 function makeOwnerKeyPair() {
@@ -54,6 +62,7 @@ describe('Licensing clock-rollback mitigation — Phase 5e (real scratch databas
   beforeAll(async () => {
     scratch = await setupScratchDb('license_clockguard');
     owner = makeOwnerKeyPair();
+    trustAnchor.pem = owner.publicKey; // P1-3: this test's key is the release anchor
     ({ checkClockAndUpdateHighWaterMark, getLicenseStatus, verifyAndActivateLicense, CLOCK_ROLLBACK_TOLERANCE_MS } = await import('./license.js'));
     ({ buildLicenseArtifactPayload } = await import('./licenseArtifactFormat.js'));
   }, 60_000);

@@ -28,6 +28,7 @@ function baseDeps(overrides = {}) {
     createMigrationPrismaClientFn: vi.fn((...args) => { record('createMigrationPrismaClient')(...args); return migrationClient; }),
     runMigrationsFn: vi.fn(async (...args) => { record('runMigrations')(...args); return { action: 'up-to-date' }; }),
     backupFn: vi.fn(),
+    provisionLicensingPublicKeyFn: vi.fn(async (...args) => { record('provisionLicensingPublicKey')(...args); return { action: 'unchanged' }; }),
     ensureAppRoleFn: vi.fn(async (...args) => { record('ensureAppRole')(...args); return { status: 'created', appUser: 'studix_app', databaseUrl: APP_URL }; }),
     ensureProductionConfigFn: vi.fn((...args) => { record('ensureProductionConfig')(...args); return { created: true }; }),
     resolveProductionConfigPathFn: vi.fn(() => 'C:\\ProgramData\\Studix\\config\\.env'),
@@ -153,7 +154,7 @@ describe('runFirstInstall — fresh install (provisionPostgres returns "initiali
     const order = calls.map((c) => c[0]);
     expect(order).toEqual([
       'provisionPostgres', 'ensureProvisioningAdminConfig', 'validateDatabaseUrl',
-      'bootstrapDatabase', 'createMigrationPrismaClient', 'runMigrations', 'ensureAppRole',
+      'bootstrapDatabase', 'createMigrationPrismaClient', 'runMigrations', 'provisionLicensingPublicKey', 'ensureAppRole',
       'ensureProductionConfig', 'stopPostgres', 'registerPostgresService', 'startService',
       'registerAppService', 'readRestoreState', 'startService', 'registerScheduledTask', 'waitForHealth', 'openBrowser',
     ]);
@@ -477,7 +478,7 @@ describe('runFirstInstall — restore-state guard before starting StudixApp (aud
     const order = calls.map((c) => c[0]);
     expect(order).toEqual([
       'provisionPostgres', 'ensureProvisioningAdminConfig', 'validateDatabaseUrl',
-      'bootstrapDatabase', 'createMigrationPrismaClient', 'runMigrations', 'ensureAppRole',
+      'bootstrapDatabase', 'createMigrationPrismaClient', 'runMigrations', 'provisionLicensingPublicKey', 'ensureAppRole',
       'ensureProductionConfig', 'stopPostgres', 'registerPostgresService', 'startService',
       'registerAppService', 'readRestoreState', 'startService', 'registerScheduledTask',
       'waitForHealth', 'openBrowser',
@@ -508,5 +509,58 @@ describe('runFirstInstall — browser-open failure is non-fatal (best-effort)', 
     expect(result.status).toBe('installed');
     expect(result.browserOpened).toBe(false);
     expect(result.browserError).toContain('no default browser configured');
+  });
+});
+
+// P1-3 — licensing trust anchor provisioned automatically during install/upgrade (replaces the
+// former manual psql step). The provisioning logic itself is proven against real PostgreSQL in
+// lib/licensingTrustAnchor.integration.test.js; this only proves the orchestrator wiring.
+describe('runFirstInstall — step 4b: licensing public key provisioning (P1-3)', () => {
+  it('provisions over the same admin migration client, after migrations and before it is disconnected', async () => {
+    const { deps, migrationClient } = baseDeps();
+    let disconnectedBeforeProvision = null;
+    deps.provisionLicensingPublicKeyFn = vi.fn(async (client) => {
+      disconnectedBeforeProvision = migrationClient.$disconnect.mock.calls.length > 0;
+      expect(client).toBe(migrationClient);
+      return { action: 'created' };
+    });
+
+    await runFirstInstall({ schemaPath: 'schema.sql', deps });
+
+    expect(deps.provisionLicensingPublicKeyFn).toHaveBeenCalledTimes(1);
+    expect(disconnectedBeforeProvision).toBe(false);
+    expect(migrationClient.$disconnect).toHaveBeenCalled();
+  });
+
+  it('runs on a re-run/upgrade too (already-initialized cluster)', async () => {
+    const { deps } = baseDeps({
+      provisionPostgresFn: vi.fn(async () => ({ status: 'already_initialized', port: 55432 })),
+    });
+    await runFirstInstall({ schemaPath: 'schema.sql', deps });
+    expect(deps.provisionLicensingPublicKeyFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('a provisioning failure stops the install as step "provision_licensing_key", still disconnecting the client, before any later step', async () => {
+    const { deps, calls, migrationClient } = baseDeps({
+      provisionLicensingPublicKeyFn: vi.fn(async () => { throw new Error('boom'); }),
+    });
+
+    const err = await runFirstInstall({ schemaPath: 'schema.sql', deps }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(FirstInstallError);
+    expect(err.step).toBe('provision_licensing_key');
+    expect(migrationClient.$disconnect).toHaveBeenCalled();
+    expect(calls.map((c) => c[0])).not.toContain('ensureAppRole');
+  });
+
+  it('a migration failure is still reported as "run_migrations" and provisioning never runs', async () => {
+    const { deps } = baseDeps({
+      runMigrationsFn: vi.fn(async () => { throw new Error('migration failed'); }),
+    });
+
+    const err = await runFirstInstall({ schemaPath: 'schema.sql', deps }).catch((e) => e);
+
+    expect(err.step).toBe('run_migrations');
+    expect(deps.provisionLicensingPublicKeyFn).not.toHaveBeenCalled();
   });
 });

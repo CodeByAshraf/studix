@@ -23,6 +23,14 @@ process.env.SESSION_SECRET = process.env.SESSION_SECRET || 'studix-test-session-
 const TEST_MACHINE_ID = 'test-machine-fixed';
 vi.mock('../lib/machineIdentity.js', () => ({ computeCurrentMachineId: () => TEST_MACHINE_ID }));
 
+// P1-3 — license.js only trusts the database key when it equals the release trust anchor
+// (licensingTrustAnchor.js). This file's own throwaway owner keypair plays that anchor.
+const trustAnchor = vi.hoisted(() => ({ pem: null }));
+vi.mock('../lib/licensingTrustAnchor.js', async (importOriginal) => ({
+  ...(await importOriginal()),
+  getExpectedLicensingPublicKeyPem: () => trustAnchor.pem,
+}));
+
 const dbCheck = await checkPostgresReachable();
 
 function makeOwnerKeyPair() {
@@ -75,6 +83,7 @@ describe('Licensing — Phase 5b backend core (real scratch database)', () => {
     scratch = await setupScratchDb('license');
     client = scratch.client;
     owner = makeOwnerKeyPair();
+    trustAnchor.pem = owner.publicKey; // P1-3: this test's key is the release anchor
     impostor = makeOwnerKeyPair();
 
     ({ PRODUCT_ID, buildLicenseArtifactPayload } = await import('../lib/licenseArtifactFormat.js'));
