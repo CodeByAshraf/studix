@@ -34,6 +34,8 @@ import sessionRouter from './routes/session.js';
 import setupRouter from './routes/setup.js';
 import { makeCrudRouter } from './routes/crud.js';
 import attendanceSessionsRouter from './routes/attendanceSessions.js';
+import attendanceRouter from './routes/attendance.js';
+import recitationsRouter from './routes/recitations.js';
 import examDeleteRouter from './routes/examDelete.js';
 import examStartRouter from './routes/examStart.js';
 import examGradesRouter from './routes/examGrades.js';
@@ -45,9 +47,14 @@ import admissionActivationRouter from './routes/admissionActivation.js';
 import studentCreateRouter from './routes/studentCreate.js';
 import treasuryTxnRouter from './routes/treasuryTxn.js';
 import paymentsRouter from './routes/payments.js';
+import inventoryTxnRouter from './routes/inventoryTxn.js';
+import studentReportRouter from './routes/studentReport.js';
+import { studentEnrollmentsRouter, enrollmentRouter } from './routes/enrollments.js';
+import communicationsRouter from './routes/communications.js';
 import admissionPaymentsRouter from './routes/admissionPayments.js';
 import admissionCancellationRouter from './routes/admissionCancellation.js';
-import activityLogsInterceptor from './routes/activityLogs.js';
+import activityLogsRouter from './routes/activityLogs.js';
+import cashboxBalanceRouter from './routes/cashboxBalance.js';
 import usersRouter from './routes/users.js';
 import rolesRouter from './routes/roles.js';
 import supportAccessRouter from './routes/supportAccess.js';
@@ -55,7 +62,7 @@ import licenseRouter from './routes/license.js';
 import dbSwitchRouter from './routes/dbSwitch.js';
 import dbIdentityRouter from './routes/dbIdentity.js';
 import { COLLECTION_MODELS } from './routes/collections.js';
-import { notFound, errorHandler, asyncHandler } from './middleware/errorHandler.js';
+import { notFound, errorHandler } from './middleware/errorHandler.js';
 import { requireAuth, requireRole } from './middleware/auth.js';
 import { requirePermission } from './middleware/permissions.js';
 import { requireActivation } from './middleware/activation.js';
@@ -169,6 +176,22 @@ app.use('/api/attendance-sessions', requireAuth, requirePermission('attendance')
 // يُعترَض هنا فقط DELETE /api/exams/:id — نفس تقنية الاعتراض حسب method+path المستخدَمة
 // في Phase 3B-4 (attendance)، بفارق أنه هنا نفس المسار العام /api/exams، مركَّب قبل
 // الـ CRUD العام في الحلقة أدناه. أي GET/POST/PUT على /api/exams لا يطابق أي route هنا
+// ── Recitation Assessment Phase 2 — تقييم تسميع لكل طالب حاضر ضمن جلسة حضور مكتملة
+// موجودة بالفعل. صلاحية مخصَّصة ومنفصلة تماماً عن 'attendance' (قرار منتج صريح) —
+// لا تُمنَح تلقائياً لأي دور/مستخدم موجود، فتفشل مغلقة (403) لكل مستخدم حتى يُمنَحها
+// مدير صراحةً عبر شاشة الأدوار — نفس آلية requirePermission العامة، بلا أي استثناء هنا.
+app.use('/api/recitation-sessions', requireAuth, requirePermission('recitation'), recitationsRouter);
+
+// ── C4 Attendance migration Phase 1 — scoped GET /api/attendance?studentId=&groupId=&
+// date=&status= + GET /api/attendance/aggregate?groupBy= ──
+// مسار مخصَّص، مُركَّب قبل الحلقة الديناميكية (نفس نمط communications.js/payments.js
+// بالضبط)، نفس صلاحية 'attendance' الحالية (COLLECTION_PERMISSIONS.attendance). يعرِّف
+// فقط GET / وGET /aggregate — أي POST/PUT/PATCH/DELETE على /api/attendance يمرّ دون أي
+// تغيير للحلقة الديناميكية أدناه (makeCrudRouter)، تماماً كما هو اليوم؛ لا تغيير على
+// سلوك الكتابة إطلاقاً. لا مستهلك أمامي بعد يستخدم أياً من المسارين (Phase 1 هو الأساس
+// الخلفي فقط — هجرة المستهلكين ومسألة PG_COLLECTIONS مؤجَّلتان لمراحل لاحقة).
+app.use('/api/attendance', requireAuth, requirePermission('attendance'), attendanceRouter);
+
 // (الراوتر يعرّف DELETE فقط) فيمرّ تلقائياً للـ CRUD العام كما هو دون أي تغيير.
 app.use('/api/exams', requireAuth, requirePermission('exams'), examDeleteRouter);
 
@@ -215,6 +238,40 @@ app.use('/api/admissions', requireAuth, requirePermission('admissions'), admissi
 
 // ── Phase 3B-14D: إلغاء حجز + استرداد كل دفعاته، بمعاملة ذرّية واحدة ──
 // يُعترَض هنا فقط PUT /api/admissions/:id/cancel-with-refund (segmentان بعد الـ id) —
+// ── State Synchronization Audit fix — POST يدوي لحركة مخزون (InventoryPage.jsx) ──
+// مركَّب هنا، قبل الحلقة الديناميكية أدناه، فيُعالِج POST /api/inventoryTxn حصراً (توليد
+// number الفريد بقفل استشاري — الـ CRUD العام لا يملك هذا المنطق). GET/PUT/PATCH/DELETE
+// لنفس المسار تبقى دون أي تغيير — تُعالَج كما هي بالحلقة الديناميكية (makeCrudRouter)
+// لأن هذا الـ router لا يُعرِّف أي معالج آخر غير POST /. نفس صلاحية 'materials' الحالية.
+app.use('/api/inventoryTxn', requireAuth, requirePermission('materials'), inventoryTxnRouter);
+
+// ── Scalability Architecture Phase 2: تقرير طالب واحد مُجمَّع من الخادم ──
+// مسار مخصَّص GET /api/students/:studentId/report-data، مُركَّب قبل الحلقة الديناميكية
+// (نفس نمط payments.js/materialDistribution.js) — لا يتقاطع مع /api/students العام
+// (يبقى كما هو تماماً لقائمة/سجل الطلاب). نفس صلاحية 'students' المستخدَمة بالفعل لمسار
+// /api/students وcollection communications.
+app.use('/api/students', requireAuth, requirePermission('students'), studentReportRouter);
+
+// ── Phase 3A (Multi-Group Enrollment — Enrollment API): dedicated, restricted route for
+// student_group_enrollments — never exposed through the generic dynamic CRUD loop below
+// (see enrollments.js's own header). Same mount pattern/permission as studentReportRouter
+// immediately above (enrollments are a sub-resource of students, same 'students' permission
+// key already gating /api/students itself).
+//   - GET/POST /api/students/:studentId/enrollments (list active enrollments / add an
+//     Additional Group) — two-segment path, no collision with the generic CRUD's single-
+//     segment /api/students/:id.
+//   - DELETE/PATCH /api/enrollments/:enrollmentId (withdraw an Additional Group / update its
+//     attend_days-start_date-end_date) — a new top-level path, entirely separate from
+//     /api/students.
+app.use('/api/students', requireAuth, requirePermission('students'), studentEnrollmentsRouter);
+app.use('/api/enrollments', requireAuth, requirePermission('students'), enrollmentRouter);
+
+// ── Scalability Architecture Phase 4 — scoped GET /api/communications?studentId=&groupId=
+// ──
+// مسار مخصَّص، مُركَّب قبل الحلقة الديناميكية (نفس نمط payments.js/studentReport.js)، نفس
+// صلاحية collection communications الحالية (COLLECTION_PERMISSIONS.communications='students').
+app.use('/api/communications', requireAuth, requirePermission('students'), communicationsRouter);
+
 // لا تعارض مع admissionActivationRouter أعلاه (/:id/activate) ولا مع الـ CRUD العام
 // (PUT /:id، segment واحد). ملف منفصل عمداً عن admissionActivation.js — مسؤولية واحدة
 // لكل ملف (نفس نمط examDelete.js/examGrades.js الحالي).
@@ -254,6 +311,13 @@ app.use('/api/cashboxes', requireAuth, requirePermission('treasury'), (req, res,
 // مضاعفاً: trg_no_delete_treasury في القاعدة أصلاً بلا استثناء، هذا الحارس يضيف 405
 // واضحاً عند حدود الـ API بدل استثناء القاعدة الخام). GET وPOST / (بعد الاعتراض) يمرّان
 // دون تغيير للحلقة الديناميكية أدناه، التي تتولّى POST / فعلياً عبر الـ CRUD العام —
+// ── Scalability Architecture Phase 3 (Treasury Safety Gate) — GET /api/cashboxes/:id/
+// balance?asOf= ──
+// مسار قراءة فقط مستقل تماماً عن TreasuryPage.jsx (لا يُستهلَك من أي واجهة بعد) — يحسب
+// الرصيد من SQL aggregate بدل تحميل كل تاريخ الخزنة للمتصفح؛ لا تغيير على أي معاملة كتابة
+// مالية قائمة (createPayment/refundPayment/reverseTreasuryTxn/transferBetweenCashboxes).
+app.use('/api/cashboxes', requireAuth, requirePermission('treasury'), cashboxBalanceRouter);
+
 // treasuryTxn ليست في PRESERVE_CLIENT_ID_COLLECTIONS، فتولّد UUID خادمياً دائماً.
 app.use('/api/treasuryTxn', requireAuth, requirePermission('treasury'), treasuryTxnRouter);
 
@@ -274,10 +338,13 @@ app.use('/api/payments', requireAuth, requirePermission('payments'), paymentsRou
 app.use('/api/admissionPayments', requireAuth, requirePermission('admissions'), admissionPaymentsRouter);
 
 // ── Phase 3B-15: activity_logs — حقن user_id/user_name من الجلسة + حظر PUT/PATCH/DELETE ──
-// لا مسار ذرّي مخصّص هنا (بعكس كل ما سبق في 3B-14): سجل نشاط واحد مستقل، لا كتابة
-// مركّبة تمسّ أكثر من جدول تحتاج معاملة واحدة. المنطق في backend/src/routes/
-// activityLogs.js (مُصدَّر منفصلاً، قابل للاختبار مباشرة).
-app.use('/api/activityLogs', requireAuth, requirePermission('activity-log'), asyncHandler(activityLogsInterceptor));
+// Scalability Architecture Phase 4 (activityLogs): GET / أصبحت مسار Router حقيقي (ترتيب
+// timestamp DESC حتمي + عدّ كلي حقيقي)، مُركَّب هنا قبل الحلقة الديناميكية — نفس نمط
+// payments.js/communications.js بالضبط، يستبدل GET العام غير المُرتَّب الذي كانت
+// makeCrudRouter العامة تخدمه لهذا المسار سابقاً. POST/PUT/PATCH/DELETE كما كانت بالضبط
+// (المنطق الكامل في backend/src/routes/activityLogs.js، مُصدَّر منفصلاً، قابل للاختبار
+// مباشرة).
+app.use('/api/activityLogs', requireAuth, requirePermission('activity-log'), activityLogsRouter);
 
 // ── Stabilization phase: أول مسارات خلفية حقيقية لـ users/roles ──
 // إدارية بحتة، 'users' هي الصلاحية الوحيدة التي يملكها admin فقط في نموذج الأدوار

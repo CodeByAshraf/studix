@@ -28,6 +28,9 @@ import { Router } from 'express';
 import crypto from 'crypto';
 import { runInTransaction } from '../lib/transaction.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
+import { requirePermission } from '../middleware/permissions.js';
+import { validatePaymentInput, createPaymentInTx, serializeBigInt } from './payments.js';
+import { snakeToCamel } from '../lib/caseMapper.js';
 
 const RELEVANT_TYPES = ['studentDelivery', 'reservation', 'reservationRelease', 'return']; // ⊂ chk_inv_type
 const PAY_STATUSES = new Set(['paid', 'partial', 'unpaid']);
@@ -42,7 +45,11 @@ const NUMBER_RE = /^INV-(\d+)$/;
 // الواحدة أدناه (isP2002OnNumber) لا تكفي وحدها تحت تزامن حقيقي (أثبت هذا فعلياً اختبار
 // تزامن studentCreate.js قبل إصلاحه، بمحاولات retry أكثر من هنا وبقيت غير كافية). نطاق-
 // معاملة (xact) لا نطاق-جلسة: يُحرَّر تلقائياً عند commit/rollback، بلا إلغاء قفل يدوي.
-const INVENTORY_NUMBER_ADVISORY_LOCK_KEY = 7727731;
+// مُصدَّر (State Synchronization Audit fix) — نفس القفل بالضبط يُعاد استخدامه من
+// backend/src/routes/inventoryTxn.js (حركات المخزون اليدوية/تسويات الجرد) لأن التسلسل
+// عالمي عبر كل حركات inventory_txn، لا خاص بهذا الملف — نسخة ثانية من هذا الثابت كانت
+// ستتصادم بصمت تحت تزامن حقيقي (قفلان مختلفان لا يتنافيان أبداً).
+export const INVENTORY_NUMBER_ADVISORY_LOCK_KEY = 7727731;
 
 function badRequest(message) {
   const err = new Error(message);
@@ -141,7 +148,9 @@ function validateRecords(records) {
   return byStudent;
 }
 
-async function computeNextSeq(tx) {
+// مُصدَّر (State Synchronization Audit fix) — أُعيد استخدامها حرفياً من
+// backend/src/routes/inventoryTxn.js، لا نسخة ثانية من نفس المنطق.
+export async function computeNextSeq(tx) {
   const rows = await tx.inventory_txn.findMany({
     where: { number: { startsWith: 'INV-' } },
     select: { number: true },
@@ -265,6 +274,162 @@ export async function saveMaterialDistribution({ materialId, records }, { create
   }
 }
 
+function todayIsoDate() {
+  return new Date().toISOString().split('T')[0];
+}
+
+// يستخرج {year, month} من "YYYY-MM-DD" بلا أي تحويل عبر Date/منطقة زمنية — createPayment
+// يتطلّب month/year كحقلين منفصلين (لأغراض الاشتراكات الشهرية أصلاً)؛ دفعة المذكرة هنا
+// لا معنى شهري حقيقي لها، فنشتقّهما فقط من تاريخ الدفعة نفسه لملء الحقل المطلوب، بلا أي
+// حساب توقيت قد ينزلق ليوم مجاور (نفس التحذير الموثَّق في parseTreasuryDate/treasuryTxn.js).
+function monthYearFromIsoDate(isoDate) {
+  const m = /^(\d{4})-(\d{2})-\d{2}$/.exec(isoDate);
+  if (!m) return { year: NaN, month: NaN };
+  return { year: Number(m[1]), month: Number(m[2]) };
+}
+
+// يُصدَّر منفصلاً عن الـ router ليكون قابلاً للاختبار مباشرة بلا HTTP/auth، بنفس مبدأ
+// createPayment/saveMaterialDistribution. تأكيد دفعة "مذكرة" واحدة لطالب واحد من شاشة
+// تتبّع التسليم (زر "مدفوع"/"مدفوع جزئياً") — يُنشئ دفعة+حركة خزنة حقيقيتين (نفس منطق
+// createPayment بالضبط، عبر createPaymentInTx المُستورَدة) ويُحدِّث/يُنشئ سجل inventory_txn
+// المقابل، كل ذلك في معاملة Prisma ذرّية واحدة: فشل أي خطوة يُلغي البقية بالكامل — لا مال
+// محصَّل بلا سجل استلام، ولا سجل "مدفوع" بلا مال حقيقي في الخزنة.
+//
+// "غير مدفوع" لا يمرّ عبر هذه الدالة إطلاقاً — يبقى على مسار saveMaterialDistribution
+// العادي بلا أي كتابة مالية، تماماً كسلوكه الحالي.
+export async function confirmMaterialPayment(
+  { materialId, studentId, payStatus, amount, cashboxId, method = 'cash', date, notes = null },
+  { userId = null } = {}
+) {
+  if (typeof materialId !== 'string' || !/^\d+$/.test(materialId)) {
+    throw badRequest('materialId يجب أن يكون رقماً صالحاً.');
+  }
+  if (typeof studentId !== 'string' || !studentId.trim()) {
+    throw badRequest('studentId مطلوب.');
+  }
+  if (payStatus !== 'paid' && payStatus !== 'partial') {
+    throw badRequest('payStatus يجب أن يكون paid أو partial لهذه العملية.');
+  }
+
+  const materialIdBigInt = BigInt(materialId);
+  const paymentDate = date || todayIsoDate();
+  const { year, month } = monthYearFromIsoDate(paymentDate);
+
+  const result = await runInTransaction(async (tx) => {
+    // قفل استشاري خاص بزوج (مذكرة، طالب) — يُسلسِل محاولات تأكيد الدفع المتزامنة لنفس
+    // الالتزام المالي (نفس الطالب+نفس المذكرة)، بحيث تُقرَأ "المتبقي" أدناه دائماً مقابل
+    // بيانات مُثبَّتة فعلياً لا بيانات قديمة قد تتجاوزها معاملة أخرى للتو — نفس مبدأ
+    // القفل التشاؤمي في refundPayment (payments.js)، لكن هنا المجموع موزَّع على عدة صفوف
+    // payments بلا صفّ واحد يحمل القيد، فقفل استشاري (hashtext) هو المكافئ الصحيح. هذا
+    // القفل هو أيضاً خط الدفاع الحقيقي ضد الإرسال المزدوج (نقرتان/إعادة محاولة شبكة):
+    // الطلب الثاني يُحجَب حتى يُثبَّت الأول، ثم يرى remaining<=0 فيُرفَض بوضوح أدناه.
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`matpay:${materialId}:${studentId}`}))`;
+
+    const material = await tx.inv_materials.findUnique({ where: { id: materialIdBigInt } });
+    if (!material) throw badRequest('المذكرة غير موجودة.');
+
+    const student = await tx.students.findUnique({ where: { id: studentId } });
+    if (!student) throw badRequest('الطالب غير موجود.');
+
+    const price = Number(material.price) || 0;
+
+    // المدفوع فعلاً حتى الآن لهذه المذكرة لهذا الطالب — يُحسَب دائماً من صفوف payments
+    // الحقيقية (مصدر الحقيقة الوحيد)، لا من legacy_metadata ولا من أي قيمة يرسلها العميل.
+    // هذا يضمن أن دفعة جزئية ثانية تُجمَع بشكل صحيح على الأولى، بلا أي مبلغ يُخترَع.
+    const paidAgg = await tx.payments.aggregate({
+      where: { student_id: studentId, material_id: materialIdBigInt, pay_type: 'material' },
+      _sum: { amount: true },
+    });
+    const alreadyPaid = Number(paidAgg._sum.amount ?? 0);
+    const remaining = Math.max(0, price - alreadyPaid);
+
+    if (remaining <= 0) {
+      throw badRequest('هذه المذكرة مدفوعة بالكامل بالفعل — لا يمكن تسجيل دفعة أخرى.');
+    }
+
+    let amt;
+    if (payStatus === 'paid') {
+      // المبلغ الكامل يُحسَب من جهة الخادم دائماً — لا يُقرَأ من العميل إطلاقاً (نفس مبدأ
+      // status في createPaymentInTx: لا ثقة بأي حساب مالي قادم من الواجهة).
+      amt = remaining;
+    } else {
+      amt = Number(amount);
+      if (!Number.isFinite(amt) || amt <= 0) throw badRequest('المبلغ يجب أن يكون أكبر من صفر.');
+      if (amt > remaining) throw badRequest(`المبلغ أكبر من المتبقي (${remaining} ج.م).`);
+    }
+
+    const normalized = validatePaymentInput({
+      studentId,
+      groupId: student.group_id,
+      materialId,
+      month,
+      year,
+      amount: amt,
+      method,
+      payType: 'material',
+      date: paymentDate,
+      notes,
+      cashboxId,
+    });
+    const { payment, treasuryTxn } = await createPaymentInTx(tx, normalized, { userId });
+
+    const newPaidTotal = alreadyPaid + amt;
+    const newPayStatus = newPaidTotal >= price ? 'paid' : 'partial';
+
+    const existing = await tx.inventory_txn.findMany({
+      where: { material_id: materialIdBigInt, student_id: studentId, type: { in: RELEVANT_TYPES }, status: { not: 'cancelled' } },
+      orderBy: { created_at: 'desc' },
+    });
+    const latest = existing[0] || null;
+
+    let inventoryTxn;
+    if (latest && latest.type === 'studentDelivery') {
+      // مُستَلمة بالفعل (دفعة جزئية سابقة، أو استلام سُجِّل قبل هذه الدفعة) — تحديث تعليق
+      // فقط، بنفس القيد الموثَّق أعلى الملف: type/quantity/student_id/material_id/
+      // created_at لا تُمَسّ أبداً؛ receivedAt الأصلي يبقى كما هو إن وُجد.
+      inventoryTxn = await tx.inventory_txn.update({
+        where: { id: latest.id },
+        data: {
+          legacy_metadata: {
+            receivedAt: latest.legacy_metadata?.receivedAt ?? todayIsoDate(),
+            payStatus: newPayStatus,
+            paidAmount: newPaidTotal,
+          },
+          payment_id: payment.id,
+        },
+      });
+    } else {
+      // أول تسجيل حقيقي لهذا الطالب لهذه المذكرة — استلام+دفع معاً دفعة واحدة، بنفس منطق
+      // ترقيم INV-###### وقفل التسلسل المُستخدَم في attemptReconciliation أعلاه.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${INVENTORY_NUMBER_ADVISORY_LOCK_KEY})`;
+      const nextSeq = await computeNextSeq(tx);
+      const number = `INV-${String(nextSeq).padStart(6, '0')}`;
+      inventoryTxn = await tx.inventory_txn.create({
+        data: {
+          id: crypto.randomUUID(),
+          number,
+          material_id: materialIdBigInt,
+          type: 'studentDelivery',
+          quantity: 1,
+          student_id: studentId,
+          status: 'active',
+          legacy_metadata: { receivedAt: todayIsoDate(), payStatus: newPayStatus, paidAmount: newPaidTotal },
+          payment_id: payment.id,
+          created_by: userId,
+        },
+      });
+    }
+
+    return { payment, treasuryTxn, inventoryTxn };
+  });
+
+  return {
+    payment: snakeToCamel(serializeBigInt(result.payment)),
+    treasuryTxn: snakeToCamel(result.treasuryTxn),
+    inventoryTxn: snakeToCamel(serializeBigInt(result.inventoryTxn)),
+  };
+}
+
 const router = Router();
 
 // PUT /api/material-distributions/:materialId — تسوية توزيع مذكرة كاملة (idempotent)
@@ -273,6 +438,21 @@ router.put('/:materialId', asyncHandler(async (req, res) => {
   const { records } = req.body || {};
   const data = await saveMaterialDistribution({ materialId, records }, { createdBy: req.user?.id ?? null });
   res.json({ ok: true, data });
+}));
+
+// POST /api/material-distributions/:materialId/students/:studentId/payment — تأكيد دفعة
+// مذكرة (كاملة/جزئية) لطالب واحد، ذرّي (دفعة+خزنة+استلام معاً). هذا المسار يُنشئ حركة
+// خزنة حقيقية، فيتطلّب صراحةً صلاحية 'payments' أيضاً — بالإضافة إلى 'materials' المفروضة
+// على كل الراوتر في server.js — حتى لا يستطيع مستخدم لديه صلاحية "المذكرات" فقط تجاوز
+// بوابة الصلاحيات المالية القائمة (نفس مبدأ عدم إضعاف الضوابط المالية الحالية).
+router.post('/:materialId/students/:studentId/payment', requirePermission('payments'), asyncHandler(async (req, res) => {
+  const { materialId, studentId } = req.params;
+  const { payStatus, amount, cashboxId, method, date, notes } = req.body || {};
+  const data = await confirmMaterialPayment(
+    { materialId, studentId, payStatus, amount, cashboxId, method, date, notes },
+    { userId: req.user?.id ?? null }
+  );
+  res.status(201).json({ ok: true, data });
 }));
 
 export default router;

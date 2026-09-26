@@ -10,6 +10,8 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { snakeToCamel, camelToSnake } from '../lib/caseMapper.js';
+import { setPrimaryGroupTx, withdrawEnrollmentTx, findActivePrimary } from '../lib/enrollmentService.js';
+import { runInTransaction } from '../lib/transaction.js';
 
 // حقول يديرها الخادم/القاعدة دائماً — تُتجاهَل أي قيمة يرسلها العميل لها
 const SERVER_MANAGED_FIELDS = new Set(['id', 'created_at', 'updated_at']);
@@ -138,6 +140,44 @@ export function makeCrudRouter(modelName, opts = {}) {
     if (fields.some((f) => f.name === 'updated_at')) {
       data.updated_at = new Date();
     }
+
+    // students.group_id (Primary Group) is never written through the generic path below —
+    // enrollmentService.js is the single write-through path that keeps
+    // student_group_enrollments consistent with students.group_id (see that file's header).
+    // Pulled out of `data` here and applied inside one transaction shared with any other
+    // student fields from the same request, so the whole PUT/PATCH still commits or rolls
+    // back atomically.
+    if (modelName === 'students' && Object.prototype.hasOwnProperty.call(data, 'group_id')) {
+      const groupId = data.group_id;
+      delete data.group_id;
+      const row = await runInTransaction(async (tx) => {
+        if (groupId === null) {
+          const current = await findActivePrimary(tx, parsed.id);
+          if (current) await withdrawEnrollmentTx(tx, current.id);
+        } else {
+          await setPrimaryGroupTx(tx, parsed.id, groupId);
+        }
+        return tx.students.update({ where: { id: parsed.id }, data });
+      });
+      return res.json({ ok: true, data: serializeBigInt(snakeToCamel(row)) });
+    }
+
+    // admissions.student_id يُكتَب حصراً عبر PUT /api/admissions/:id/activate الذرّي
+    // (admissionActivation.js) — ذلك المسار وحده يحمل حارس السباق الشرطي
+    // (updateMany({where:{id, student_id:null}})) الذي يمنع ربط نفس الطالب بسجلَي قبول
+    // معاً، ويكتب admission_system_log بنفس المعاملة. هذا المسار العام لا يملك أياً من
+    // الحارسين، فكتابة student_id هنا كانت تتيح تجاوز صامتاً لكلا الضمانين (اكتُشف أثناء
+    // مراجعة ما قبل التثبيت). stage وباقي حقول admissions الأخرى تبقى قابلة للكتابة هنا
+    // كالمعتاد (convertToReservation/confirmReservation في AdmissionsPage.jsx يعتمدان
+    // على ذلك فعلياً لمراحل الحجز التي لا تحتاج الحارس الذرّي) — الاستثناء يقتصر على
+    // student_id وحده، لا الـ model كله.
+    if (modelName === 'admissions' && Object.prototype.hasOwnProperty.call(data, 'student_id')) {
+      const err = new Error('student_id على admissions يُكتَب فقط عبر PUT /api/admissions/:id/activate.');
+      err.status = 400;
+      err.expose = true;
+      throw err;
+    }
+
     const row = await model.update({ where: { id: parsed.id }, data });
     res.json({ ok: true, data: serializeBigInt(snakeToCamel(row)) });
   });

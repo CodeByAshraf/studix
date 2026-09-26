@@ -165,6 +165,30 @@ describe('treasuryTxn.js — real PostgreSQL integration (MEDIUM-B1)', () => {
       expect(await client.treasury_txn.count()).toBe(before);
     });
 
+    it('rejects a transfer out of an inactive source cashbox, creates no rows at all', async () => {
+      const fromCb = await seedCashbox({ opening_balance: 500, active: false });
+      const toCb = await seedCashbox({ opening_balance: 0 });
+      const before = await client.treasury_txn.count();
+
+      await expect(transferBetweenCashboxes({
+        fromCashboxId: fromCb.id, toCashboxId: toCb.id, amount: 100, date: '2026-01-10',
+      }, { userId: null })).rejects.toThrow('الخزنة المصدر غير نشطة.');
+
+      expect(await client.treasury_txn.count()).toBe(before);
+    });
+
+    it('rejects a transfer into an inactive destination cashbox, creates no rows at all', async () => {
+      const fromCb = await seedCashbox({ opening_balance: 500 });
+      const toCb = await seedCashbox({ opening_balance: 0, active: false });
+      const before = await client.treasury_txn.count();
+
+      await expect(transferBetweenCashboxes({
+        fromCashboxId: fromCb.id, toCashboxId: toCb.id, amount: 100, date: '2026-01-10',
+      }, { userId: null })).rejects.toThrow('الخزنة الوجهة غير نشطة.');
+
+      expect(await client.treasury_txn.count()).toBe(before);
+    });
+
     it('rejects an invalid transfer date with a 400-style error instead of a raw Prisma 500, creates no rows at all', async () => {
       const fromCb = await seedCashbox({ opening_balance: 500 });
       const toCb = await seedCashbox({ opening_balance: 0 });

@@ -32,6 +32,7 @@ import { runInTransaction } from '../lib/transaction.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { snakeToCamel } from '../lib/caseMapper.js';
 import { parseTreasuryDate } from './treasuryTxn.js';
+import { prisma } from '../prisma.js';
 
 function badRequest(message) {
   const err = new Error(message);
@@ -43,7 +44,7 @@ function badRequest(message) {
 // نفس تسلسل BigInt→نص المستخدَم في crud.js (serializeBigInt) — منسوخ محلياً هنا بدل
 // الاستيراد من crud.js (ممنوع تعديله/استيراد داخلياته صراحةً)؛ payments.material_id
 // عمود BigInt حقيقي (FK→inv_materials.id)، وJSON.stringify يرمي استثناءً على BigInt خام.
-function serializeBigInt(input) {
+export function serializeBigInt(input) {
   if (typeof input === 'bigint') return input.toString();
   if (Array.isArray(input)) return input.map(serializeBigInt);
   if (input !== null && typeof input === 'object' && typeof input.toJSON !== 'function') {
@@ -71,9 +72,10 @@ const PAY_TYPE_TO_CATEGORY = {
   other:        { category: 'other',         label: 'دفعة' },
 };
 
-// يُصدَّر منفصلاً عن الـ router ليكون قابلاً للاختبار مباشرة بلا HTTP/auth، بنفس مبدأ
-// activateAdmission/reverseTreasuryTxn.
-export async function createPayment(input, { userId = null } = {}) {
+// يتحقّق من مدخلات إنشاء دفعة ويطبّعها، بلا أي وصول لقاعدة البيانات — قابلة للاستدعاء
+// من أي مستهلك (createPayment هنا، أو نقطة نهاية أخرى تحتاج تركيب هذا الإنشاء داخل
+// معاملة أكبر، مثل تأكيد دفعة مذكرة من تتبّع التسليم).
+export function validatePaymentInput(input) {
   const {
     studentId, groupId = null, materialId = null, month, year, amount,
     method, payType, date, notes = null, cashboxId,
@@ -104,81 +106,97 @@ export async function createPayment(input, { userId = null } = {}) {
     catch { throw badRequest('معرّف المذكرة غير صحيح.'); }
   }
 
-  const result = await runInTransaction(async (tx) => {
-    const student = await tx.students.findUnique({ where: { id: studentId } });
-    if (!student) throw badRequest('الطالب غير موجود.');
+  return { studentId, groupId, materialIdBig, m, y, amt, method, payType, parsedDate, notes, cashboxId };
+}
 
-    const group = groupId ? await tx.groups.findUnique({ where: { id: groupId } }) : null;
+// جسم معاملة إنشاء الدفعة، مُستخرَج من createPayment ليقبل tx خارجياً — يسمح لمستهلك
+// آخر (materialDistribution.js) بتركيبه داخل معاملة Prisma أكبر (دفعة + حركة خزنة +
+// تسوية inventory_txn معاً، ذرّياً بالكامل)، بلا أي تغيير على سلوك createPayment نفسها.
+export async function createPaymentInTx(tx, normalized, { userId = null } = {}) {
+  const { studentId, groupId, materialIdBig, m, y, amt, method, payType, parsedDate, notes, cashboxId } = normalized;
 
-    // القراءة الحاسمة داخل المعاملة (tx) — لا تجاوز ضمنياً لغياب/تعطّل الخزنة.
-    const cashbox = await tx.cashboxes.findUnique({ where: { id: cashboxId } });
-    if (!cashbox || !cashbox.active) {
-      throw badRequest('الخزنة المحدَّدة غير موجودة أو غير نشطة.');
-    }
+  const student = await tx.students.findUnique({ where: { id: studentId } });
+  if (!student) throw badRequest('الطالب غير موجود.');
 
-    if (materialIdBig !== null) {
-      const material = await tx.inv_materials.findUnique({ where: { id: materialIdBig } });
-      if (!material) throw badRequest('المذكرة غير موجودة.');
-    }
+  const group = groupId ? await tx.groups.findUnique({ where: { id: groupId } }) : null;
 
-    // status مُحتسَبة من جهة الخادم دائماً من بيانات رسوم حقيقية (monthly_fee/price) —
-    // لا تُقرَأ أبداً من العميل، بنفس مبدأ computeNextStudentCode في admissionActivation.js.
-    const fee = Number(student.monthly_fee) || Number(group?.price) || 0;
-    const status = fee === 0 ? 'paid' : amt >= fee ? 'paid' : 'partial';
+  // القراءة الحاسمة داخل المعاملة (tx) — لا تجاوز ضمنياً لغياب/تعطّل الخزنة.
+  const cashbox = await tx.cashboxes.findUnique({ where: { id: cashboxId } });
+  if (!cashbox || !cashbox.active) {
+    throw badRequest('الخزنة المحدَّدة غير موجودة أو غير نشطة.');
+  }
 
-    const meta = PAY_TYPE_TO_CATEGORY[payType] || PAY_TYPE_TO_CATEGORY.subscription;
-    const paymentId      = crypto.randomUUID();
-    const treasuryTxnId  = crypto.randomUUID();
+  let material = null;
+  if (materialIdBig !== null) {
+    material = await tx.inv_materials.findUnique({ where: { id: materialIdBig } });
+    if (!material) throw badRequest('المذكرة غير موجودة.');
+  }
 
-    // ── الخطوة 1: treasury_txn أولاً، payment_id تبقى NULL مبدئياً ──
-    // fk_treasury_payment وpayments_treasury_txn_id_fkey غير deferrable (تحقّق فعلي حيّ
-    // أثناء تفتيش هذه المرحلة) — لا يمكن لأيّ صفّ أن يشير للآخر قبل أن يوجد فعلاً في
-    // القاعدة. treasury_txn_id مطلوب على payments (trg_payment_needs_treasury) فيُنشأ
-    // أولاً؛ payment_id على treasury_txn غير مطلوب بأي trigger فيبقى NULL حتى الخطوة 3.
-    await tx.treasury_txn.create({
-      data: {
-        id:          treasuryTxnId,
-        cashbox_id:  cashboxId,
-        date:        parsedDate,
-        type:        'income',
-        category:    meta.category,
-        amount:      amt,
-        method,
-        party:       student.name,
-        notes:       notes ? `${meta.label} ${student.name} — ${notes}` : `${meta.label} ${student.name}`,
-        ref_type:    'payment',
-        ref_id:      paymentId,
-        created_by:  userId,
-      },
-    });
+  // status مُحتسَبة من جهة الخادم دائماً من بيانات رسوم حقيقية (monthly_fee/price) —
+  // لا تُقرَأ أبداً من العميل، بنفس مبدأ computeNextStudentCode في admissionActivation.js.
+  const fee = Number(student.monthly_fee) || Number(group?.price) || 0;
+  const status = fee === 0 ? 'paid' : amt >= fee ? 'paid' : 'partial';
 
-    // ── الخطوة 2: payment، تشير إلى treasury_txn الذي أُنشئ للتو ──
-    const payment = await tx.payments.create({
-      data: {
-        id:              paymentId,
-        student_id:      studentId,
-        group_id:        groupId,
-        material_id:     materialIdBig,
-        month:           m,
-        year:            y,
-        amount:          amt,
-        method,
-        pay_type:        payType,
-        date:            parsedDate,
-        status,
-        notes,
-        treasury_txn_id: treasuryTxnId,
-      },
-    });
+  const meta = PAY_TYPE_TO_CATEGORY[payType] || PAY_TYPE_TO_CATEGORY.subscription;
+  const paymentId      = crypto.randomUUID();
+  const treasuryTxnId  = crypto.randomUUID();
+  const label = material ? `${meta.label} — ${material.name}` : meta.label;
 
-    // ── الخطوة 3: استكمال الرابط المعاكس بعد أن أصبحت الدفعة موجودة فعلاً ──
-    const treasuryTxn = await tx.treasury_txn.update({
-      where: { id: treasuryTxnId },
-      data:  { payment_id: paymentId },
-    });
-
-    return { payment, treasuryTxn };
+  // ── الخطوة 1: treasury_txn أولاً، payment_id تبقى NULL مبدئياً ──
+  // fk_treasury_payment وpayments_treasury_txn_id_fkey غير deferrable (تحقّق فعلي حيّ
+  // أثناء تفتيش هذه المرحلة) — لا يمكن لأيّ صفّ أن يشير للآخر قبل أن يوجد فعلاً في
+  // القاعدة. treasury_txn_id مطلوب على payments (trg_payment_needs_treasury) فيُنشأ
+  // أولاً؛ payment_id على treasury_txn غير مطلوب بأي trigger فيبقى NULL حتى الخطوة 3.
+  await tx.treasury_txn.create({
+    data: {
+      id:          treasuryTxnId,
+      cashbox_id:  cashboxId,
+      date:        parsedDate,
+      type:        'income',
+      category:    meta.category,
+      amount:      amt,
+      method,
+      party:       student.name,
+      notes:       notes ? `${label} ${student.name} — ${notes}` : `${label} ${student.name}`,
+      ref_type:    'payment',
+      ref_id:      paymentId,
+      created_by:  userId,
+    },
   });
+
+  // ── الخطوة 2: payment، تشير إلى treasury_txn الذي أُنشئ للتو ──
+  const payment = await tx.payments.create({
+    data: {
+      id:              paymentId,
+      student_id:      studentId,
+      group_id:        groupId,
+      material_id:     materialIdBig,
+      month:           m,
+      year:            y,
+      amount:          amt,
+      method,
+      pay_type:        payType,
+      date:            parsedDate,
+      status,
+      notes,
+      treasury_txn_id: treasuryTxnId,
+    },
+  });
+
+  // ── الخطوة 3: استكمال الرابط المعاكس بعد أن أصبحت الدفعة موجودة فعلاً ──
+  const treasuryTxn = await tx.treasury_txn.update({
+    where: { id: treasuryTxnId },
+    data:  { payment_id: paymentId },
+  });
+
+  return { payment, treasuryTxn };
+}
+
+// يُصدَّر منفصلاً عن الـ router ليكون قابلاً للاختبار مباشرة بلا HTTP/auth، بنفس مبدأ
+// activateAdmission/reverseTreasuryTxn.
+export async function createPayment(input, { userId = null } = {}) {
+  const normalized = validatePaymentInput(input);
+  const result = await runInTransaction((tx) => createPaymentInTx(tx, normalized, { userId }));
 
   return {
     payment:     snakeToCamel(serializeBigInt(result.payment)),
@@ -281,6 +299,215 @@ export async function refundPayment({ id, amount, reason }, { userId = null } = 
 }
 
 const router = Router();
+
+// GET / — Scalability Architecture Phase 4: نفس شكل استجابة GET العام تماماً
+// ({ok, data, count}, snakeToCamel/serializeBigInt) — لا فرق ملاحَظ لأي مستهلك حالي.
+// بلا أي فلتر في الاستعلام (كما تستدعيها loadFromPostgres/pgGetCollection عند الإقلاع
+// اليوم بالضبط) يبقى السلوك مطابقاً 100% للمسار العام غير المُفلتَر (كل الصفوف) — الإضافة
+// هنا هي دعم studentId/groupId/month/year اختيارية فقط، لمستهلكين جدد (مثل مانع الدفع
+// المكرَّر في PaymentForm.jsx) بلا الحاجة لتحميل كل تاريخ المدفوعات في المتصفح لاحقاً.
+// مركَّب قبل الحلقة الديناميكية (نفس مبدأ POST أعلاه) — يستبدل GET العام غير المُفلتَر
+// لهذا المسار بالكامل، لا يُضاف بجانبه.
+// date/limit/orderBy (Phase 4 continuation): date= يخدم FinancialAnalytics.jsx's todayRev
+// (payments.filter(p=>p.date===todayStr) بالضبط — مطابقة تامة، لا نطاق). limit+orderBy
+// يخدمان FinancialAnalytics.jsx's "recent" (أحدث 8 دفعات: [...payments].sort(date desc)
+// .slice(0,8)) — بلا أي منهما (كالسابق) يبقى السلوك غير المُفلتَر/غير المُرتَّب كما هو.
+router.get('/', asyncHandler(async (req, res) => {
+  const { studentId, groupId, month, year, date, limit, orderBy } = req.query;
+  const where = {};
+  if (studentId) where.student_id = studentId;
+  if (groupId) where.group_id = groupId;
+  if (month !== undefined) where.month = Number(month);
+  if (year !== undefined) where.year = Number(year);
+  if (date) {
+    const parsedDate = parseTreasuryDate(date);
+    if (!parsedDate) throw badRequest('date غير صالح.');
+    where.date = parsedDate;
+  }
+
+  const query = { where };
+  if (orderBy === 'date_desc') query.orderBy = { date: 'desc' };
+  if (limit !== undefined) {
+    const n = Number(limit);
+    if (!Number.isInteger(n) || n <= 0) throw badRequest('limit غير صالح.');
+    query.take = n;
+  }
+
+  const rows = await prisma.payments.findMany(query);
+  res.json({ ok: true, data: serializeBigInt(snakeToCamel(rows)), count: rows.length });
+}));
+
+// ── GET /aggregate — Scalability Architecture Phase 4 (analytics/reports consumers) ──
+// عوملة عامة واحدة لبنية "إيراد صافٍ/عدد مُجمَّع حسب بُعد واحد" المُكرَّرة اليوم بأشكال
+// شبه متطابقة عبر عدّة ملفّات (getRevenueByGroup/getMonthlyBreakdown/FinancialAnalytics
+// .jsx's byMethod/byStatus/StudentPerformance.jsx's per-student totalPaid) — لا قاعدة
+// عمل جديدة، فقط نفس "SUM(amount) - SUM(استرداد فعّال)" الحالي بالضبط، مُبارَمَتراً حسب
+// البُعد المطلوب بدل إعادة كتابته handcoded لكل شاشة. groupBy يحدّد عمود التجميع:
+//   - method/status: عدّ فقط (نفس byMethod/byStatus الحاليين — لا طرح استرداد، لأنهما
+//     عدّ سجلّات لا مجموع مبالغ في الكود الحالي).
+//   - group/student/month/day: عدّ + إيراد صافٍ (نفس getRevenueByGroup/getMonthlyBreakdown
+//     /StudentPerformance.jsx بالضبط).
+//   - none: إجمالي واحد (نفس getNetRevenue(كل الدفعات المُفلترة) بالضبط).
+// year/month/groupId/studentId فلاتر اختيارية تُطبَّق قبل التجميع — لا افتراض "الآن" من
+// جهة الخادم إطلاقاً (نفس مبدأ كل نقاط النهاية الأخرى في هذا الملف): المستدعي يُرسل
+// السنة/الشهر الفعليين الذين يريدهما صراحةً، تماماً كما يفعل العميل اليوم محلياً.
+const AGGREGATE_COLUMNS = {
+  method: 'method', status: 'status', group: 'group_id', student: 'student_id',
+  month: 'month', day: 'date',
+};
+const COUNT_ONLY_DIMENSIONS = new Set(['method', 'status']); // لا طرح استرداد لهما اليوم
+
+export async function getPaymentAggregates({ groupBy, year, month, groupId, studentId } = {}) {
+  if (groupBy !== 'none' && !AGGREGATE_COLUMNS[groupBy]) {
+    throw badRequest('groupBy يجب أن يكون أحد: method, status, group, student, month, day, none.');
+  }
+
+  const where = {};
+  if (year !== undefined && year !== null && year !== '') where.year = Number(year);
+  if (month !== undefined && month !== null && month !== '') where.month = Number(month);
+  if (groupId) where.group_id = groupId;
+  if (studentId) where.student_id = studentId;
+
+  const column = groupBy === 'none' ? null : AGGREGATE_COLUMNS[groupBy];
+  const selectFields = { id: true, amount: true };
+  if (column) selectFields[column] = true;
+
+  const rows = await prisma.payments.findMany({ where, select: selectFields });
+
+  // نفس getRefundedAmount بالضبط: ref_type='refund' AND status='active' فقط، مُقيَّد
+  // بمعرّفات هذه الدفعات تحديداً — استعلام واحد يجلب كل الاستردادات ذات الصلة معاً.
+  const paymentIds = rows.map((r) => r.id);
+  const refunds = paymentIds.length
+    ? await prisma.treasury_txn.findMany({
+        where: { payment_id: { in: paymentIds }, ref_type: 'refund', status: 'active' },
+        select: { payment_id: true, amount: true },
+      })
+    : [];
+  const refundByPaymentId = new Map();
+  for (const r of refunds) {
+    refundByPaymentId.set(r.payment_id, (refundByPaymentId.get(r.payment_id) ?? 0) + Number(r.amount));
+  }
+
+  if (groupBy === 'none') {
+    const grossTotal = rows.reduce((s, p) => s + Number(p.amount), 0);
+    const refundTotal = [...refundByPaymentId.values()].reduce((s, v) => s + v, 0);
+    return [{ key: null, count: rows.length, revenue: grossTotal - refundTotal }];
+  }
+
+  const buckets = new Map(); // key -> { count, gross, refund }
+  for (const r of rows) {
+    const rawKey = r[column];
+    const key = groupBy === 'day' ? (rawKey ? rawKey.toISOString().slice(0, 10) : null) : (rawKey ?? null);
+    if (!buckets.has(key)) buckets.set(key, { count: 0, gross: 0, refund: 0 });
+    const b = buckets.get(key);
+    b.count += 1;
+    b.gross += Number(r.amount);
+    b.refund += refundByPaymentId.get(r.id) ?? 0;
+  }
+
+  return [...buckets.entries()]
+    .map(([key, b]) => COUNT_ONLY_DIMENSIONS.has(groupBy)
+      ? { key, count: b.count }
+      : { key, count: b.count, revenue: b.gross - b.refund })
+    .sort((a, b) => (a.key ?? '').toString().localeCompare((b.key ?? '').toString()));
+}
+
+router.get('/aggregate', asyncHandler(async (req, res) => {
+  const { groupBy, year, month, groupId, studentId } = req.query;
+  const data = await getPaymentAggregates({ groupBy, year, month, groupId, studentId });
+  res.json({ ok: true, data });
+}));
+
+// ── GET /search — Scalability Architecture Phase 4 (PaymentHistory.jsx scoped
+// search/pagination replacement) ─────────────────────────────────────────────
+// نسخة خادم-الحقيقة بالضبط من التصفية/الفرز/التقسيم/الإجمالي الذي كانت PaymentHistory.jsx
+// تحسبه محلياً فوق مصفوفة payments الكاملة (انظر تدقيق المرحلة 4 — لا قاعدة عمل جديدة):
+//   - month/groupId/status: مساواة تامة، بنفس ترتيب/دلالة .filter() الحالي بالضبط
+//     (لا فلتر سنة هنا عمداً — PaymentHistory.jsx لا تملك عنصر سنة إطلاقاً اليوم).
+//   - search: مطابقة اسم الطالب (عبر JOIN حقيقي واحد على العلاقة payments.students، لا
+//     تحميل كل الطلاب للواجهة) OR معرّف الدفعة الخام، كلاهما substring غير حسّاس لحالة
+//     الأحرف (mode:'insensitive' ≈ ILIKE) — بلا trim، بنفس سلوك `search.toLowerCase()`
+//     غير المُهذَّب في PaymentHistory.jsx بالضبط (سلسلة بحث كلها مسافات تُطابق أي اسم
+//     يحوي مسافة — سلوك حالي غريب لكن يجب الحفاظ عليه حرفياً).
+//   - الترتيب: date DESC ثم created_at DESC. الفرز الحالي في العميل (b.date.localeCompare
+//     (a.date) فقط) لا يُحدّد كاسِر تعادل صريحاً لصفوف بنفس التاريخ — الترتيب الفعلي وقتها
+//     غير مُعرَّف أصلاً (يعتمد على ترتيب وصول findMany() بلا orderBy عند الإقلاع). بما أن
+//     الدفعات ثابتة/append-only فقط (لا UPDATE/DELETE إطلاقاً — انظر رأس الملف)، created_at
+//     يقارب ترتيب الإدراج الفعلي بأمان ويحقق "ترتيب حتمي" المطلوب صراحة في هذه المرحلة، بلا
+//     أي تغيير ملاحَظ على أي ترتيب حالي فعلي.
+//   - التقسيم: صفحة تتجاوز آخر صفحة متاحة تُقرَّب لآخر صفحة (لا نتيجة فارغة) — بنفس
+//     paginate() في src/utils/helpers.js بالضبط (totalPages = ceil(total/limit)||1،
+//     safePage = max(1,min(page,totalPages))، حتى عند total=0 → صفحة 1 فارغة).
+//   - total/totalAmount: على كامل المجموعة المُفلترة (لا الصفحة الحالية فقط)، totalAmount
+//     إجمالي خام (لا طرح استرداد) — بنفس totalFiltered الحالي بالضبط (PaymentHistory.jsx لا
+//     تطرح أي استرداد من هذا الإجمالي اليوم، بخلاف getPaymentAggregates/getNetRevenue).
+// استعلامان فقط دائماً (aggregate واحد للعدّ+المجموع، ثم findMany واحد للصفحة — يُتخطَّى
+// كلياً لو total=0) — بلا أي استعلام إضافي لكل صف (لا N+1 لبحث الاسم، JOIN واحد يكفي).
+const PAYMENT_STATUSES = ['paid', 'partial', 'unpaid'];
+
+function parsePaginationParam(value, { label, def, min, max }) {
+  if (value === undefined || value === null || value === '') return def;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < min || (max !== undefined && n > max)) {
+    throw badRequest(`${label} غير صالح.`);
+  }
+  return n;
+}
+
+export async function searchPayments({ month, groupId, status, search, page, limit } = {}) {
+  const where = {};
+
+  if (month !== undefined && month !== null && month !== '') {
+    const m = Number(month);
+    if (!Number.isInteger(m) || m < 1 || m > 12) throw badRequest('الشهر غير صحيح.');
+    where.month = m;
+  }
+  if (groupId) where.group_id = groupId;
+  if (status !== undefined && status !== null && status !== '') {
+    if (!PAYMENT_STATUSES.includes(status)) throw badRequest('الحالة غير صحيحة.');
+    where.status = status;
+  }
+  // لا trim — يطابق `search.toLowerCase()` غير المُهذَّب في PaymentHistory.jsx بالضبط.
+  if (search) {
+    where.OR = [
+      { students: { name: { contains: search, mode: 'insensitive' } } },
+      { id: { contains: search, mode: 'insensitive' } },
+    ];
+  }
+
+  const limitN = parsePaginationParam(limit, { label: 'limit', def: 12, min: 1, max: 200 });
+  const pageN = parsePaginationParam(page, { label: 'page', def: 1, min: 1 });
+
+  const statsAgg = await prisma.payments.aggregate({ where, _count: { _all: true }, _sum: { amount: true } });
+  const total = statsAgg._count._all;
+  const totalAmount = Number(statsAgg._sum.amount ?? 0);
+  const totalPages = Math.ceil(total / limitN) || 1;
+  const effectivePage = Math.max(1, Math.min(pageN, totalPages));
+  const skip = (effectivePage - 1) * limitN;
+
+  const rows = total === 0 ? [] : await prisma.payments.findMany({
+    where,
+    orderBy: [{ date: 'desc' }, { created_at: 'desc' }],
+    skip,
+    take: limitN,
+  });
+
+  return {
+    items: serializeBigInt(snakeToCamel(rows)),
+    page: effectivePage,
+    totalPages,
+    total,
+    totalAmount,
+    hasPrev: effectivePage > 1,
+    hasNext: effectivePage < totalPages,
+  };
+}
+
+router.get('/search', asyncHandler(async (req, res) => {
+  const { month, groupId, status, search, page, limit } = req.query;
+  const data = await searchPayments({ month, groupId, status, search, page, limit });
+  res.json({ ok: true, data });
+}));
 
 router.post('/', asyncHandler(async (req, res) => {
   const data = await createPayment(req.body, { userId: req.user?.id ?? null });

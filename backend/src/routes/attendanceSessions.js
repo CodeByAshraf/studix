@@ -16,6 +16,7 @@ import { prisma } from '../prisma.js';
 import { runInTransaction } from '../lib/transaction.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { snakeToCamel } from '../lib/caseMapper.js';
+import { getEligibleStudentIdsForGroupDate, isStudentEligibleForGroupDate } from '../lib/attendanceEligibility.js';
 
 const VALID_STATUSES = new Set(['present', 'absent', 'late']); // يطابق chk_attendance_status بالقاعدة
 
@@ -34,6 +35,13 @@ function toDateOnly(value) {
 function badRequest(message) {
   const err = new Error(message);
   err.status = 400;
+  err.expose = true;
+  return err;
+}
+
+function conflict(message) {
+  const err = new Error(message);
+  err.status = 409;
   err.expose = true;
   return err;
 }
@@ -63,6 +71,62 @@ export async function saveAttendanceSession({ groupId, date, sessionTime, record
   const finalSessionTime = sessionTime || null;
 
   const result = await runInTransaction(async (tx) => {
+    // Recitation Assessment Phase 2, Part A — gives the (group_id, date) attendance
+    // session a persisted identity/lock, created/upserted in this SAME transaction so it
+    // can never be orphaned relative to the attendance rows it describes (a failure
+    // anywhere below rolls back the session upsert too — one transaction, no partial
+    // state). FOR UPDATE locks the row (when it already exists) for the rest of this
+    // transaction: a concurrent PUT .../complete cannot commit between this read and the
+    // attendance writes below — it blocks on the same row until this transaction
+    // commits or rolls back, then correctly observes this session's true final state
+    // (same reasoning as reverseTreasuryTxn's WHERE-embedded status guard, applied here
+    // via an explicit row lock instead, since this function performs several separate
+    // writes rather than one single conditional UPDATE).
+    // البحث عن الصف عبر Prisma ORM أولاً (نفس النمط المُستخدَم في كل مكان آخر بهذا الملف
+    // لمطابقة عمود @db.Date — الاعتماد على Prisma لترميز نوع المعامل بشكل صحيح، بدل
+    // مطابقة خام على `date` قد تنزاح بفارق منطقة زمنية بين الجلسة والعمود). القفل نفسه
+    // (FOR UPDATE) يُطبَّق بعدها عبر `id` النصّي فقط — لا غموض نوع بيانات فيه إطلاقاً.
+    const found = await tx.attendance_sessions.findUnique({
+      where: { group_id_date: { group_id: groupId, date: dateObj } },
+      select: { id: true },
+    });
+    let existingSession = null;
+    if (found) {
+      const lockedRows = await tx.$queryRaw`
+        SELECT id, status FROM public.attendance_sessions WHERE id = ${found.id} FOR UPDATE
+      `;
+      existingSession = lockedRows[0] || null;
+    }
+    if (existingSession && existingSession.status === 'completed') {
+      throw conflict('الجلسة مكتملة — لا يمكن تعديل الحضور بعد اكتمالها.');
+    }
+    if (existingSession) {
+      await tx.attendance_sessions.update({
+        where: { id: existingSession.id },
+        data: { session_time: finalSessionTime },
+      });
+    } else {
+      await tx.attendance_sessions.create({
+        data: { id: crypto.randomUUID(), group_id: groupId, date: dateObj, session_time: finalSessionTime },
+      });
+    }
+
+    // Group Closure (Attendance Integration) — the client-provided student list is no
+    // longer trusted blindly: every studentId must have an active, date/day-eligible
+    // enrollment in this exact group on this exact date (attendanceEligibility.js — the
+    // single source of truth, reused here rather than duplicated). Checked before any
+    // write, inside this same transaction, so an ineligible student rejects the WHOLE
+    // session atomically — matches this function's existing all-or-nothing semantics.
+    const ineligible = [];
+    for (const studentId of byStudent.keys()) {
+      if (!(await isStudentEligibleForGroupDate(studentId, groupId, dateObj, tx))) {
+        ineligible.push(studentId);
+      }
+    }
+    if (ineligible.length) {
+      throw badRequest(`طالب/طلاب غير مؤهَّلين لحضور هذه المجموعة في هذا التاريخ: ${ineligible.join(', ')}`);
+    }
+
     const existing = await tx.attendance.findMany({
       where: { group_id: groupId, date: dateObj },
       select: { id: true, student_id: true },
@@ -110,13 +174,63 @@ export async function saveAttendanceSession({ groupId, date, sessionTime, record
   };
 }
 
+// Recitation Assessment Phase 2, Part A — locks an attendance session permanently.
+// يُصدَّر منفصلاً عن الـ router ليكون قابلاً للاختبار مباشرة بلا HTTP/auth، بنفس مبدأ
+// saveAttendanceSession أعلاه.
+export async function completeAttendanceSession({ groupId, date }, { userId = null } = {}) {
+  if (typeof groupId !== 'string' || !groupId.trim()) throw badRequest('groupId مطلوب.');
+  if (typeof date !== 'string' || !DATE_RE.test(date)) throw badRequest('date يجب أن يكون بصيغة YYYY-MM-DD.');
+  const dateObj = new Date(`${date}T00:00:00.000Z`);
+
+  const session = await prisma.attendance_sessions.findUnique({
+    where: { group_id_date: { group_id: groupId, date: dateObj } },
+  });
+  if (!session) throw badRequest('لا توجد جلسة حضور محفوظة لهذه المجموعة/التاريخ بعد.');
+
+  // حارس ذرّي ضد سباق إكمال مزدوج — نفس تقنية reverseTreasuryTxn's double-reversal guard
+  // بالضبط: شرط status='draft' يُنقَل إلى الـ WHERE في UPDATE نفسه بدل أن يبقى فحصاً
+  // تطبيقياً منفصلاً عن الكتابة — Postgres يُسرِّي عبر قفل الصف الذي يفرضه UPDATE نفسه.
+  const { count } = await prisma.attendance_sessions.updateMany({
+    where: { id: session.id, status: 'draft' },
+    data: { status: 'completed', completed_at: new Date(), completed_by: userId },
+  });
+  if (count !== 1) {
+    throw conflict('الجلسة مكتملة بالفعل.');
+  }
+
+  const updated = await prisma.attendance_sessions.findUnique({ where: { id: session.id } });
+  return { ...snakeToCamel(updated), date: toDateOnly(updated.date) };
+}
+
 const router = Router();
+
+// GET /api/attendance-sessions/:groupId/:date/roster — Group Closure (Attendance
+// Integration): the eligible student ids for this group/date (enrollment/date/day based —
+// attendanceEligibility.js, reused as-is). This is the roster SessionMarking.jsx and the
+// print-report flow build their student list from, replacing a plain students.groupId
+// filter with no date/day awareness.
+router.get('/:groupId/:date/roster', asyncHandler(async (req, res) => {
+  const { groupId, date } = req.params;
+  if (!DATE_RE.test(date)) throw badRequest('date يجب أن يكون بصيغة YYYY-MM-DD.');
+  const group = await prisma.groups.findUnique({ where: { id: groupId }, select: { id: true } });
+  if (!group) throw badRequest('المجموعة غير موجودة.');
+
+  const studentIds = await getEligibleStudentIdsForGroupDate(groupId, date);
+  res.json({ ok: true, data: studentIds });
+}));
 
 // PUT /api/attendance-sessions/:groupId/:date — استبدال الجلسة بالكامل (idempotent)
 router.put('/:groupId/:date', asyncHandler(async (req, res) => {
   const { groupId, date } = req.params;
   const { sessionTime, records } = req.body || {};
   const data = await saveAttendanceSession({ groupId, date, sessionTime, records });
+  res.json({ ok: true, data });
+}));
+
+// PUT /api/attendance-sessions/:groupId/:date/complete — قفل جلسة الحضور نهائياً.
+router.put('/:groupId/:date/complete', asyncHandler(async (req, res) => {
+  const { groupId, date } = req.params;
+  const data = await completeAttendanceSession({ groupId, date }, { userId: req.user?.id ?? null });
   res.json({ ok: true, data });
 }));
 

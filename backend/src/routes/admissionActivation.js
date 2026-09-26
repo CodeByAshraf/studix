@@ -26,6 +26,7 @@ import { runInTransaction } from '../lib/transaction.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { snakeToCamel } from '../lib/caseMapper.js';
 import { computeNextStudentCode } from '../lib/studentCode.js';
+import { setPrimaryGroupTx } from '../lib/enrollmentService.js';
 
 function badRequest(message) {
   const err = new Error(message);
@@ -113,6 +114,12 @@ export async function activateAdmission({ admissionId, student: studentInput }, 
     const student = await tx.students.create({
       data: { id: crypto.randomUUID(), code, ...studentData },
     });
+    // Phase 1 (Multi-Group Enrollment) — confirming an admission's group is a Primary
+    // Group assignment for the new student; route it through the enrollment service in
+    // the same transaction (see studentCreate.js for the identical pattern/rationale).
+    if (studentData.group_id) {
+      await setPrimaryGroupTx(tx, student.id, studentData.group_id, { effectiveDate: studentData.enroll_date });
+    }
 
     // حارس ذرّي ضد سباق تفعيل مزدوج: القراءة أعلاه (admission، بداية الدالة) وحدها غير
     // كافية — قراءة عادية لا تأخذ قفلاً، فطلبان متزامنان قد يريا كلاهما student_id=null

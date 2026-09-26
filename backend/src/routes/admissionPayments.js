@@ -23,6 +23,7 @@ import { runInTransaction } from '../lib/transaction.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { snakeToCamel } from '../lib/caseMapper.js';
 import { parseTreasuryDate } from './treasuryTxn.js';
+import { prisma } from '../prisma.js';
 
 function badRequest(message) {
   const err = new Error(message);
@@ -68,11 +69,46 @@ const PAYMENT_TYPE_LABELS = {
   other:    'أخرى',
 };
 
+// clientRequestId: مفتاح idempotency اختياري يولّده العميل مرة واحدة لكل محاولة إرسال
+// (وليس لكل نقرة — يُعاد استخدامه هو نفسه لو أُعيدت نفس المحاولة). نُعيد استخدامه هنا
+// كـ id الصف نفسه (admission_payments.id) — نفس مبدأ PRESERVE_CLIENT_ID_COLLECTIONS
+// المُطبَّق فعلياً على students/groups/admissions/cashboxes، بلا أي عمود/قيد جديد: id
+// عمود فريد (PK) بالفعل، فإرسال نفس القيمة مرتين يصطدم بذلك القيد مباشرة على مستوى
+// القاعدة، حتى تحت تزامن حقيقي (طلبان متزامنان بنفس المفتاح) — لا حاجة لهجرة. إعادة
+// إرسال نفس clientRequestId (نقرة مزدوجة/إعادة محاولة شبكة) تُعيد نفس السجل المُنشأ فعلاً
+// بدل تكرار الحركة؛ مفتاح مختلف (دفعة ثانية حقيقية، ولو بنفس المبلغ) يُنشئ سجلاً مستقلاً
+// كما هو متوقَّع تماماً.
+function findExistingByClientRequestId(clientRequestId) {
+  return prisma.admission_payments.findUnique({
+    where: { id: clientRequestId },
+    include: { treasury_txn: true },
+  });
+}
+
+function toReplayResult(existing) {
+  const { treasury_txn, ...paymentFields } = existing;
+  return {
+    payment:     snakeToCamel(serializeBigInt(paymentFields)),
+    treasuryTxn: treasury_txn ? snakeToCamel(treasury_txn) : null,
+    logs:        [],
+    replay:      true,
+  };
+}
+
 // يُصدَّر منفصلاً عن الـ router ليكون قابلاً للاختبار مباشرة بلا HTTP/auth.
 export async function createAdmissionPayment(input, { userId = null } = {}) {
   const {
     admissionId, type, amount, date, method = 'cash', notes = null, materialId = null, cashboxId,
+    clientRequestId = null,
   } = input || {};
+  const requestId = typeof clientRequestId === 'string' && clientRequestId.trim() ? clientRequestId.trim() : null;
+
+  // المسار السريع: إعادة إرسال متسلسلة (لا تزامن حقيقي) — الصف موجود بالفعل، لا داعي
+  // لبدء معاملة جديدة إطلاقاً.
+  if (requestId) {
+    const existing = await findExistingByClientRequestId(requestId);
+    if (existing) return toReplayResult(existing);
+  }
 
   if (typeof admissionId !== 'string' || !admissionId.trim()) throw badRequest('سجل القبول مطلوب.');
   if (typeof cashboxId !== 'string' || !cashboxId.trim()) throw badRequest('الخزنة مطلوبة.');
@@ -93,7 +129,9 @@ export async function createAdmissionPayment(input, { userId = null } = {}) {
     catch { throw badRequest('معرّف المذكرة غير صحيح.'); }
   }
 
-  const result = await runInTransaction(async (tx) => {
+  let result;
+  try {
+    result = await runInTransaction(async (tx) => {
     const admission = await tx.admissions.findUnique({ where: { id: admissionId } });
     if (!admission) throw badRequest('سجل القبول غير موجود.');
 
@@ -109,7 +147,11 @@ export async function createAdmissionPayment(input, { userId = null } = {}) {
     }
 
     const category = PAYMENT_TO_CASHBOX_CATEGORY[type] || 'other';
-    const admissionPaymentId = crypto.randomUUID();
+    // requestId (لو مُرسَل) يصبح الـ id نفسه — أي تعارض PK حقيقي (سباق تزامن حقيقي، لا
+    // مجرّد إعادة إرسال متسلسلة سبق فحصها أعلاه) يُلقي P2002 هنا، فتُلغى كل خطوات هذه
+    // المعاملة تلقائياً (Prisma $transaction rollback)، بما فيها treasury_txn أعلاه —
+    // يُعالَج خارج runInTransaction أدناه بنفس نمط ensureLicenseConfig (license.js).
+    const admissionPaymentId = requestId || crypto.randomUUID();
 
     // ── الخطوة 1: treasury_txn أولاً (تحتاجها admission_payments لاحقاً — trigger) ──
     const treasuryTxn = await tx.treasury_txn.create({
@@ -168,7 +210,18 @@ export async function createAdmissionPayment(input, { userId = null } = {}) {
     }
 
     return { payment, treasuryTxn, logs };
-  });
+    });
+  } catch (err) {
+    // سباق تزامن حقيقي: طلبان بنفس requestId وصلا معاً، تجاوزا الفحص السريع أعلاه كلاهما
+    // (لا صف مُلتزَم بعد)، ثم تعارضا على PK (admission_payments.id) — الخاسر تُلغى معاملته
+    // بالكامل تلقائياً (بما فيها treasury_txn الذي أنشأه قبل الاصطدام)، فنقرأ صف الفائز
+    // بدل فشل عام — نفس نمط ensureLicenseConfig (license.js:104) بالضبط.
+    if (requestId && err.code === 'P2002') {
+      const existing = await findExistingByClientRequestId(requestId);
+      if (existing) return toReplayResult(existing);
+    }
+    throw err;
+  }
 
   return {
     payment:     snakeToCamel(serializeBigInt(result.payment)),
@@ -178,6 +231,23 @@ export async function createAdmissionPayment(input, { userId = null } = {}) {
 }
 
 const router = Router();
+
+// GET / — Scalability Architecture Phase 4 (admissionPayments) — نفس شكل استجابة GET
+// العام تماماً ({ok, data, count}, snakeToCamel/serializeBigInt) — لا فرق ملاحَظ لأي
+// مستهلك حالي. بلا admissionId (كما تستدعيها loadFromPostgres/pgGetCollection عند
+// الإقلاع اليوم بالضبط) يبقى السلوك مطابقاً 100% للمسار العام غير المُفلتَر (كل
+// الصفوف) — الإضافة هنا هي دعم admissionId اختياري فقط، لمستهلك واحد حالياً
+// (AdmissionsPage.jsx، يجلب مرة واحدة بلا فلتر عند تحميل الصفحة، لا فلترة لكل سجل
+// قبول على حدة). مركَّب قبل الحلقة الديناميكية (نفس مبدأ POST أدناه) — يستبدل GET
+// العام غير المُفلتَر لهذا المسار بالكامل، لا يُضاف بجانبه.
+router.get('/', asyncHandler(async (req, res) => {
+  const { admissionId } = req.query;
+  const where = {};
+  if (admissionId) where.admission_id = admissionId;
+
+  const rows = await prisma.admission_payments.findMany({ where });
+  res.json({ ok: true, data: serializeBigInt(snakeToCamel(rows)), count: rows.length });
+}));
 
 router.post('/', asyncHandler(async (req, res) => {
   const data = await createAdmissionPayment(req.body, { userId: req.user?.id ?? null });

@@ -3,13 +3,14 @@
 // Proves getStudentReportData's scoped queries reproduce exactly the same matching rules
 // gatherStudentData (src/modules/student-report/reportData.js) currently applies on the
 // full, unscoped arrays — attendance/grades/hw_submissions/payments by student_id,
-// communications by (phone OR student_name) — NOT student_id (the existing frontend
-// filter never uses that column, despite it existing — this test locks in the real,
-// current matching rule, not an invented one), inventory_txn (booklet deliveries) by
-// (student_id OR legacy recipient-name substring), and refund treasury_txn scoped to only
-// this student's payment ids with ref_type='refund' AND status='active' (matches
-// getRefundedAmount exactly). Also proves the Decimal→Number / date normalizations match
-// db.middleware.js's COLLECTION_FIXUPS for the same fields exactly.
+// communications by student_id OR (phone OR student_name) (Pre-Installer Audit D1 —
+// this WHERE is deliberately inclusive of all three; gatherStudentData itself makes the
+// exclusive per-row decision: student_id wins alone when present, phone/name is only a
+// fallback for rows with none), inventory_txn (booklet deliveries) by (student_id OR
+// legacy recipient-name substring), and refund treasury_txn scoped to only this student's
+// payment ids with ref_type='refund' AND status='active' (matches getRefundedAmount
+// exactly). Also proves the Decimal→Number / date normalizations match db.middleware.js's
+// COLLECTION_FIXUPS for the same fields exactly.
 //
 // npm run test:integration only. If PostgreSQL is unreachable, a single clear "SKIPPED"
 // test is recorded instead of a silent skip or a hard failure.
@@ -69,6 +70,10 @@ describe('studentReport.js — getStudentReportData (real PostgreSQL integration
     expect(data.inventoryTxn).toEqual([]);
     expect(data.invMaterials).toEqual([]);
     expect(data.homeworks).toEqual([]); // no grade set — no query attempted, matches no homework
+    expect(data.parents).toEqual([]); // no parent_id set
+    expect(data.enrollments).toEqual([]); // no student_group_enrollments rows
+    expect(data.admissions).toEqual([]); // no linked admission
+    expect(data.recitations).toEqual([]);
   });
 
   it('rejects a nonexistent student', async () => {
@@ -114,14 +119,14 @@ describe('studentReport.js — getStudentReportData (real PostgreSQL integration
     expect(data.payments[0].date).toBe('2026-01-05'); // plain YYYY-MM-DD, matches normalizeDateOnly
   });
 
-  it('C. communications match by (phone === parentPhone) OR (studentName === name) — NOT student_id, matching the current frontend rule exactly', async () => {
+  it('C. communications match by student_id (Pre-Installer Audit D1) OR (phone === parentPhone) OR (studentName === name)', async () => {
     const student = await seedStudent({ parent_phone: '01011112222' });
 
-    // مطابقة بالهاتف فقط (لا اسم مطابق)
+    // مطابقة بالهاتف فقط (لا اسم مطابق، لا student_id)
     await client.communications.create({
       data: { id: nextId('c'), number: nextId('CN'), type: 'call', result: 'ok', phone: '01011112222', student_name: 'اسم مختلف تماماً' },
     });
-    // مطابقة بالاسم فقط (لا هاتف مطابق)
+    // مطابقة بالاسم فقط (لا هاتف مطابق، لا student_id)
     await client.communications.create({
       data: { id: nextId('c'), number: nextId('CN'), type: 'call', result: 'ok', phone: '09999999999', student_name: 'أشرف محمد' },
     });
@@ -129,14 +134,30 @@ describe('studentReport.js — getStudentReportData (real PostgreSQL integration
     await client.communications.create({
       data: { id: nextId('c'), number: nextId('CN'), type: 'call', result: 'ok', phone: '08888888888', student_name: 'طالب آخر' },
     });
-    // student_id حقيقي يشير لهذا الطالب لكن بلا تطابق هاتف/اسم — يجب ألا يُطابَق (نفس
-    // القاعدة الحالية بالضبط، رغم وجود العمود)
+    // student_id حقيقي يشير لهذا الطالب لكن بلا تطابق هاتف/اسم — يجب أن يُطابَق الآن
+    // (D1: هذا بالضبط هو السجل الذي كان يختفي صامتاً من التقرير قبل الإصلاح، رغم كونه
+    // مرتبطاً بالطالب فعلياً عبر student_id).
     await client.communications.create({
       data: { id: nextId('c'), number: nextId('CN'), type: 'call', result: 'ok', phone: '07777777777', student_name: 'اسم غير مطابق', student_id: student.id },
     });
 
     const data = await getStudentReportData(student.id);
-    expect(data.communications).toHaveLength(2);
+    expect(data.communications).toHaveLength(3);
+    expect(data.communications.some((c) => c.studentId === student.id && c.phone === '07777777777')).toBe(true);
+  });
+
+  it("C2. a communication's student_id belonging to a DIFFERENT student is still included in this student's bundle when it also matches the phone (the bundle stays inclusive; gatherStudentData makes the exclusive final call)", async () => {
+    const student = await seedStudent({ parent_phone: '01033334444', name: 'طالب فريد C2 الأول' });
+    const otherStudent = await seedStudent({ parent_phone: '01033334444', name: 'طالب فريد C2 الثاني' });
+
+    // student_id لطالب آخر، لكن الهاتف يطابق ولي أمر هذا الطالب (مثال: أشقّاء بنفس الهاتف).
+    await client.communications.create({
+      data: { id: nextId('c'), number: nextId('CN'), type: 'call', result: 'ok', phone: '01033334444', student_name: 'اسم لا يطابق أحداً', student_id: otherStudent.id },
+    });
+
+    const data = await getStudentReportData(student.id);
+    expect(data.communications).toHaveLength(1);
+    expect(data.communications[0].studentId).toBe(otherStudent.id);
   });
 
   it('D. booklet deliveries (inventory_txn) match by student_id OR legacy recipient-name substring, enriched with the referenced material', async () => {
@@ -234,5 +255,166 @@ describe('studentReport.js — getStudentReportData (real PostgreSQL integration
     expect(Number(data.treasuryTxn[0].amount)).toBe(100);
     expect(data.treasuryTxn[0].refType).toBe('refund');
     expect(data.treasuryTxn[0].status).toBe('active');
+  });
+
+  // Professional Report audit fix (Phase 1, item 2) — parent name.
+  it('G. parent: resolved via the real parentId FK, not duplicated onto students; absent when unlinked', async () => {
+    const parent = await client.parents.create({ data: { full_name: 'أحمد حسن', phone: nextId('phone') } });
+    const student = await seedStudent({ parent_id: parent.id });
+
+    const data = await getStudentReportData(student.id);
+    expect(data.parents).toHaveLength(1);
+    expect(data.parents[0].fullName).toBe('أحمد حسن');
+    expect(data.parents[0].id).toBe(String(parent.id)); // BigInt -> serialized string (serializeBigInt)
+
+    const unlinked = await seedStudent(); // no parent_id at all
+    const data2 = await getStudentReportData(unlinked.id);
+    expect(data2.parents).toEqual([]);
+  });
+
+  // Professional Report audit fix (Phase 1, item 5) — Additional Groups.
+  it('H. enrollments: ALL of this student\'s rows returned (active AND historical/withdrawn), scoped strictly by student_id, referenced groups included in bundle.groups', async () => {
+    const primaryGroup = await seedGroup({ name: 'المجموعة الرئيسية' });
+    const additionalGroup = await seedGroup({ name: 'مجموعة إضافية', teacher_name: 'أ. سارة' });
+    const oldGroup = await seedGroup({ name: 'مجموعة قديمة' });
+    const student = await seedStudent({ group_id: primaryGroup.id });
+    const otherStudent = await seedStudent({ group_id: primaryGroup.id });
+
+    await client.student_group_enrollments.create({
+      data: {
+        id: nextId('en'), student_id: student.id, group_id: additionalGroup.id,
+        role: 'additional', status: 'active', start_date: new Date('2026-01-10'),
+      },
+    });
+    await client.student_group_enrollments.create({
+      data: {
+        id: nextId('en'), student_id: student.id, group_id: oldGroup.id,
+        role: 'additional', status: 'withdrawn',
+        start_date: new Date('2025-01-01'), end_date: new Date('2025-06-01'),
+      },
+    });
+    // إن كانت لطالب آخر — يجب ألا تظهر إطلاقاً هنا (نفس مبدأ عزل student_id في الاختبار B)
+    await client.student_group_enrollments.create({
+      data: {
+        id: nextId('en'), student_id: otherStudent.id, group_id: additionalGroup.id,
+        role: 'additional', status: 'active', start_date: new Date('2026-01-10'),
+      },
+    });
+
+    const data = await getStudentReportData(student.id);
+    expect(data.enrollments).toHaveLength(2); // النشط + التاريخي معاً، لا النشط فقط
+    const byStatus = Object.fromEntries(data.enrollments.map((e) => [e.status, e]));
+    expect(byStatus.active.groupId).toBe(additionalGroup.id);
+    expect(byStatus.withdrawn.groupId).toBe(oldGroup.id);
+    expect(byStatus.withdrawn.endDate).toBe('2025-06-01'); // تُعاد كنص "YYYY-MM-DD"، لا Date كامل
+
+    // bundle.groups يشمل المجموعة الرئيسية + كل مجموعة أشار إليها تسجيل إضافي (وإلا فشل
+    // البحث عنها في additionalGroupsSection صامتاً بجهة الفرونت-إند)
+    const groupIds = data.groups.map((g) => g.id);
+    expect(groupIds).toContain(primaryGroup.id);
+    expect(groupIds).toContain(additionalGroup.id);
+    expect(groupIds).toContain(oldGroup.id);
+    const additionalGroupRow = data.groups.find((g) => g.id === additionalGroup.id);
+    expect(additionalGroupRow.teacherName).toBe('أ. سارة');
+  });
+
+  it('I. a student with no enrollments/parent at all: empty arrays, not an error', async () => {
+    const student = await seedStudent();
+    const data = await getStudentReportData(student.id);
+    expect(data.enrollments).toEqual([]);
+    expect(data.parents).toEqual([]);
+  });
+
+  // Student Report Phase 2 — Admissions Summary.
+  it('J. admission: resolved via the real studentId FK (admissions.student_id), never by name/phone matching', async () => {
+    const student = await seedStudent();
+    const admission = await client.admissions.create({
+      data: {
+        id: nextId('adm'), number: nextId('A'), name: 'اسم مختلف عن الطالب تماماً',
+        student_id: student.id, stage: 'active', source: 'فيسبوك',
+        reservation_date: new Date('2025-12-01'),
+      },
+    });
+
+    const data = await getStudentReportData(student.id);
+    expect(data.admissions).toHaveLength(1);
+    expect(data.admissions[0].id).toBe(admission.id);
+    expect(data.admissions[0].stage).toBe('active');
+    expect(data.admissions[0].source).toBe('فيسبوك');
+    expect(data.admissions[0].reservationDate).toBe('2025-12-01'); // date-only string, not a full Date
+  });
+
+  it('K. admission scoping: another student\'s admission never leaks in, matched strictly by student_id', async () => {
+    const student = await seedStudent();
+    const otherStudent = await seedStudent();
+    await client.admissions.create({
+      data: { id: nextId('adm'), number: nextId('A'), name: 'قبول طالب آخر', student_id: otherStudent.id, stage: 'active' },
+    });
+
+    const data = await getStudentReportData(student.id);
+    expect(data.admissions).toEqual([]);
+  });
+
+  it('L. a student with no linked admission at all: empty array, not an error', async () => {
+    const student = await seedStudent();
+    const data = await getStudentReportData(student.id);
+    expect(data.admissions).toEqual([]);
+  });
+
+  it('M. multiple admissions for the same student (re-admission): only the most recent one is returned', async () => {
+    const student = await seedStudent();
+    await client.admissions.create({
+      data: { id: nextId('adm'), number: nextId('A'), name: 'قبول أول', student_id: student.id, stage: 'active', created_at: new Date('2024-01-01') },
+    });
+    const latest = await client.admissions.create({
+      data: { id: nextId('adm'), number: nextId('A'), name: 'قبول أحدث', student_id: student.id, stage: 'active', created_at: new Date('2026-01-01') },
+    });
+
+    const data = await getStudentReportData(student.id);
+    expect(data.admissions).toHaveLength(1);
+    expect(data.admissions[0].id).toBe(latest.id);
+  });
+
+  it('N. recitations: scoped strictly by student_id, group name included, Decimal/date normalized, sorted newest-first, multiple sessions stay separate rows', async () => {
+    const group = await seedGroup({ name: 'مجموعة التسميع' });
+    const student = await seedStudent();
+    const other = await seedStudent();
+
+    const session1 = await client.attendance_sessions.create({
+      data: { id: nextId('sess'), group_id: group.id, date: new Date('2026-01-03'), session_time: '09:00', status: 'completed', max_score: 10 },
+    });
+    const session2 = await client.attendance_sessions.create({
+      data: { id: nextId('sess'), group_id: group.id, date: new Date('2026-01-10'), session_time: '10:00', status: 'completed', max_score: 20 },
+    });
+
+    await client.recitations.create({
+      data: { id: nextId('rec'), session_id: session1.id, student_id: student.id, group_id: group.id, date: session1.date, score: 7, max_score: 10, note: 'جيد جداً' },
+    });
+    await client.recitations.create({
+      data: { id: nextId('rec'), session_id: session2.id, student_id: student.id, group_id: group.id, date: session2.date, score: 18, max_score: 20 },
+    });
+    // another student's recitation in the same session — must never leak into `student`'s bundle
+    await client.recitations.create({
+      data: { id: nextId('rec'), session_id: session1.id, student_id: other.id, group_id: group.id, date: session1.date, score: 5, max_score: 10 },
+    });
+
+    const data = await getStudentReportData(student.id);
+
+    expect(data.recitations).toHaveLength(2); // both of this student's sessions, not merged/aggregated
+    // newest first
+    expect(data.recitations[0].date).toBe('2026-01-10');
+    expect(data.recitations[1].date).toBe('2026-01-03');
+    // Decimal -> real number, not a string
+    expect(data.recitations[0].score).toBe(18);
+    expect(data.recitations[0].maxScore).toBe(20);
+    expect(typeof data.recitations[0].score).toBe('number');
+    // group name available without a separate query
+    expect(data.recitations[1].groupName).toBe('مجموعة التسميع');
+    expect(data.recitations[1].note).toBe('جيد جداً');
+    // sessionTime available via the attendance_sessions relationship
+    expect(data.recitations[0].sessionTime).toBe('10:00');
+    expect(data.recitations[1].sessionTime).toBe('09:00');
+    // no cross-student leakage
+    expect(data.recitations.some((r) => r.studentId === other.id)).toBe(false);
   });
 });

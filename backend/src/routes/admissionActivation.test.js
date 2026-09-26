@@ -8,7 +8,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const mockTx = {
   admissions: { findUnique: vi.fn(), updateMany: vi.fn() },
-  students: { findUnique: vi.fn(), findMany: vi.fn(), create: vi.fn() },
+  students: { findUnique: vi.fn(), findMany: vi.fn(), create: vi.fn(), update: vi.fn() },
+  // Phase 1 (Multi-Group Enrollment) — every studentInput() in this file sets groupId,
+  // so activateAdmission's new setPrimaryGroupTx(tx, ...) call always runs.
+  student_group_enrollments: { findFirst: vi.fn(), create: vi.fn() },
   admission_system_log: { create: vi.fn() },
 };
 
@@ -25,6 +28,9 @@ function baseStudentInput(extra = {}) {
 beforeEach(() => {
   vi.clearAllMocks();
   mockTx.students.findMany.mockResolvedValue([]);
+  mockTx.students.update.mockImplementation(({ data }) => Promise.resolve(data));
+  mockTx.student_group_enrollments.findFirst.mockResolvedValue(null); // no existing Primary — always a new student here
+  mockTx.student_group_enrollments.create.mockImplementation(({ data }) => Promise.resolve(data));
 });
 
 describe('activateAdmission — parentId (Issue 3)', () => {

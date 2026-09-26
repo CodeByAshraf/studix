@@ -151,8 +151,15 @@ export async function transferBetweenCashboxes(
     // القراءة الحاسمة داخل المعاملة — نفس مبدأ reverseTreasuryTxn أعلاه.
     const fromCb = await tx.cashboxes.findUnique({ where: { id: fromCashboxId } });
     if (!fromCb) throw badRequest('الخزنة المصدر غير موجودة.');
+    // نفس حارس `active` المفروض بالفعل قبل أي كتابة خزنة أخرى (payments.js،
+    // admissionPayments.js) — كان غائباً هنا فقط، فيسمح بالتحويل من/إلى خزنة مُغلقة
+    // (مؤرشفة). لا حارس رصيد/overdraft مقابل — لا يوجد قيد "الرصيد لا يقل عن صفر" في أي
+    // مسار كتابة آخر بالمشروع (الرصيد يُحتسَب ديناميكياً بلا أي حد أدنى مفروض)، فإضافته
+    // هنا فقط كانت ستكون قاعدة عمل جديدة، لا إصلاح فجوة قائمة.
+    if (!fromCb.active) throw badRequest('الخزنة المصدر غير نشطة.');
     const toCb = await tx.cashboxes.findUnique({ where: { id: toCashboxId } });
     if (!toCb) throw badRequest('الخزنة الوجهة غير موجودة.');
+    if (!toCb.active) throw badRequest('الخزنة الوجهة غير نشطة.');
 
     // transferId رابط منطقي فقط (ref_id مشترَك بين الحركتين) — ليس صفاً بحدّ ذاته.
     // لا عمود description (نفس الاكتشاف أعلاه في reverseTreasuryTxn) — الوصف/السبب

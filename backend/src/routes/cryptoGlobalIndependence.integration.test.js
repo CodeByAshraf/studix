@@ -50,6 +50,13 @@ describe('BUG-01 — write paths do not depend on globalThis.crypto (real scratc
     await client.cashboxes.create({ data: { id: 'cb1', name: 'Main', opening_balance: 10000, active: true } });
     await client.groups.create({ data: { id: 'g1', name: 'G1', price: 100 } });
     await client.students.create({ data: { id: 's1', code: 'CRYPTO-S1', name: 'Student 1', group_id: 'g1' } });
+    // Group Closure (Attendance Integration): saveAttendanceSession now validates each
+    // record's studentId against attendanceEligibility.js — s1 needs a real active
+    // enrollment (not just the raw students.group_id column set above) covering the date
+    // the attendance test below uses (2026-01-15, a Thursday).
+    await client.student_group_enrollments.create({
+      data: { id: 'sge1', student_id: 's1', group_id: 'g1', role: 'primary', status: 'active', start_date: new Date('2026-01-01T00:00:00.000Z'), attend_days: ['thu'] },
+    });
     await client.exams.create({ data: { id: 'ex1', name: 'Exam 1', group_id: 'g1', date: new Date(), total: 100 } });
     await client.homeworks.create({ data: { id: 'hw1', title: 'HW 1', group_id: 'g1', total_score: 10, due_date: new Date() } });
     await client.inv_materials.create({ data: { code: 'MAT-1', name: 'Material 1' } });

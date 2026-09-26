@@ -38,8 +38,12 @@ describe('studentCreate.js — real PostgreSQL integration', () => {
   beforeEach(async () => {
     // Test D links a student to an admission (admissions.student_id FK, NO ACTION) — clean
     // up in dependency order so a prior run's admission/log rows don't block student deletes.
+    // Phase 1 (Multi-Group Enrollment): createStudentDirect now also creates a matching
+    // student_group_enrollments row for every student created with a groupId (every test
+    // in this file passes groupId: 'g1') — same NO ACTION FK, same dependency-order need.
     await client.admission_system_log.deleteMany({});
     await client.admissions.deleteMany({});
+    await client.student_group_enrollments.deleteMany({});
     await client.students.deleteMany({});
   });
 
@@ -60,6 +64,10 @@ describe('studentCreate.js — real PostgreSQL integration', () => {
     ]);
 
     const toDelete = created.find((s) => s.code.endsWith('-0003'));
+    // Phase 1: this student has a matching student_group_enrollments row (created with
+    // groupId: 'g1' above); that FK is NO ACTION like every other child table in this
+    // schema (attendance/payments/exams/...), so the enrollment must go first.
+    await client.student_group_enrollments.deleteMany({ where: { student_id: toDelete.id } });
     await client.students.delete({ where: { id: toDelete.id } });
 
     const next = await createStudentDirect({ id: nextId('s'), name: 'طالب جديد', groupId: 'g1' });

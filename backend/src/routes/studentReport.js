@@ -13,9 +13,11 @@
 // لا يُخترَع أي منطق جديد، فقط يُنقَل من فلتر JS على مصفوفة كاملة إلى WHERE مُفهرَس:
 //   - attendance/grades/hw_submissions/payments: student_id = مطابقة مباشرة (نفس فلتر
 //     .filter(x => x.studentId === studentId) بالضبط).
-//   - communications: (phone = parent_phone) OR (student_name = name) — نفس شرط
-//     gatherStudentData بالضبط (ملاحظة: لا تُستخدَم student_id هنا إطلاقاً في الكود
-//     الحالي رغم وجود العمود — لم نخترع مطابقة جديدة، هذه هي المطابقة الفعلية اليوم).
+//   - communications (Pre-Installer Audit D1): student_id = مطابقة مباشرة، OR (phone =
+//     parent_phone)، OR (student_name = name) — تُوسَّع الاستعلام هنا فقط ليشمل student_id
+//     (كان مستبعَداً عمداً سابقاً رغم وجود العمود)، فلا يُستبعَد صف مرتبط فعلياً بـ
+//     student_id من الحزمة قبل أن تصل gatherStudentData أصلاً؛ القرار النهائي لكل صف
+//     (studentId حصرياً إن وُجد، وإلا phone/name كاحتياط) يبقى في gatherStudentData نفسها.
 //   - inventory_txn (تسليم مذكرات): type='studentDelivery' AND (student_id = المعرّف
 //     OR recipient يحتوي اسم الطالب) — نفس منطق bookletDeliveries بالضبط، بما فيه
 //     الاحتياط القديم بالاسم لحركات ما قبل ربط student_id.
@@ -64,10 +66,53 @@ export async function getStudentReportData(studentId) {
     ? await prisma.groups.findUnique({ where: { id: student.group_id } })
     : null;
 
-  // نفس شرط gatherStudentData بالحرف: (student.parentPhone && c.phone===...) ||
-  // (student.name && c.studentName===...) — فرع مستحيل (لا قيمة) يُستبعَد تماماً بدل
-  // إرسال شرط يطابق NULL/فارغاً بالخطأ.
-  const commOr = [];
+  // Professional Report audit fix — parent name: students.parent_id هو FK حقيقي إلى
+  // parents (لا عمود parent_name على students نفسها، ولا يُضاف أحد هنا أيضاً — القراءة فقط
+  // عند بناء حزمة التقرير، بنفس نمط جلب group أعلاه بالضبط). parent = null إن لم يوجد
+  // parent_id، فيبقى parents:[] كما groups:[] عند غياب group_id.
+  const parent = student.parent_id
+    ? await prisma.parents.findUnique({ where: { id: student.parent_id } })
+    : null;
+
+  // Professional Report audit fix — Additional Groups: كل تسجيلات الطالب في
+  // student_group_enrollments (وليس النشطة فقط كما في GET /students/:id/enrollments —
+  // هنا نحتاج التاريخية/المنتهية أيضاً حتى لا تُفقَد صامتة من التقرير، نفس الجدول
+  // ونفس تفسير role/status المُستخدَمين بالفعل في StudentProfile.jsx's GroupsTab، بلا أي
+  // منطق أهلية جديد). مُرتَّبة الأحدث أولاً.
+  const enrollments = await prisma.student_group_enrollments.findMany({
+    where: { student_id: studentId },
+    orderBy: { start_date: 'desc' },
+  });
+
+  // Student Report Phase 2 — القبول (admissions): نفس مبدأ جلب parent أعلاه — قراءة فقط،
+  // عبر students.id = admissions.student_id (FK حقيقي، لا مطابقة بالاسم/الهاتف). طالب واحد
+  // قد يملك أكثر من سجل قبول نظرياً (إعادة قبول لاحقة) — الأحدث (created_at DESC) فقط، نطاق
+  // هذه المرحلة "ملخّص" لا سجل قبولات كامل. لا نقطة نهاية جديدة — امتداد لنفس bundle.
+  const admission = await prisma.admissions.findFirst({
+    where: { student_id: studentId },
+    orderBy: { created_at: 'desc' },
+  });
+
+  // المجموعات الإضافية قد تشير لمجموعات غير المجموعة الرئيسية — bundle.groups كان يحمل
+  // المجموعة الرئيسية فقط (كافٍ قبل هذه الميزة)؛ الآن يُوسَّع ليشمل أي مجموعة يشير إليها
+  // تسجيل إضافي أيضاً، وإلا فشل البحث عنها في reportData.js's additionalEnrollments بصمت.
+  const enrollmentGroupIds = [...new Set(enrollments.map((e) => e.group_id))]
+    .filter((id) => id !== student.group_id);
+  const enrollmentGroups = enrollmentGroupIds.length
+    ? await prisma.groups.findMany({ where: { id: { in: enrollmentGroupIds } } })
+    : [];
+  const allGroups = group ? [group, ...enrollmentGroups] : enrollmentGroups;
+
+  // Pre-Installer Audit D1: reportData.js's gatherStudentData now prefers student_id
+  // (exclusive match) for any communication row that has one, falling back to phone/name
+  // only for legacy rows with none — see its own header comment. This WHERE must therefore
+  // never under-fetch a genuinely-linked row relative to that new rule: student_id=studentId
+  // is now always included alongside the phone/name OR-branches (which stay unchanged, for
+  // the same reason they always existed — a legacy row with no student_id, or a different
+  // student's row that happens to share the same parent phone, must still reach the bundle
+  // exactly as before). gatherStudentData itself makes the final per-row decision; this
+  // query only needs to be inclusive enough to never exclude a row it might need.
+  const commOr = [{ student_id: studentId }];
   if (student.parent_phone) commOr.push({ phone: student.parent_phone });
   if (student.name) commOr.push({ student_name: student.name });
 
@@ -80,7 +125,7 @@ export async function getStudentReportData(studentId) {
   // بنفسها (انظر reportData.js) — فلا يتغيّر سلوكها إطلاقاً بإضافة صفوف لا تقرؤها.
   const MATDIST_RELEVANT_TXN_TYPES = ['studentDelivery', 'reservation', 'reservationRelease', 'return'];
 
-  const [attendance, hwSubmissions, grades, payments, communications, inventoryTxnRaw, homeworks] = await Promise.all([
+  const [attendance, hwSubmissions, grades, payments, communications, inventoryTxnRaw, homeworks, recitations] = await Promise.all([
     prisma.attendance.findMany({ where: { student_id: studentId } }),
     prisma.hw_submissions.findMany({ where: { student_id: studentId } }),
     prisma.grades.findMany({ where: { student_id: studentId } }),
@@ -107,6 +152,16 @@ export async function getStudentReportData(studentId) {
     student.grade
       ? prisma.homeworks.findMany({ where: { grade: student.grade } })
       : Promise.resolve([]),
+    // Recitation → Student Report integration: كل سجل تسميع محفوظ لهذا الطالب، أحدث أولاً
+    // (نفس ترتيب enrollments أعلاه). اسم المجموعة عبر include واحد (نفس نمط
+    // listCompletedSessions في recitations.js) بدل استعلام منفصل. session_time غير مُخزَّن
+    // على recitations نفسها (يعيش على attendance_sessions التي ينتمي إليها عبر session_id)
+    // — يُجلَب بنفس الـ include، لا استعلام إضافي.
+    prisma.recitations.findMany({
+      where: { student_id: studentId },
+      include: { groups: { select: { name: true } }, attendance_sessions: { select: { session_time: true } } },
+      orderBy: { date: 'desc' },
+    }),
   ]);
 
   const examIds = [...new Set(grades.map((g) => g.exam_id))];
@@ -153,10 +208,46 @@ export async function getStudentReportData(studentId) {
     ...m, price: toNum(m.price), cost: toNum(m.cost), min_stock: toNum(m.min_stock),
     added_at: m.added_at ? normalizeDateOnly(m.added_at) : m.added_at,
   }));
+  // recitations.score/maxScore: نفس مشكلة Decimal أعلاه. group_name/session_time
+  // مُسطَّحان هنا من الـ include (بدل بقائهما ضمن كائنَي groups/attendance_sessions
+  // المتداخلَين) لأن كل مستهلك حالي (examRows المُشابه) يقرأ حقولاً مسطَّحة مباشرة، لا
+  // كائنات علاقة متداخلة. سجل واحد = صف تاريخي واحد دائماً — لا تجميع/دمج لجلستين هنا.
+  const fixedRecitations = recitations.map((r) => ({
+    id: r.id,
+    session_id: r.session_id,
+    student_id: r.student_id,
+    group_id: r.group_id,
+    group_name: r.groups?.name ?? null,
+    date: normalizeDateOnly(r.date),
+    session_time: r.attendance_sessions?.session_time ?? null,
+    score: toNum(r.score),
+    max_score: toNum(r.max_score),
+    note: r.note,
+    created_at: r.created_at,
+  }));
+
+  // نفس تطبيع normalizeDateOnly أعلاه (start_date/end_date @db.Date بالضبط كـ attendance
+  // .date/exams.date) — بلا هذا تصل كـ Date objects كاملة بدل "YYYY-MM-DD" النصي الذي
+  // يتوقّعه كل مستهلك حالي (fmtDateShort/formatDate).
+  const fixedEnrollments = enrollments.map((e) => ({
+    ...e,
+    start_date: normalizeDateOnly(e.start_date),
+    end_date: e.end_date ? normalizeDateOnly(e.end_date) : e.end_date,
+  }));
+
+  // نفس تطبيع normalizeDateOnly أعلاه — reservation_date @db.Date بالضبط كـ enrollments
+  // .start_date. last_modified_at/created_at تبقيان Timestamptz كاملة بلا تطبيع (نفس معاملة
+  // communications.created_at الحالية في كل مكان آخر).
+  const fixedAdmission = admission
+    ? { ...admission, reservation_date: admission.reservation_date ? normalizeDateOnly(admission.reservation_date) : admission.reservation_date }
+    : null;
 
   const bundle = {
     students: [student],
-    groups: group ? [group] : [],
+    groups: allGroups,
+    admissions: fixedAdmission ? [fixedAdmission] : [],
+    parents: parent ? [parent] : [],
+    enrollments: fixedEnrollments,
     attendance: fixedAttendance,
     hwSubmissions: fixedHwSubmissions,
     homeworks: fixedHomeworks,
@@ -167,6 +258,7 @@ export async function getStudentReportData(studentId) {
     communications,
     inventoryTxn: inventoryTxnRaw,
     invMaterials: fixedInvMaterials,
+    recitations: fixedRecitations,
   };
 
   return snakeToCamel(serializeBigInt(bundle));

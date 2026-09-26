@@ -23,6 +23,7 @@ import { runInTransaction } from '../lib/transaction.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { snakeToCamel } from '../lib/caseMapper.js';
 import { prepareWriteData } from './crud.js';
+import { setPrimaryGroupTx } from '../lib/enrollmentService.js';
 import { computeNextStudentCode } from '../lib/studentCode.js';
 
 // نفس تسلسل BigInt→نص المكرَّر عمداً في crud.js/admissionActivation.js/payments.js —
@@ -104,7 +105,18 @@ export async function createStudentDirect(body) {
         // مصدر الحقيقة الوحيد لـ code: يُحسَب هنا من جهة الخادم دائماً، حتى لو أرسل
         // العميل قيمة (تُتجاهَل — لا نقرأها من body أعلاه إطلاقاً بعد هذا السطر).
         data.code = await computeNextStudentCode(tx);
-        return tx.students.create({ data });
+        const created = await tx.students.create({ data });
+        // Phase 1 (Multi-Group Enrollment) — an initial groupId at creation is a Primary
+        // Group assignment; route it through the enrollment service in the same
+        // transaction so the new student never ends up with students.group_id set but no
+        // matching active Primary enrollment row (setPrimaryGroupTx's own students.update
+        // is a harmless no-op write here — the value already matches — kept for one
+        // single source of truth on "how a Primary Group gets set" rather than a second,
+        // creation-only copy of that logic).
+        if (data.group_id) {
+          await setPrimaryGroupTx(tx, created.id, data.group_id, { effectiveDate: data.enroll_date });
+        }
+        return created;
       });
       return serializeBigInt(snakeToCamel(row));
     } catch (err) {
