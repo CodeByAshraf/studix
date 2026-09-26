@@ -26,14 +26,18 @@ function logError(label, error, info) {
     // بشكل دائم — لا مستخدم وهمي، لا نص عربي كـ user_id إطلاقاً. لا toast متاح هنا (خارج
     // شجرة React) — فشل الكتابة يبقى صامتاً هنا فقط (console.error)، بلا أي localStorage
     // fallback (لا تغيير في هذا الجزء — لم يكن موجوداً هنا أصلاً).
-    try {
-      const { useAppStore } = require('../store/app.store');
+    // D2 fix (Pre-Installer Audit): require() doesn't exist in the Vite/ESM browser
+    // bundle — it threw a ReferenceError here on every crash, silently swallowed by this
+    // very try/catch, so activity-log crash reporting never actually ran. A dynamic
+    // import() is valid ESM and keeps the same best-effort semantics (store unavailable /
+    // no session / server failure all stay silent, never block the boundary's own render).
+    import('../store/app.store').then(({ useAppStore }) => {
       useAppStore.getState().addLog({
         action:      'error',
         module:      label || 'ui',
         description: `خطأ في الواجهة: ${entry.msg.slice(0, 120)}`,
       }).catch(() => { /* لا جلسة سارية، أو فشل الخادم — best-effort فقط */ });
-    } catch { /* store may not be ready */ }
+    }).catch(() => { /* store may not be ready */ });
   } catch { /* silent */ }
   console.error(`[TC Error][${label}]`, error?.message);
 }

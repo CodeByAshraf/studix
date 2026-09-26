@@ -13,7 +13,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import path from 'path';
 import { checkPostgresReachable, setupScratchDb, teardownScratchDb } from '../test-helpers/scratchDb.js';
 import { applyFullSchemaDDL } from '../test-helpers/scratchDbFullSchema.js';
-import { runMigrations, discoverMigrationFiles } from './migrationRunner.js';
+import { runMigrations, discoverMigrationFiles, splitSqlStatements } from './migrationRunner.js';
 
 const dbCheck = await checkPostgresReachable();
 const REAL_MIGRATIONS_DIR = path.join(process.cwd(), 'migrations');
@@ -176,16 +176,39 @@ describe('license_config — Phase 5a schema-only migration (real scratch databa
     });
   });
 
-  describe('Phase 5e (migration 004) — existing installation with an already-activated license upgrades without disruption', () => {
+  describe('existing installation with migrations 1-3 already applied (pre-004) upgrades through ALL currently-pending migrations without disruption', () => {
+    // D3 fix (Pre-Installer Audit): this fixture used to only INSERT fake
+    // _studix_migrations rows for versions 1-3 without ever executing their SQL, so
+    // set_updated_at()/prevent_delete() etc (created by 001_baseline.sql, supplemental DDL
+    // — not representable in schema.prisma, so `db push` never creates them either) never
+    // actually existed on this scratch DB. Migration 005 relies on set_updated_at() for
+    // its trigger, so the upgrade failed with "function public.set_updated_at() does not
+    // exist" the moment a 5th+ migration was added — meaning this test provided ZERO real
+    // verification of the upgrade path once 005-008 existed, despite still reporting green
+    // (it errored out before its own assertions ran and vitest recorded that as a failure
+    // masked by an unrelated-looking Postgres error, easy to miss in a large suite).
+    //
+    // Fix: actually EXECUTE migrations 1-3's real SQL (all three are supplemental DDL only
+    // — functions/triggers/constraints/`CREATE TABLE IF NOT EXISTS`/`ADD COLUMN IF NOT
+    // EXISTS` — never a bare CREATE TABLE for a table `db push` already created, so this is
+    // safe to layer on top of the scratch DB's push'd schema), THEN stamp the real tracking
+    // rows for 1-3 — a genuine "installation upgraded incrementally to migration 3" state,
+    // not a simulated one. This mirrors the pattern already proven in the sibling
+    // "existing installation upgrading to Phase 5a" describe block above, which runs the
+    // full 1-N chain for real from empty and passes.
     let scratch;
+    let preExistingVersions;
     beforeAll(async () => {
-      scratch = await setupScratchDb('licensecfg_upgrade5e');
-      // simulate a real production installation that reached its current state through the
-      // INCREMENTAL migration path (not the schema-artifact/installer path) and had already
-      // applied migrations 1-3 for real, before migration 004 existed — a genuine
-      // _studix_migrations history for versions 1-3 only, with real checksums matching the
-      // files on disk (checksum verification must pass, exactly as it would in production).
-      const realFiles = discoverMigrationFiles(REAL_MIGRATIONS_DIR).filter((f) => f.version <= 3);
+      scratch = await setupScratchDb('licensecfg_upgrade_incremental');
+      const allFiles = discoverMigrationFiles(REAL_MIGRATIONS_DIR);
+      const realFiles = allFiles.filter((f) => f.version <= 3);
+      preExistingVersions = realFiles.map((f) => f.version);
+
+      for (const f of realFiles) {
+        for (const sql of splitSqlStatements(f.content)) {
+          await scratch.client.$executeRawUnsafe(sql);
+        }
+      }
       await scratch.client.$executeRawUnsafe(`
         CREATE TABLE IF NOT EXISTS _studix_migrations (
           version INTEGER PRIMARY KEY, name TEXT NOT NULL, checksum TEXT NOT NULL,
@@ -209,18 +232,36 @@ fake
     }, 60_000);
     afterAll(async () => { if (scratch) await teardownScratchDb(scratch); });
 
-    it('migration 004 is the only pending file and applies for real (not stamped), without touching the existing activated row', async () => {
+    it('every migration file after version 3 is pending and applies for real (not stamped), without touching the existing activated row', async () => {
+      const expectedPendingVersions = discoverMigrationFiles(REAL_MIGRATIONS_DIR)
+        .map((f) => f.version)
+        .filter((v) => !preExistingVersions.includes(v));
+      // Guards this test itself against silently degrading back to a 1-file no-op check —
+      // if this ever reads 0 it means the fixture's own baseline drifted, not that upgrades
+      // have nothing to prove.
+      expect(expectedPendingVersions.length).toBeGreaterThan(0);
+
       const result = await runMigrations(scratch.client, {
         migrationsDir: REAL_MIGRATIONS_DIR, databaseUrl: scratch.scratchUrl, backup: okBackup,
       });
       expect(result.action).toBe('migrated');
-      expect(result.versions).toEqual([4]);
+      expect(result.versions).toEqual(expectedPendingVersions);
 
       const row = await scratch.client.license_config.findUnique({ where: { id: 1 } });
       expect(row.license_id).toBe('lic_pre_5e');
       expect(row.license_artifact).toBe('fake.artifact');
       expect(row.activated_at).not.toBeNull();
       expect(row.clock_high_water_mark_at).toBeNull(); // no backfill — lazily established on next status check
+
+      // Proves the chain didn't just report success but actually reached migrations well
+      // past 004 — an object only migration 005 creates now genuinely exists.
+      const enrollmentsTable = await scratch.client.$queryRaw`
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'student_group_enrollments'`;
+      expect(enrollmentsTable.length).toBe(1);
+      const enrollmentsTrigger = await scratch.client.$queryRaw`
+        SELECT tgname FROM pg_trigger WHERE tgname = 'trg_student_group_enrollments_updated'`;
+      expect(enrollmentsTrigger.length).toBe(1);
     });
 
     it('a second run is a pure no-op (idempotent rerun)', async () => {
