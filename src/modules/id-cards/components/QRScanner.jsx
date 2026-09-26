@@ -1,11 +1,10 @@
 // src/modules/id-cards/components/QRScanner.jsx
 // Simulates QR scanner — in production wire to react-qr-scanner or camera API
 import { useAppStore } from '../../../store/app.store';
-import { useAuth }     from '../../../store/auth.context';
 import { useState, useCallback, useRef } from 'react';
 import { useToast } from '../../../components/Toast';
 import { formatDate } from '../../../utils/helpers';
-import { pgGetAttendance } from '../../../services/api';
+import { pgGetAttendance, pgCheckInAttendance } from '../../../services/api';
 
 const AV_PAL = [
   {bg:'rgba(59,130,246,.2)',color:'#3b82f6'},{bg:'rgba(16,185,129,.2)',color:'#10b981'},
@@ -18,7 +17,7 @@ export default function QRScanner() {
   const groups               = useAppStore((s) => s.groups);
   const setAttendance        = useAppStore((s) => s.setAttendance);
   const students             = useAppStore((s) => s.students);
-  const { currentUser } = useAuth();
+  const addLog               = useAppStore((s) => s.addLog);
   const toast = useToast();
 
   const [manualCode, setManualCode]   = useState('');
@@ -76,20 +75,41 @@ export default function QRScanner() {
       return;
     }
 
-    // Record attendance
+    // Record attendance — P1-2: persisted to PostgreSQL first (POST .../check-in, same server
+    // rules as a full session save: permission, completed-session lock, enrollment
+    // eligibility, duplicate protection). Local state and the success message only follow a
+    // confirmed server write; on failure nothing local changes and the real error is shown.
+    if (!studentObj.groupId) {
+      toast.error(`${studentObj.name} — غير مسجَّل في مجموعة، لا يمكن تسجيل حضوره بالمسح`);
+      setLastScan({ error: true, code, time: new Date().toLocaleTimeString('ar-EG') });
+      return;
+    }
     const group = groups.find(g => g.id === studentObj.groupId);
-    const newRecord = {
-      id:          `att_qr_${Date.now()}`,
-      studentId,
-      groupId:     studentObj.groupId,
-      date:        today,
-      status:      scanType,
-      sessionTime: new Date().toLocaleTimeString('ar-EG', { hour:'2-digit', minute:'2-digit' }),
-      recordedBy:  currentUser?.name || 'QR Scanner',
-      method:      'qr',
-    };
+    let newRecord;
+    try {
+      newRecord = await pgCheckInAttendance(studentObj.groupId, today, {
+        studentId,
+        status:      scanType,
+        sessionTime: new Date().toLocaleTimeString('ar-EG', { hour:'2-digit', minute:'2-digit' }),
+      });
+    } catch (e) {
+      if (e.code === 'ATTENDANCE_EXISTS') {
+        toast.warning(`${studentObj.name} — تم تسجيله مسبقاً اليوم`);
+      } else {
+        toast.error(e.message || 'فشل تسجيل الحضور — لم يُحفَظ، حاول مرة أخرى');
+      }
+      setLastScan({ error: true, code, time: new Date().toLocaleTimeString('ar-EG') });
+      return;
+    }
 
-    setAttendance(prev => [...prev, newRecord]);
+    setAttendance(prev => [...prev.filter(r => r.id !== newRecord.id), newRecord]);
+    addLog({
+      action:      'create',
+      module:      'attendance',
+      entityType:  'attendance',
+      entityId:    newRecord.id,
+      description: `حضور بالمسح (QR): ${studentObj.name} — ${group?.name || ''} — ${today}`,
+    }).catch((e) => toast.error(e.message || 'تعذّر تسجيل الحدث في سجل النشاط'));
 
     const scanEntry = {
       student:     studentObj,
@@ -104,7 +124,7 @@ export default function QRScanner() {
     toast.success(`✓ ${studentObj.name} — ${scanType === 'present' ? 'تم تسجيل الحضور' : scanType === 'late' ? 'تسجيل متأخر' : 'تم التسجيل'}`);
     setManualCode('');
     inputRef.current?.focus();
-  }, [students, groups, setAttendance, scanType, today, currentUser, toast]);
+  }, [students, groups, setAttendance, addLog, scanType, today, toast]);
 
   const handleKeyDown = (e) => {
     if (e.key === 'Enter') processCode(manualCode);

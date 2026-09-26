@@ -202,6 +202,80 @@ export async function completeAttendanceSession({ groupId, date }, { userId = nu
   return { ...snakeToCamel(updated), date: toDateOnly(updated.date) };
 }
 
+// P1-2 (QR attendance persistence) — records ONE student's attendance for (groupId, date),
+// for the QR check-in flow. It deliberately does NOT reuse saveAttendanceSession's
+// "replace the whole session" semantics: a single scan re-sending the full roster would be a
+// read-modify-write that could delete another student's row saved concurrently (e.g. two
+// scans, or SessionMarking saving at the same time). Same rules, same transaction shape:
+//   - the session row is created if missing (INSERT ... ON CONFLICT DO NOTHING, race-free)
+//     and then locked FOR UPDATE; a 'completed' session is rejected (409), exactly like
+//     saveAttendanceSession;
+//   - the student must be eligible for this group/date (attendanceEligibility.js);
+//   - an existing row for (student, date, group) is never overwritten — the scan is
+//     rejected with code ATTENDANCE_EXISTS (the uq_attendance_student_date_group key is the
+//     final guard; concurrent scans of the same student serialize on the session lock).
+// Other students' rows are never touched.
+export const ATTENDANCE_EXISTS = 'ATTENDANCE_EXISTS';
+
+export async function checkInStudent({ groupId, date, studentId, status, sessionTime }) {
+  if (typeof groupId !== 'string' || !groupId.trim()) throw badRequest('groupId مطلوب.');
+  if (typeof date !== 'string' || !DATE_RE.test(date)) throw badRequest('date يجب أن يكون بصيغة YYYY-MM-DD.');
+  if (typeof studentId !== 'string' || !studentId.trim()) throw badRequest('studentId مطلوب.');
+  if (!VALID_STATUSES.has(status)) {
+    throw badRequest(`status غير صالح: "${status}". القيم المسموحة: present/absent/late.`);
+  }
+
+  const group = await prisma.groups.findUnique({ where: { id: groupId }, select: { id: true } });
+  if (!group) throw badRequest('المجموعة غير موجودة.');
+
+  const dateObj = new Date(`${date}T00:00:00.000Z`);
+  const finalSessionTime = sessionTime || null;
+
+  const record = await runInTransaction(async (tx) => {
+    await tx.$executeRaw`
+      INSERT INTO public.attendance_sessions (id, group_id, date, session_time)
+      VALUES (${crypto.randomUUID()}, ${groupId}, ${date}::date, ${finalSessionTime})
+      ON CONFLICT (group_id, date) DO NOTHING
+    `;
+    const lockedRows = await tx.$queryRaw`
+      SELECT id, status FROM public.attendance_sessions
+      WHERE group_id = ${groupId} AND date = ${date}::date FOR UPDATE
+    `;
+    const session = lockedRows[0] || null;
+    if (!session) throw conflict('تعذّر إنشاء جلسة الحضور — حاول مرة أخرى.');
+    if (session.status === 'completed') {
+      throw conflict('الجلسة مكتملة — لا يمكن تعديل الحضور بعد اكتمالها.');
+    }
+
+    if (!(await isStudentEligibleForGroupDate(studentId, groupId, dateObj, tx))) {
+      throw badRequest(`الطالب غير مؤهَّل لحضور هذه المجموعة في هذا التاريخ: ${studentId}`);
+    }
+
+    const existing = await tx.attendance.findUnique({
+      where: { student_id_date_group_id: { student_id: studentId, date: dateObj, group_id: groupId } },
+    });
+    if (existing) {
+      const err = conflict('تم تسجيل حضور هذا الطالب مسبقاً لهذه المجموعة في هذا التاريخ.');
+      err.code = ATTENDANCE_EXISTS;
+      throw err;
+    }
+
+    return tx.attendance.create({
+      data: {
+        id: crypto.randomUUID(),
+        student_id: studentId,
+        group_id: groupId,
+        date: dateObj,
+        status,
+        session_time: finalSessionTime,
+      },
+    });
+  });
+
+  const shaped = snakeToCamel(record);
+  return { ...shaped, date: toDateOnly(shaped.date) };
+}
+
 const router = Router();
 
 // GET /api/attendance-sessions/:groupId/:date/roster — Group Closure (Attendance
@@ -225,6 +299,23 @@ router.put('/:groupId/:date', asyncHandler(async (req, res) => {
   const { sessionTime, records } = req.body || {};
   const data = await saveAttendanceSession({ groupId, date, sessionTime, records });
   res.json({ ok: true, data });
+}));
+
+// POST /api/attendance-sessions/:groupId/:date/check-in — P1-2: QR check-in of ONE student
+// (see checkInStudent above). A duplicate answers 409 with code ATTENDANCE_EXISTS so the
+// client can show "already recorded" rather than a generic failure.
+router.post('/:groupId/:date/check-in', asyncHandler(async (req, res) => {
+  const { groupId, date } = req.params;
+  const { studentId, status, sessionTime } = req.body || {};
+  try {
+    const data = await checkInStudent({ groupId, date, studentId, status, sessionTime });
+    res.status(201).json({ ok: true, data });
+  } catch (err) {
+    if (err.code === ATTENDANCE_EXISTS) {
+      return res.status(409).json({ ok: false, code: ATTENDANCE_EXISTS, error: err.message });
+    }
+    throw err;
+  }
 }));
 
 // PUT /api/attendance-sessions/:groupId/:date/complete — قفل جلسة الحضور نهائياً.

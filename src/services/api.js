@@ -551,6 +551,26 @@ export async function pgSaveAttendanceSession(groupId, date, sessionTime, record
   return json.data; // { groupId, date, sessionTime, records: [...] }
 }
 
+// P1-2 — pgCheckInAttendance: POST /api/attendance-sessions/:groupId/:date/check-in. Records
+// ONE student's attendance (QR check-in) under the same server rules as a full session save,
+// without replacing the rest of the session. A duplicate answers 409 with
+// code 'ATTENDANCE_EXISTS' — carried on the thrown error so the caller can tell it apart.
+export async function pgCheckInAttendance(groupId, date, { studentId, status, sessionTime }) {
+  const res = await fetch(`${PG_API_BASE}/api/attendance-sessions/${encodeURIComponent(groupId)}/${encodeURIComponent(date)}/check-in`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ studentId, status, sessionTime }),
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) {
+    const err = new Error(json?.error || `PG POST /attendance-sessions/${groupId}/${date}/check-in → ${res.status}`);
+    if (json?.code) err.code = json.code;
+    throw err;
+  }
+  return json.data; // { id, studentId, groupId, date: 'YYYY-MM-DD', status, sessionTime, createdAt }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Recitation Assessment Phase 3 — يُبنى على جلسة الحضور الموجودة بالفعل (attendance
 // session id) ولا يُنشئها إطلاقاً هنا؛ الخادم (recitations.js) هو المصدر الوحيد للحقيقة.

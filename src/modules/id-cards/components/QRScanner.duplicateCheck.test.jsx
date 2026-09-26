@@ -1,8 +1,8 @@
 // src/modules/id-cards/components/QRScanner.duplicateCheck.test.jsx
 // C4 Attendance Batch A — the same-day duplicate check now uses
 // GET /api/attendance?studentId=&date= instead of scanning the full global attendance array.
-// The simulated write path (setAttendance/newRecord) is explicitly out of scope and untouched
-// — not exercised or asserted on here beyond confirming a normal check-in still proceeds.
+// The write path is covered by QRScanner.persistence.test.jsx (P1-2); here pgCheckInAttendance
+// is only mocked to succeed so a normal check-in can still be confirmed to proceed.
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom';
@@ -13,9 +13,9 @@ import { ToastProvider } from '../../../components/Toast';
 
 vi.mock('../../../services/api', async () => {
   const actual = await vi.importActual('../../../services/api');
-  return { ...actual, pgGetAttendance: vi.fn() };
+  return { ...actual, pgGetAttendance: vi.fn(), pgCheckInAttendance: vi.fn() };
 });
-import { pgGetAttendance } from '../../../services/api';
+import { pgGetAttendance, pgCheckInAttendance } from '../../../services/api';
 
 const S1 = { id: 's1', name: 'أحمد علي', code: 'C001', groupId: 'g1', status: 'active' };
 
@@ -38,7 +38,12 @@ function scan(code) {
 describe('QRScanner — same-day duplicate check (C4 Attendance Batch A)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    useAppStore.setState({ students: [S1], groups: [{ id: 'g1', name: 'مجموعة أ' }], attendance: [] });
+    useAppStore.setState({
+      students: [S1], groups: [{ id: 'g1', name: 'مجموعة أ' }], attendance: [],
+      addLog: vi.fn().mockResolvedValue({ id: 'log1' }),
+    });
+    pgCheckInAttendance.mockImplementation((groupId, date, { studentId, status }) =>
+      Promise.resolve({ id: 'att-srv-1', studentId, groupId, date, status, sessionTime: null }));
   });
 
   it('calls GET /api/attendance?studentId=&date=<today> with the scanned student and today\'s date', async () => {
