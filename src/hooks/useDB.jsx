@@ -11,6 +11,8 @@
 import { useEffect, useState } from 'react';
 import { useAppStore }         from '../store/app.store';
 import { loadFromPostgres } from '../store/db.middleware';
+import { pgGetDatabaseIdentity } from '../services/api';
+import { checkDatabaseIdentityAndInvalidate } from '../store/dbIdentity';
 
 export function useDB() {
   const [status, setStatus] = useState('checking'); // checking | connected | partial | offline
@@ -20,6 +22,20 @@ export function useDB() {
 
     async function init() {
       setStatus('checking');
+      // Phase 2C-3C Part 4 — فحص هوية قاعدة البيانات النشطة قبل أي تحميل بيانات، حتى
+      // يُكتشَف تبديل قاعدة بيانات حدث بينما هذا المتصفح كان مغلقاً/غير متصل قبل أن يُخلَط
+      // localStorage['studix-v1'] القديم مع بيانات القاعدة الجديدة (checkDatabaseIdentity
+      // AndInvalidate يمسح الحالة القديمة فقط عند اكتشاف تغيّر فعلي — لا يلمس شيئاً غير
+      // ذلك). GET /api/db-identity محمي admin-only حصراً بالخادم (Part 3) — لمستخدم غير
+      // مدير يعود pgGetDatabaseIdentity بـ {ok:false} بأمان (لا يرمي أبداً)، وcheckDatabase
+      // IdentityAndInvalidate يتجاهل remoteIdentity الفارغة أصلاً، فهذا تخطٍّ آمن بلا أي
+      // مسح خاطئ للحالة — ثغرة تفويض موثَّقة صراحة في التقرير النهائي لهذه المرحلة، لا
+      // إصلاح خلفي هنا (خارج نطاق هذه المرحلة).
+      try {
+        const identityResult = await pgGetDatabaseIdentity();
+        if (mounted && identityResult.ok) checkDatabaseIdentityAndInvalidate(identityResult.identity);
+      } catch { /* best-effort — لا يوقف تسلسل الإقلاع الحالي إطلاقاً */ }
+
       // Phase 1: جرّب PostgreSQL (قراءة فقط، لا يمسح localStorage الفارغ)
       const pg = await loadFromPostgres((updater) => {
         useAppStore.setState(updater);

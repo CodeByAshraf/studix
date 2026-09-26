@@ -38,10 +38,32 @@
 ; and is a separate helper from TeardownServiceForWipe (OD3) — see
 ; migration/reports/INSTALL-09_UNINSTALL_SERVICE_CLEANUP.md. InitializeUninstall, D1-D5's
 ; wipe behavior, and all INSTALL-06/07 install-time code are unchanged.
+;
+; New-installer Phase 1 — single version source of truth. MyAppVersion used to be an
+; independently hardcoded literal here, drifting from backend/package.json's own "version" by
+; hand. It is now #include'd from version.generated.iss, written by
+; scripts/build-windows-runtime.ps1 from backend/package.json on every build — one authoritative
+; version, no second copy to keep in sync. This intentionally fails the compile (missing
+; #include) rather than silently falling back to any other value if the build script hasn't run
+; yet. Nothing else in this file changed: AppId, install paths, and all install/uninstall
+; behavior are exactly as before.
+;
+; New-installer Phase 3 — boot-time Scheduled Task (StudixStartupOrchestrator) registration.
+; No change to THIS file: registration/idempotent correction is fully self-contained inside
+; backend/src/installer/firstInstall.js's own runFirstInstall() sequencing, invoked wholesale by
+; this script's existing single RunFirstInstall() Exec() call below — no new Exec() call, no new
+; Pascal Script logic needed for registration.
+;
+; New-installer Phase 4 — best-effort Scheduled Task cleanup on uninstall (see
+; BestEffortRemoveScheduledTask/CurUninstallStepChanged below). Removes Phase 3's task via a new
+; dedicated CLI (backend/scripts/manageScheduledTask.js), reusing the exact same Exec()-a-thin-
+; Node-CLI mechanism as BestEffortUnregisterServiceForUninstall (INSTALL-09) — independent of,
+; and without weakening, the existing fail-closed D1-D5 wipe/service-teardown protections.
 ; ─────────────────────────────────────────────────────────────
 
 #define MyAppName "Studix"
-#define MyAppVersion "1.0.0"
+; MyAppVersion is defined by this include, not here — see comment above.
+#include "version.generated.iss"
 #define MyAppPublisher "Studix"
 
 [Setup]
@@ -84,6 +106,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 ; enumerate those subdirectories individually.
 [Dirs]
 Name: "{commonappdata}\Studix"; Permissions: admins-full system-full
+Name: "{commonappdata}\Studix\logs"
 
 [Files]
 ; The entire INSTALL-01..06-assembled runtime package (release\win-x64\studix\ — node\,
@@ -395,6 +418,34 @@ begin
         IntToStr(ResultCode) + ' (0/already-unregistered are both fine).');
 end;
 
+// ── New-installer Phase 4 — best-effort Scheduled Task cleanup ──────────────────────────────
+// Removes Phase 3's boot-time task (StudixStartupOrchestrator) during uninstall. Best-effort/
+// non-fatal, exactly like BestEffortUnregisterServiceForUninstall above — a failure here never
+// blocks uninstall and never changes whether application data is deleted; it is intentionally
+// independent of D1-D5's fail-closed service-teardown/data-wipe gate (TeardownServiceForWipe),
+// which is left completely unchanged. Reuses the SAME Exec()-against-bundled-node.exe mechanism
+// (decision #1) via a dedicated thin CLI (backend/scripts/manageScheduledTask.js) over
+// lib/scheduledTask.js's removeStartupTask() — never reimplements schtasks logic in Pascal
+// Script, and never touches Phase 3's registration/configuration logic.
+procedure BestEffortRemoveScheduledTask();
+var
+  NodeExe, ManageScript: String;
+  ResultCode: Integer;
+begin
+  NodeExe := ExpandConstant('{app}\node\node.exe');
+  ManageScript := ExpandConstant('{app}\backend\scripts\manageScheduledTask.js');
+  if not FileExists(ManageScript) then
+    Exit; // nothing installed here to remove (e.g. an upgrade from a pre-Phase-3 build)
+
+  if not Exec(NodeExe, '"' + ManageScript + '" remove', ExpandConstant('{app}'),
+              SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    Log('Phase 4: could not even launch manageScheduledTask.js to remove StudixStartupOrchestrator ' +
+        '— continuing anyway (best-effort, non-fatal).')
+  else
+    Log('Phase 4: remove of StudixStartupOrchestrator exited with code ' + IntToStr(ResultCode) +
+        ' (0/already-absent are both fine).');
+end;
+
 // CurUninstallStepChanged: two independent branches.
 //
 // usUninstall (INSTALL-09) — fires AFTER Inno's own "are you sure you want to remove Studix?"
@@ -417,12 +468,23 @@ end;
 // pgdata\, config\, and logs\ INDIVIDUALLY — never the {commonappdata}\Studix root itself, and
 // never backups\ (D2) — so the parent directory and its backups\ subdirectory both survive
 // exactly as decision #5's original ACL/[Dirs] entry left them.
+//
+// Phase 4 — BestEffortRemoveScheduledTask() is called here, in usUninstall, for BOTH the normal
+// and the opt-in-wipe uninstall path: usUninstall always fires (unconditionally, every
+// uninstall) strictly before usPostUninstall's destructive DelTree calls below, so a single call
+// site here already satisfies "remove the task before application files are removed" AND
+// "remove the task before destructive data deletion" — no second call inside
+// InitializeUninstall's wipe branch is needed, and none was added (no new call sites duplicate
+// this cleanup). If the wipe's own fail-closed teardown aborts the uninstall entirely
+// (InitializeUninstall returning False), usUninstall never runs and the task is correctly left
+// untouched, exactly like every other uninstall action in that abort path.
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usUninstall then
   begin
     BestEffortUnregisterServiceForUninstall('app');      // app first — it depends on Postgres
     BestEffortUnregisterServiceForUninstall('postgres'); // then Postgres
+    BestEffortRemoveScheduledTask();                     // independent of service teardown order
   end;
 
   if (CurUninstallStep = usPostUninstall) and WipeDataConfirmed then

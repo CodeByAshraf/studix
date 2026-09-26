@@ -1547,3 +1547,54 @@ export async function pgProbeActivation() {
     return { blocked: null }; // تعذّر الوصول للخادم أصلاً — حالة مختلفة عن "محجوب"، تُعامَل بشكل منفصل
   }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 2C-3C Part 4 — Database Identity/Switch (يستهلك مسارات الباك-إند من Part 2
+// (POST /api/db-switch) وPart 3 (GET /api/db-identity) كما هي تماماً، بلا أي تعديل عليها
+// أو على الآلية خلفهما — لا فحص/توليد/استنتاج هوية قاعدة بيانات من هذا الملف أو أي مكان
+// آخر في الفرونت-إند إطلاقاً؛ الخادم هو المرجع الوحيد المُعتمَد دائماً.
+//
+// كلا المسارين admin-only حصراً بالخادم (requireRole('admin') — نفس حارس License/Support
+// Access بالضبط). لهذا تحديداً pgGetDatabaseIdentity لا يرمي أبداً (نفس اتفاقية
+// pgCheckHealth/pgProbeActivation بالضبط) — يُستدعى من نقاط إقلاع/تسجيل دخول لكل مستخدم
+// مسجَّل دخول، لا الإداريين فقط؛ فشل 401/403 لمستخدم غير مدير هو النتيجة المتوقَّعة
+// والآمنة تماماً هنا (لا هوية جديدة لمقارنتها — src/store/dbIdentity.js's checkDatabase
+// IdentityAndInvalidate يتجاهل remoteIdentity الفارغة أصلاً)، وليس عطلاً يستحقّ رمي
+// استثناء يُوقِف تسلسل الإقلاع.
+// ═══════════════════════════════════════════════════════════════════════════
+
+export async function pgGetDatabaseIdentity() {
+  try {
+    const res = await fetch(`${PG_API_BASE}/api/db-identity`, {
+      credentials: 'include',
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return { ok: false, identity: null };
+    const json = await res.json().catch(() => null);
+    return { ok: !!json?.ok, identity: json?.identity ?? null };
+  } catch {
+    return { ok: false, identity: null };
+  }
+}
+
+// pgTriggerDatabaseSwitch: POST /api/db-switch — action محدود صراحةً {switch|rollback}
+// فقط، يُرفض محلياً أي قيمة أخرى قبل أي طلب شبكة (دفاع في العمق — الخادم يرفضها أيضاً،
+// انظر backend/src/routes/dbSwitch.js). لا مهلة زمنية قصيرة هنا عمداً (بعكس pgCheckHealth/
+// pgGetCollection) — العملية الفعلية (إيقاف/إعادة تسمية/بدء/تحقّق صحّي عميق) قد تستغرق
+// حتى خمس دقائق بتصميم الخادم نفسه (databaseSwitch.js's spawnDbSwitchCli timeout)، فمهلة
+// قصيرة هنا كانت ستُلغي الطلب قبل اكتمال عملية لا تزال تعمل فعلياً على الخادم.
+const DB_SWITCH_ACTIONS = new Set(['switch', 'rollback']);
+export async function pgTriggerDatabaseSwitch(action) {
+  if (!DB_SWITCH_ACTIONS.has(action)) {
+    throw new Error(`إجراء غير مدعوم: "${action}".`);
+  }
+  const res = await fetch(`${PG_API_BASE}/api/db-switch`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action }),
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG POST /db-switch → ${res.status}`);
+  return json; // { ok, action, status }
+}

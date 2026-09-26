@@ -181,6 +181,15 @@ function waitUntil(check, io) {
   }
 }
 
+// waitUntilServiceState: exposes the same ground-truth SCM polling stopService/unregister*
+// already use internally, for a caller that needs to wait for a state OTHER than STOPPED (e.g.
+// RUNNING after `sc start`, which — unlike stopService below — returns as soon as the start
+// request is accepted, not once the service is genuinely running). Same io-injected
+// sleepSync/timeoutMs/pollIntervalMs convention as every other polling call in this module.
+export function waitUntilServiceState(serviceName, targetState, io = {}) {
+  return waitUntil(() => queryServiceState(serviceName, io) === targetState, io);
+}
+
 // ── generic lifecycle — identical mechanism for both services once registered ───────────────
 export function startService(serviceName, io = {}) {
   const stateBefore = queryServiceState(serviceName, io);
@@ -389,6 +398,21 @@ function isOurAppService({ serviceName, nssmPath, nodeExe, serverJs }, io) {
   return { matches: false, legacyUnquoted: false };
 }
 
+// STUDIX_APP_START_TYPE: new-installer Phase 2 — DEMAND_START, not AUTO_START. StudixApp's
+// startup is intended to become gated entirely by a future Scheduled Task running
+// startupOrchestrator.js (PostgreSQL readiness -> restore recovery -> THEN start StudixApp),
+// never by the SCM's own dependency ordering — a SERVICE_AUTO_START StudixApp would let Windows
+// start it directly at boot (its DependOnService only proves StudixPostgreSQL's *service*
+// reported RUNNING, never that Postgres finished crash recovery/WAL replay or that a pending
+// restore/rollback was resumed), bypassing the orchestrator entirely. Only StudixApp changes —
+// StudixPostgreSQL (registerPostgresService, `-S auto`) is deliberately untouched and MUST stay
+// AUTO_START: it's the orchestrator's own waitForPostgresReady() that verifies real readiness,
+// not the service's start type. Scheduled Task registration itself is a separate, later phase —
+// this only ensures the SCM can never race ahead of it once it exists. firstInstall.js's own
+// explicit startServiceFn(STUDIX_APP_SERVICE_NAME) call right after registration is unaffected —
+// DEMAND_START services can still be started on command exactly like AUTO_START ones.
+const STUDIX_APP_START_TYPE = 'SERVICE_DEMAND_START';
+
 export function registerAppService({
   installRoot = resolveInstallRoot(),
   serviceName = STUDIX_APP_SERVICE_NAME,
@@ -416,6 +440,8 @@ export function registerAppService({
         '— لن يُعاد تسجيلها أو استبدالها تلقائياً. راجعها يدوياً.'
       );
     }
+
+    let appParamsRepaired = false;
     if (verification.legacyUnquoted) {
       // Repair in place — NSSM's own `set` updates just this one stored field on the existing
       // service; never unregister/reinstall (destructive-adjacent, and unnecessary — every other
@@ -429,15 +455,36 @@ export function registerAppService({
           `تعذّر تصحيح إعداد AppParameters القديم (غير المُقتبَس) لخدمة "${serviceName}": ${err.message}`
         );
       }
-      return { status: 'repaired', serviceName };
+      appParamsRepaired = true;
     }
+
+    // Phase 2 upgrade correction — an existing StudixApp registered before this phase (or by
+    // NSSM's own historical default) is almost certainly still SERVICE_AUTO_START. Reuses
+    // queryServiceConfig's already-parsed `startType` (from `sc qc`, the same field
+    // isOurPostgresService's caller reads elsewhere) rather than adding a second sc.exe parsing
+    // path, and corrects it the same way every other NSSM-managed field on this service is ever
+    // touched — one `nssm set`, never an unregister/reinstall.
+    const startTypeCorrected = existing.startType !== 'DEMAND_START';
+    if (startTypeCorrected) {
+      try {
+        runExec(nssmPath, ['set', serviceName, 'Start', STUDIX_APP_START_TYPE], io);
+      } catch (err) {
+        throw new WindowsServiceError(
+          'start_type_correction_failed',
+          `تعذّر تصحيح نوع بدء تشغيل خدمة "${serviceName}" إلى يدوي (DEMAND_START): ${err.message}`
+        );
+      }
+    }
+
+    if (appParamsRepaired) return { status: 'repaired', serviceName };
+    if (startTypeCorrected) return { status: 'corrected', serviceName };
     return { status: 'already_registered', serviceName };
   }
 
   try {
     runExec(nssmPath, ['install', serviceName, nodeExe, quoteNssmParam(serverJs)], io);
     runExec(nssmPath, ['set', serviceName, 'AppDirectory', installRoot], io);
-    runExec(nssmPath, ['set', serviceName, 'Start', 'SERVICE_AUTO_START'], io);
+    runExec(nssmPath, ['set', serviceName, 'Start', STUDIX_APP_START_TYPE], io);
     runExec(nssmPath, ['set', serviceName, 'DependOnService', dependsOnServiceName], io);
     runExec(nssmPath, ['set', serviceName, 'AppStdout', path.join(resolveLogDir(), 'studix-app-service-stdout.log')], io);
     runExec(nssmPath, ['set', serviceName, 'AppStderr', path.join(resolveLogDir(), 'studix-app-service-stderr.log')], io);

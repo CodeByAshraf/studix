@@ -52,6 +52,8 @@ import usersRouter from './routes/users.js';
 import rolesRouter from './routes/roles.js';
 import supportAccessRouter from './routes/supportAccess.js';
 import licenseRouter from './routes/license.js';
+import dbSwitchRouter from './routes/dbSwitch.js';
+import dbIdentityRouter from './routes/dbIdentity.js';
 import { COLLECTION_MODELS } from './routes/collections.js';
 import { notFound, errorHandler, asyncHandler } from './middleware/errorHandler.js';
 import { requireAuth, requireRole } from './middleware/auth.js';
@@ -298,6 +300,21 @@ app.use('/api/support-access', requireAuth, requireRole('admin'), supportAccessR
 // requireActivation أعلاه صراحة (بادئة '/api/license' في القائمة البيضاء) — بديهياً: لا
 // يمكن أن يتطلّب الوصول لمسار التفعيل نفسه تفعيلاً مسبقاً.
 app.use('/api/license', requireAuth, requireRole('admin'), licenseRouter);
+
+// ── Phase 2C-3C Part 2: Database Switch/Rollback — authenticated HTTP trigger ──
+// نفس حارس Support Access/License بالضبط (role === 'admin' حرفياً) — قدرة حسّاسة أخطر منها:
+// تشغّل عملية استبدال قاعدة البيانات الفعلية عبر تشغيل عملية CLI منفصلة (databaseSwitch.js)
+// — هذا المسار نفسه لا يستورد databaseSwitch.js ولا يتصل بـ PostgreSQL مباشرة إطلاقاً (انظر
+// تعليق dbSwitch.js الخاص به). لا واجهة أمامية بعد تستخدم هذا المسار.
+app.use('/api/db-switch', requireAuth, requireRole('admin'), dbSwitchRouter);
+
+// ── Phase 2C-3C Part 3: Database Identity — authenticated read-only marker endpoint ──
+// نفس حارس db-switch/support-access/license بالضبط (role === 'admin' حرفياً) — قرار صريح لهذه
+// المرحلة (تصميم مستقبلي محتمل: requireAuth فقط بلا admin، بما أن كل مستخدم مسجَّل دخول يحتاج
+// هذا الفحص عند كل إقلاع لا الإداريون فقط — متروك عمداً لمرحلة ربط الواجهة الأمامية اللاحقة،
+// خارج نطاق هذه المرحلة). لا اتصال PostgreSQL من هذا المسار إطلاقاً — قراءة ملف فقط (انظر
+// dbIdentity.js). لا واجهة أمامية بعد تستخدم هذا المسار.
+app.use('/api/db-identity', requireAuth, requireRole('admin'), dbIdentityRouter);
 
 // ── تفعيل routes ديناميكياً (يتخطّى أي model ناقص بأمان) ──
 // كل /api/<collection> يتطلّب جلسة مصادَق عليها (requireAuth) — GET شاملاً — بالإضافة

@@ -3,11 +3,12 @@ import {
   createContext, useContext, useState, useCallback, useMemo, useEffect,
 } from 'react';
 import { INITIAL_TEACHERS } from '../data/initialData';
-import { pgLogin, pgLogout, BackendUnreachableError } from '../services/api';
+import { pgLogin, pgLogout, pgGetDatabaseIdentity, BackendUnreachableError } from '../services/api';
 import { AUTH_CONFIG } from '../config/app.config';
 import { storage } from '../hooks/useErrorHandler';
 import { useAppStore, resetAppStore } from './app.store';
 import { loadFromPostgres } from './db.middleware';
+import { checkDatabaseIdentityAndInvalidate } from './dbIdentity';
 
 // Stabilization phase (Decision 6/Correction — Identity Reconciliation): PostgreSQL
 // هو مصدر الحقيقة الوحيد لـ users/roles/permissions الآن. لا مزيد من
@@ -135,6 +136,17 @@ export function AuthProvider({ children, onLogin }) {
     // best-effort غير مُنتظَر عمداً (نفس فلسفة المزامنة الأصلية في useDB.jsx: الواجهة
     // تُعرَض فوراً، والبيانات تمتلئ لاحقاً بلا حجب الدخول نفسه).
     resetAppStore();
+    // Phase 2C-3C Part 4 — نفس فحص هوية قاعدة البيانات الذي يُشغَّله useDB.jsx عند
+    // الإقلاع، مُكرَّر هنا لأن DBInit (useDB) لا يُعاد تشغيله بعد هذا الدخول (mount مرة
+    // واحدة فقط عند تحميل الصفحة، انظر App.jsx) — أول دخول تفاعلي حقيقي على متصفح لم
+    // يُحمَّل من قبل هو الفرصة الوحيدة لتسجيل علامة الهوية محلياً قبل الإقلاع التالي.
+    // best-effort غير مُنتظَر بنفس الفلسفة أعلاه بالضبط — admin-only بالخادم (Part 3)،
+    // فمستخدم غير مدير يحصل على تخطٍّ آمن هنا أيضاً (نفس تعليق useDB.jsx الكامل).
+    pgGetDatabaseIdentity()
+      .then((identityResult) => {
+        if (identityResult.ok) checkDatabaseIdentityAndInvalidate(identityResult.identity);
+      })
+      .catch(() => {});
     loadFromPostgres((updater) => useAppStore.setState(updater))
       .catch((e) => console.error('[auth] فشل إعادة المزامنة بعد تسجيل الدخول:', e.message));
     onLogin?.({ userId: safeUser.id, userName: safeUser.name || safeUser.id });

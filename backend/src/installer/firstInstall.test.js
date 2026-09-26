@@ -7,6 +7,7 @@
 // service, a real network request, or a real browser.
 import { describe, it, expect, vi } from 'vitest';
 import { runFirstInstall, FirstInstallError } from './firstInstall.js';
+import { RestoreStateError } from '../db/restoreState.js';
 
 const ADMIN_URL = 'postgresql://studix_admin:adminsecret@127.0.0.1:55432/studix';
 const APP_URL = 'postgresql://studix_app:appsecret@127.0.0.1:55432/studix';
@@ -37,6 +38,8 @@ function baseDeps(overrides = {}) {
     registerPostgresServiceFn: vi.fn((...args) => { record('registerPostgresService')(...args); return { status: 'registered' }; }),
     registerAppServiceFn: vi.fn((...args) => { record('registerAppService')(...args); return { status: 'registered' }; }),
     startServiceFn: vi.fn((...args) => { record('startService')(...args); return { status: 'started' }; }),
+    registerScheduledTaskFn: vi.fn((...args) => { record('registerScheduledTask')(...args); return { status: 'created' }; }),
+    readRestoreStateFn: vi.fn((...args) => { record('readRestoreState')(...args); return { status: 'idle' }; }),
     resolveInstallRootFn: vi.fn(() => 'C:\\Studix'),
     waitForHealthFn: vi.fn(async (...args) => { record('waitForHealth')(...args); return true; }),
     openBrowserFn: vi.fn((...args) => { record('openBrowser')(...args); }),
@@ -45,6 +48,92 @@ function baseDeps(overrides = {}) {
   };
   return { deps, calls, migrationClient };
 }
+
+describe('runFirstInstall — wires the service-owned reuse dependency into provisionPostgres (upgrade lifecycle fix)', () => {
+  it('passes io.isPostgresServiceOwnedFn and io.startPostgresServiceFn through to provisionPostgresFn, and startPostgresServiceFn delegates to startServiceFn(StudixPostgreSQL)', async () => {
+    let capturedOpts;
+    const { deps } = baseDeps({
+      provisionPostgresFn: vi.fn(async (opts) => {
+        capturedOpts = opts;
+        return { status: 'initialized', databaseUrl: ADMIN_URL, port: 55432 };
+      }),
+    });
+
+    await runFirstInstall({ schemaPath: 'schema.sql', deps });
+
+    expect(typeof capturedOpts.io.isPostgresServiceOwnedFn).toBe('function');
+    expect(typeof capturedOpts.io.startPostgresServiceFn).toBe('function');
+
+    deps.startServiceFn.mockClear();
+    capturedOpts.io.startPostgresServiceFn();
+    expect(deps.startServiceFn).toHaveBeenCalledWith('StudixPostgreSQL');
+  });
+
+  // Phase 3B fix — Case C (reinstall/recovery over preserved pgdata with no registered
+  // service): provisionPostgres's own registration-before-start logic needs a
+  // registerPostgresServiceFn in its io, reusing the SAME dependency (deps.registerPostgresServiceFn)
+  // step 8 already calls later — never a second, separate registration mechanism.
+  it('passes io.registerPostgresServiceFn through to provisionPostgresFn, delegating to the same registerPostgresServiceFn used at step 8 (no duplicated registration mechanism)', async () => {
+    let capturedOpts;
+    const { deps } = baseDeps({
+      provisionPostgresFn: vi.fn(async (opts) => {
+        capturedOpts = opts;
+        return { status: 'initialized', databaseUrl: ADMIN_URL, port: 55432 };
+      }),
+    });
+
+    await runFirstInstall({ schemaPath: 'schema.sql', deps });
+
+    expect(typeof capturedOpts.io.registerPostgresServiceFn).toBe('function');
+
+    deps.registerPostgresServiceFn.mockClear();
+    capturedOpts.io.registerPostgresServiceFn();
+    expect(deps.registerPostgresServiceFn).toHaveBeenCalledTimes(1);
+  });
+
+  // Code-review finding (Category B): step 7 below (`stopPostgresFn`) was written before the
+  // service-owned reuse branch existed and still describes itself purely in terms of "the
+  // ad-hoc instance" — it was never revisited to ask whether stopping still makes sense once
+  // PostgreSQL might have just been started THROUGH the Windows service instead. This documents
+  // the current, ACTUAL behavior precisely rather than leaving it merely assumed.
+  //
+  // provisionPostgres()'s return shape is IDENTICAL for its ad-hoc-start (Case B) and
+  // service-owned-start (Case C) reuse branches — both return plain
+  // { status: 'already_initialized', port, pgDataDir, database }. runFirstInstall has NO
+  // signal at this call site telling it which path was taken, and — as asserted below — makes
+  // none: step 7 issues a direct `pg_ctl stop` unconditionally, identically, either way.
+  //
+  // What this proves (a real, load-bearing fact about the current code, not an artifact of
+  // mocking): step 7 always runs, immediately after provisionPostgres, with the exact same
+  // resolved pgCtlPath/dataDir, whether or not the just-completed reuse was service-owned.
+  // What this CANNOT prove, and no mock-based unit test can: whether a real `pg_ctl stop`,
+  // run under the installer's own identity, actually succeeds against a postgres.exe a Windows
+  // service started as LocalSystem — that is a genuine OS/process-identity question. The only
+  // evidence for that today is empirical (a real Phase 3B E2E reinstall exercised exactly this
+  // sequence — StudixPostgreSQL already registered and running pre-upgrade — and completed
+  // successfully end to end). Closing that gap for real would need a real, elevated integration
+  // test (e.g. extending postgresProvisioning.integration.test.js's own "upgrade lifecycle
+  // proof" describe block to call stopPostgresFn/pg_ctl stop after its real service-owned start
+  // and assert it succeeds) — deliberately out of scope here.
+  describe('step 7 (stopPostgresFn) after a service-owned reuse — documents current behavior, does not prove OS-level safety', () => {
+    it('still calls stopPostgresFn with the resolved pg_ctl path/data dir, immediately after provisionPostgres, with no special-casing for a service-owned reuse', async () => {
+      const { deps, calls } = baseDeps({
+        // Deliberately the same return shape provisionPostgres() actually produces for BOTH
+        // its ad-hoc and service-owned reuse branches (see comment above) — from
+        // runFirstInstall's own point of view, this IS what a service-owned reuse looks like.
+        provisionPostgresFn: vi.fn(async () => ({ status: 'already_initialized', port: 55432 })),
+      });
+
+      await runFirstInstall({ schemaPath: 'schema.sql', deps });
+
+      expect(deps.stopPostgresFn).toHaveBeenCalledWith({
+        pgCtlPath: 'C:\\Studix\\pgsql\\bin\\pg_ctl.exe', dataDir: 'C:\\ProgramData\\Studix\\pgdata',
+      });
+      const order = calls.map((c) => c[0]);
+      expect(order.indexOf('provisionPostgres')).toBeLessThan(order.indexOf('stopPostgres'));
+    });
+  });
+});
 
 describe('runFirstInstall — input validation', () => {
   it('throws immediately when schemaPath is missing, without calling anything', async () => {
@@ -66,7 +155,7 @@ describe('runFirstInstall — fresh install (provisionPostgres returns "initiali
       'provisionPostgres', 'ensureProvisioningAdminConfig', 'validateDatabaseUrl',
       'bootstrapDatabase', 'createMigrationPrismaClient', 'runMigrations', 'ensureAppRole',
       'ensureProductionConfig', 'stopPostgres', 'registerPostgresService', 'startService',
-      'registerAppService', 'startService', 'waitForHealth', 'openBrowser',
+      'registerAppService', 'readRestoreState', 'startService', 'registerScheduledTask', 'waitForHealth', 'openBrowser',
     ]);
   });
 
@@ -134,6 +223,23 @@ describe('runFirstInstall — fresh install (provisionPostgres returns "initiali
     expect(deps.registerAppServiceFn).toHaveBeenCalledWith({ nssmPath: 'C:\\Studix\\tools\\nssm.exe' });
   });
 
+  it('checks restore-state.json after registering the app service, before deciding whether to start it', async () => {
+    const { deps, calls } = baseDeps();
+    await runFirstInstall({ schemaPath: 'schema.sql', deps });
+    const order = calls.map((c) => c[0]);
+    expect(order.indexOf('registerAppService')).toBeLessThan(order.indexOf('readRestoreState'));
+    expect(order.indexOf('readRestoreState')).toBeLessThan(order.lastIndexOf('startService'));
+  });
+
+  it('registers/corrects the boot-time Scheduled Task after both services are registered/started, and before the health check', async () => {
+    const { deps, calls } = baseDeps();
+    await runFirstInstall({ schemaPath: 'schema.sql', deps });
+    expect(deps.registerScheduledTaskFn).toHaveBeenCalledWith();
+    const order = calls.map((c) => c[0]);
+    expect(order.indexOf('registerAppService')).toBeLessThan(order.indexOf('registerScheduledTask'));
+    expect(order.indexOf('registerScheduledTask')).toBeLessThan(order.indexOf('waitForHealth'));
+  });
+
   it('polls health at the correct URL for the resolved port', async () => {
     const { deps } = baseDeps();
     await runFirstInstall({ schemaPath: 'schema.sql', port: 4000, deps });
@@ -185,6 +291,7 @@ describe('runFirstInstall — existing installation (provisionPostgres returns "
     expect(deps.registerPostgresServiceFn).toHaveBeenCalled();
     expect(deps.registerAppServiceFn).toHaveBeenCalled();
     expect(deps.startServiceFn).toHaveBeenCalledTimes(2);
+    expect(deps.registerScheduledTaskFn).toHaveBeenCalled();
     expect(deps.waitForHealthFn).toHaveBeenCalled();
     expect(deps.openBrowserFn).toHaveBeenCalled();
   });
@@ -239,6 +346,7 @@ describe('runFirstInstall — failure at each step stops immediately with a mach
     ['stop_adhoc_postgres', 'stopPostgresFn', () => { throw new Error('stop failed'); }],
     ['start_postgres_service', 'registerPostgresServiceFn', () => { throw new Error('register failed'); }],
     ['start_app_service', 'registerAppServiceFn', () => { throw new Error('nssm missing'); }],
+    ['register_scheduled_task', 'registerScheduledTaskFn', () => { throw new Error('schtasks access denied'); }],
   ])('%s', async (expectedStep, failingDep, impl) => {
     const { deps } = baseDeps({ [failingDep]: vi.fn(impl) });
     try {
@@ -277,6 +385,16 @@ describe('runFirstInstall — failure at each step stops immediately with a mach
     expect(deps.stopPostgresFn).not.toHaveBeenCalled();
     expect(deps.registerPostgresServiceFn).not.toHaveBeenCalled();
     expect(deps.registerAppServiceFn).not.toHaveBeenCalled();
+    expect(deps.registerScheduledTaskFn).not.toHaveBeenCalled();
+    expect(deps.waitForHealthFn).not.toHaveBeenCalled();
+    expect(deps.openBrowserFn).not.toHaveBeenCalled();
+  });
+
+  it('a registration failure in the Scheduled Task step stops before the health check ever runs', async () => {
+    const { deps } = baseDeps({
+      registerScheduledTaskFn: vi.fn(() => { throw new Error('schtasks access denied'); }),
+    });
+    await expect(runFirstInstall({ schemaPath: 'schema.sql', deps })).rejects.toMatchObject({ step: 'register_scheduled_task' });
     expect(deps.waitForHealthFn).not.toHaveBeenCalled();
     expect(deps.openBrowserFn).not.toHaveBeenCalled();
   });
@@ -287,6 +405,97 @@ describe('runFirstInstall — failure at each step stops immediately with a mach
     });
     await expect(runFirstInstall({ schemaPath: 'schema.sql', deps })).rejects.toMatchObject({ step: 'wait_for_health' });
     expect(deps.openBrowserFn).not.toHaveBeenCalled();
+  });
+});
+
+// Final pre-build audit — Issue B fix: never start StudixApp directly while restore-state.json
+// reports an in-flight database switch/rollback. Reuses readRestoreState() (db/restoreState.js)
+// completely unmodified — this describe block never touches the state machine itself, only
+// proves runFirstInstall's own new branch on top of it.
+describe('runFirstInstall — restore-state guard before starting StudixApp (audit Issue B)', () => {
+  it.each([
+    ['idle'],
+    ['active'],
+    ['rolled_back'],
+    ['failed'],
+    // Not explicitly required by the audit's list, but included to lock in the deliberate
+    // denylist design (only switching/rolling_back block a start) rather than an allowlist —
+    // these three never touch the production database's identity, so they must stay safe too.
+    ['preparing'],
+    ['restoring'],
+    ['verified'],
+  ])('status "%s" -> StudixApp starts normally', async (status) => {
+    const { deps } = baseDeps({
+      readRestoreStateFn: vi.fn(() => ({ status })),
+    });
+    const result = await runFirstInstall({ schemaPath: 'schema.sql', deps });
+    expect(deps.startServiceFn).toHaveBeenCalledWith('StudixApp');
+    expect(result).toEqual({ status: 'installed', browserOpened: true });
+  });
+
+  it.each([
+    ['switching'],
+    ['rolling_back'],
+  ])('status "%s" -> StudixApp does NOT start, and this is not reported as a FirstInstallError', async (status) => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { deps } = baseDeps({
+      readRestoreStateFn: vi.fn(() => ({ status })),
+      // The health poll would otherwise time out for real (the app genuinely never started) —
+      // stubbed here purely so this test isolates the guard's own behavior, not the unrelated
+      // health-timeout path (covered separately elsewhere in this file).
+      waitForHealthFn: vi.fn(async () => true),
+    });
+    const result = await runFirstInstall({ schemaPath: 'schema.sql', deps });
+    expect(deps.startServiceFn).not.toHaveBeenCalledWith('StudixApp');
+    expect(deps.startServiceFn).toHaveBeenCalledWith('StudixPostgreSQL'); // Postgres start is unaffected
+    expect(result.status).toBe('installed');
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(status));
+    warnSpy.mockRestore();
+  });
+
+  it('a corrupt/invalid restore-state.json (RestoreStateError) fails closed with a distinct, clear step — never silently starts the app', async () => {
+    const { deps } = baseDeps({
+      readRestoreStateFn: vi.fn(() => { throw new RestoreStateError('corrupt_state', 'ملف حالة الاستعادة تالف.'); }),
+    });
+    await expect(runFirstInstall({ schemaPath: 'schema.sql', deps })).rejects.toMatchObject({
+      step: 'check_restore_state_before_app_start',
+    });
+    expect(deps.startServiceFn).not.toHaveBeenCalledWith('StudixApp');
+  });
+
+  it('an unexpected (non-RestoreStateError) error from readRestoreStateFn propagates unwrapped, never masked as a normal step failure', async () => {
+    const { deps } = baseDeps({
+      readRestoreStateFn: vi.fn(() => { throw new Error('unexpected disk failure'); }),
+    });
+    await expect(runFirstInstall({ schemaPath: 'schema.sql', deps })).rejects.toThrow('unexpected disk failure');
+    await expect(runFirstInstall({ schemaPath: 'schema.sql', deps })).rejects.not.toBeInstanceOf(FirstInstallError);
+  });
+
+  it('the guard runs after registerAppService and before the app startService call, without disturbing any other step order', async () => {
+    const { deps, calls } = baseDeps();
+    await runFirstInstall({ schemaPath: 'schema.sql', deps });
+    const order = calls.map((c) => c[0]);
+    expect(order).toEqual([
+      'provisionPostgres', 'ensureProvisioningAdminConfig', 'validateDatabaseUrl',
+      'bootstrapDatabase', 'createMigrationPrismaClient', 'runMigrations', 'ensureAppRole',
+      'ensureProductionConfig', 'stopPostgres', 'registerPostgresService', 'startService',
+      'registerAppService', 'readRestoreState', 'startService', 'registerScheduledTask',
+      'waitForHealth', 'openBrowser',
+    ]);
+  });
+
+  it('the pre-existing upgrade-lifecycle fix (provisionPostgres io wiring for service-owned reuse) remains intact alongside this guard', async () => {
+    let capturedOpts;
+    const { deps } = baseDeps({
+      provisionPostgresFn: vi.fn(async (opts) => {
+        capturedOpts = opts;
+        return { status: 'initialized', databaseUrl: ADMIN_URL, port: 55432 };
+      }),
+    });
+    await runFirstInstall({ schemaPath: 'schema.sql', deps });
+    expect(typeof capturedOpts.io.isPostgresServiceOwnedFn).toBe('function');
+    expect(typeof capturedOpts.io.registerPostgresServiceFn).toBe('function');
+    expect(typeof capturedOpts.io.startPostgresServiceFn).toBe('function');
   });
 });
 

@@ -28,6 +28,11 @@ release/
 # dir) — a generated multi-hundred-MB .exe, never committed, same reasoning as release/ above.
 installer/Output/
 
+# Single-source-of-truth version handoff (new-installer Phase 1) — regenerated on every
+# scripts/build-windows-runtime.ps1 run from backend/package.json's "version" field, never
+# committed, same reasoning as release/ above.
+installer/version.generated.iss
+
 # =========================
 # Logs
 # =========================

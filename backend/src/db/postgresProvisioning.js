@@ -17,10 +17,19 @@
 //
 // State model (filesystem-only, computed before touching any process):
 //   - pgDataDir missing or empty           -> "uninitialized"  -> safe to initdb into
-//   - pgDataDir non-empty but no PG_VERSION
-//     or postgresql.conf, or unparseable
-//     port                                  -> "inconsistent"  -> FAIL CLOSED, never touched
-//   - PG_VERSION + parseable port present  -> "initialized"    -> reuse as-is, never re-initdb
+//   - pgDataDir non-empty but no PG_VERSION,
+//     postgresql.conf, unparseable port,
+//     no pg_hba.conf, or missing/empty
+//     "base" directory                     -> "inconsistent"  -> FAIL CLOSED, never touched
+//   - all of the above present             -> "initialized"    -> reuse as-is, never re-initdb
+//
+// The "initialized" reuse path additionally gets one process-level check before an actual start
+// attempt: verifyEffectiveConfig() below asks the bundled postgres.exe itself (via its own
+// read-only `-C` config-query mode) what port/listen_addresses it will actually resolve from
+// this data directory, and refuses (PostgresProvisioningError('config_mismatch', ...)) rather
+// than starting if that disagrees with what Studix expects — closing the class of bug where a
+// JS regex believed a directive was active but PostgreSQL's own parser did not. This never
+// reselects a port and never rewrites postgresql.conf; the persisted port stays authoritative.
 //
 // Every fs/process/network dependency is injectable (an `io` object merged over real defaults)
 // so every code path above is unit-testable without a real PostgreSQL installation. See
@@ -107,8 +116,22 @@ export function locatePgBinaries(pgHome = resolvePgHome(), io = {}) {
 }
 
 // ── data-directory state classification ────────────────────────────────────────────────────
+// [ \t]* (not \s*) closes the CRLF/comment-merge hazard upsertConfLine's own leading \s* had
+// (see that function's comment for the full mechanism) — but forensic verification against a
+// REAL corrupted production file (a bare, unpaired CR — 0x0D with no following 0x0A — directly
+// preceding "port = 55432") found a second, distinct hazard [ \t]* alone does not close: JS
+// regex's `m` flag makes `^` anchor after ANY line-terminator character (LF, CR, U+2028, U+2029)
+// INDEPENDENTLY, per the ECMAScript spec — so `^` still anchors right after that bare CR even
+// though nothing crossed a line boundary to get there, making "port = 55432" look like a
+// perfectly ordinary line start to this regex. PostgreSQL's own conf parser recognizes no such
+// boundary — a bare CR is not a line terminator it uses at all; only a genuine LF (bare, as on
+// Unix, or as the second half of a Windows CRLF pair) starts a new line for it.
+// (?:^|(?<=\n)) with NO /m flag fixes this precisely: `^` (unflagged) matches only true string
+// start; (?<=\n) matches only immediately after a literal LF character, covering both LF-only
+// and CRLF-terminated real line starts identically to before, while a position following a bare,
+// unpaired CR satisfies neither branch and is correctly rejected.
 function extractPort(confText) {
-  const m = confText.match(/^\s*port\s*=\s*'?(\d+)'?/m);
+  const m = confText.match(/(?:^|(?<=\n))[ \t]*port\s*=\s*'?(\d+)'?/);
   return m ? Number(m[1]) : null;
 }
 
@@ -153,7 +176,184 @@ export function classifyDataDir(pgDataDir = resolvePgDataDir(), io = {}) {
     };
   }
 
+  // ── lightweight structural validation (Option C) — cheap existence checks only, never a deep
+  // integrity/checksum scan (that's what waitForReady/verifyEffectiveConfig below already do
+  // better, against the real running server). Catches an interrupted/truncated initdb that still
+  // happens to have PG_VERSION + a parseable port but is missing the other files a genuine
+  // initdb always produces — without this, such a directory would be trusted as "initialized"
+  // and handed straight to pg_ctl start.
+  const hbaPath = path.join(pgDataDir, 'pg_hba.conf');
+  if (!existsSync(hbaPath)) {
+    return {
+      state: 'inconsistent',
+      reason: `${pgDataDir} has PG_VERSION and a parseable postgresql.conf but no pg_hba.conf — ` +
+        'incomplete initialization. Refusing to touch it automatically.',
+    };
+  }
+
+  const baseDir = path.join(pgDataDir, 'base');
+  let baseEntries;
+  try {
+    baseEntries = existsSync(baseDir) ? readdirSync(baseDir) : [];
+  } catch (err) {
+    throw new PostgresProvisioningError('data_dir_unreadable', `Cannot read ${baseDir}: ${err.message}`);
+  }
+  if (baseEntries.length === 0) {
+    return {
+      state: 'inconsistent',
+      reason: `${pgDataDir} has PG_VERSION and postgresql.conf but the "base" data directory is ` +
+        'missing or empty — incomplete/corrupted initialization. Refusing to touch it automatically.',
+    };
+  }
+
   return { state: 'initialized', port };
+}
+
+// ── effective-configuration validation (Option B) ──────────────────────────────────────────
+// verifyEffectiveConfig: ground-truth check against PostgreSQL's OWN config parser, run ONLY on
+// the "initialized"/reuse path and ONLY immediately before the one place this module would
+// otherwise call startPostgres() against a not-currently-running existing instance — never on a
+// fresh init (patchPostgresqlConf's own already-fixed writer is authoritative there) and never
+// when the instance is already confirmed running (checkReady already proved the real bound port
+// matches, a stronger signal than a static query).
+//
+// Uses `postgres -D <dataDir> -C <param>` — PostgreSQL's own documented, read-only, non-binding
+// config-query mode: it parses postgresql.conf exactly as a real startup would and prints the
+// resolved value, but never allocates shared memory, never attempts a socket bind, and never
+// writes anything. This is what actually closes the bug class classifyDataDir's own filesystem
+// checks (extractPort included) cannot fully close on their own: it asks the real parser, not a
+// JS approximation of it, so it catches ANY mismatch — not just the one known corruption shape.
+//
+// Fail-closed, never repaired: a mismatch throws PostgresProvisioningError('config_mismatch').
+// The persisted port is never reselected and postgresql.conf is never rewritten here — pure
+// read, pure refusal. pg_isready/checkReady is not a substitute: it only answers "is something
+// already listening," never "what would this data directory resolve to if started."
+// queryEffectiveConfigValue: routes through pg_ctl's own `-o` passthrough + `-l` log-file
+// redirection rather than invoking postgres.exe directly. postgres.exe itself refuses to run AT
+// ALL — even in this harmless, read-only -C query mode — under a process token with the
+// Administrators group enabled, which the real installer's [Setup] PrivilegesRequired=admin
+// guarantees it always is ("Execution of PostgreSQL by a user with administrative permissions is
+// not permitted", confirmed empirically both ways: fails elevated, succeeds identically
+// non-elevated). pg_ctl, uniquely, already handles this — it creates a restricted, non-admin
+// token internally before launching its child — exactly why every OTHER pg_ctl-mediated call in
+// this file (start/stop/register) already works correctly under elevation. This reuses that same
+// proven mechanism rather than reimplementing Windows restricted-token creation in JS.
+//
+// REQUIRES the target data directory to NOT currently be running (already true of this
+// function's only caller, verifyEffectiveConfig, per its own comment above) — verified
+// empirically that this is a hard requirement, not just a design preference: against an
+// ALREADY-RUNNING data directory, `pg_ctl start -o "-C ..."` does not behave as a safe read-only
+// query at all. It instead prints "another server might be running; trying to start server
+// anyway", reports a false "server started" success, and — critically — never writes anything to
+// the `-l` log file, so this function would silently return no value. Calling it while running is
+// unsupported, not merely untested.
+//
+// `-o "-C <param>"` makes the launched postgres print the resolved value and exit immediately
+// instead of becoming a running server, so pg_ctl's own `-w` wait-for-ready logic ALWAYS reports
+// a nonzero exit / "could not start server" for this specific, deliberate use — expected, and
+// deliberately not treated as fatal on its own. The actual value is read from the `-l` log file,
+// which isolates postgres's own clean stdout from pg_ctl's own interleaved status/progress
+// messages (verified empirically: without file redirection, the two can interleave on the same
+// handle). Only the log file's content is trusted as the true failure/success signal.
+function queryEffectiveConfigValue({ pgCtlPath, dataDir, param }, io = {}) {
+  const {
+    execFileSync: execFileSyncFn, mkdtempSync, readFileSync: readFileSyncFn, rmSync,
+  } = { ...REAL_IO, ...io };
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), 'studix-pgconfquery-'));
+  const tempLog = path.join(tempDir, 'value.log');
+  let startErr = null;
+  try {
+    try {
+      execFileSyncFn(pgCtlPath, ['start', '-D', dataDir, '-o', `-C ${param}`, '-l', tempLog, '-w', '-t', '5'], { stdio: 'ignore' });
+    } catch (err) {
+      // Expected in the common case (see comment above) — kept only so a genuinely empty
+      // tempLog (bad pgCtlPath, real launch failure unrelated to -C's deliberate immediate
+      // exit) can still surface a useful underlying message below, rather than a bare
+      // "no output" with no clue why.
+      startErr = err;
+    }
+
+    let raw = '';
+    try {
+      raw = readFileSyncFn(tempLog, 'utf8');
+    } catch {
+      // tempLog was never created at all — handled by the empty-lines check below.
+    }
+
+    // postgres -C's own output is a single value with no other content — take the last
+    // non-blank line rather than assuming there is exactly one, so this never depends on there
+    // being no incidental blank/leading lines in the log.
+    const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    if (lines.length === 0) {
+      throw new PostgresProvisioningError(
+        'config_query_failed',
+        `تعذّر الاستعلام عن الإعداد الفعلي "${param}" الذي يقرؤه PostgreSQL من ${dataDir}` +
+        (startErr ? `: ${startErr.message}` : ': لم يُكتَب أي ناتج إلى سجلّ الاستعلام المؤقّت.')
+      );
+    }
+    return lines[lines.length - 1];
+  } finally {
+    try { rmSync(tempDir, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
+  }
+}
+
+// readPgVersionMajor: pure filesystem read of an EXISTING data directory's own PG_VERSION
+// file content (classifyDataDir only checks the file's existence, never its content) — returns
+// the parsed integer, or null if missing/unreadable/not a plain number. Never throws; the one
+// caller (provisionPostgres's Case C branch) decides what an unreadable/null value means.
+function readPgVersionMajor(pgDataDir, io = {}) {
+  const { readFileSync: readFileSyncFn } = { ...REAL_IO, ...io };
+  let raw;
+  try {
+    raw = readFileSyncFn(path.join(pgDataDir, 'PG_VERSION'), 'utf8');
+  } catch {
+    return null;
+  }
+  const n = Number(String(raw).trim());
+  return Number.isFinite(n) ? n : null;
+}
+
+// getBundledPostgresMajorVersion: asks the BUNDLED postgres.exe itself what major version it
+// is (`postgres --version` — e.g. "postgres (PostgreSQL) 18.6") — ground truth, never a
+// hardcoded/duplicated constant that could silently drift from backend/scripts/
+// windows-runtime-dependencies.json's actual pinned version. Same "ask the real binary,
+// don't assume" convention verifyEffectiveConfig below already uses for port/listen_addresses.
+function getBundledPostgresMajorVersion(postgresPath, io = {}) {
+  const { execFileSync: execFileSyncFn } = { ...REAL_IO, ...io };
+  let raw;
+  try {
+    raw = execFileSyncFn(postgresPath, ['--version'], { encoding: 'utf8' });
+  } catch (err) {
+    throw new PostgresProvisioningError(
+      'unsupported_pgdata_version',
+      `Could not determine the version of the bundled PostgreSQL (${postgresPath}): ${err.message}`
+    );
+  }
+  const m = String(raw).match(/PostgreSQL\)?\s+(\d+)/);
+  if (!m) {
+    throw new PostgresProvisioningError(
+      'unsupported_pgdata_version',
+      `Could not parse "postgres --version" output from the bundled PostgreSQL: ${raw}`
+    );
+  }
+  return Number(m[1]);
+}
+
+export function verifyEffectiveConfig({ pgCtlPath, dataDir, expectedPort, expectedListenAddresses = '127.0.0.1' }, io = {}) {
+  const effectivePortRaw = queryEffectiveConfigValue({ pgCtlPath, dataDir, param: 'port' }, io);
+  const effectiveListenAddresses = queryEffectiveConfigValue({ pgCtlPath, dataDir, param: 'listen_addresses' }, io);
+  const effectivePort = Number(effectivePortRaw);
+
+  if (effectivePort !== expectedPort || effectiveListenAddresses !== expectedListenAddresses) {
+    throw new PostgresProvisioningError(
+      'config_mismatch',
+      `الإعداد الفعلي الذي يقرؤه PostgreSQL فعلياً من ${dataDir} (port=${effectivePortRaw}, ` +
+      `listen_addresses=${effectiveListenAddresses}) لا يطابق ما يتوقّعه Studix (port=${expectedPort}, ` +
+      `listen_addresses=${expectedListenAddresses}) — ملف postgresql.conf قد يكون تالفاً أو عُدِّل ` +
+      'يدوياً. تم الإيقاف بدل محاولة بدء الخدمة بإعداد غير متوقَّع؛ لن يُعاد اختيار منفذ جديد ولن يُعاد ' +
+      'كتابة الملف تلقائياً.'
+    );
+  }
 }
 
 // ── credential generation — same CSPRNG discipline as lib/productionConfig.js's
@@ -199,8 +399,18 @@ export async function selectPort({ preferredPort = DEFAULT_PORT, range = PORT_SC
 // default IS listen_addresses='localhost'); this writes both settings explicitly and
 // verifiably rather than relying on an implicit default, matching this codebase's existing
 // "verify, don't assume" convention (INSTALL-01's engine-verification step is the same idea). ─
+// [ \t]* (not \s*) around the optional "#" — \s also matches \n/\r, and since initdb's own
+// generated postgresql.conf is CRLF-terminated on Windows, JS regex's ^/\s treat \r and \n as
+// independent line terminators (a match can anchor *inside* a CRLF pair). A leading \s* here
+// could therefore cross a line boundary backward and swallow a preceding blank/short line's own
+// newline, merging this key's replacement text onto the end of that (still "#"-prefixed)
+// preceding line — silently turning the intended directive into dead comment text that
+// PostgreSQL's parser never sees. [ \t]* only ever matches intra-line whitespace, so this can
+// never happen — verified against a real initdb-generated CRLF conf, see
+// postgresProvisioning.test.js's "conf line patching does not merge across CRLF line boundaries"
+// coverage.
 function upsertConfLine(confText, key, value) {
-  const re = new RegExp(`^\\s*#?\\s*${key}\\s*=.*$`, 'm');
+  const re = new RegExp(`^[ \\t]*#?[ \\t]*${key}\\s*=.*$`, 'm');
   const line = `${key} = ${value}`;
   return re.test(confText) ? confText.replace(re, line) : `${confText.replace(/\n?$/, '\n')}${line}\n`;
 }
@@ -268,9 +478,18 @@ export function runInitdb({ initdbPath, dataDir, password, username = PG_USER },
 export function startPostgres({ pgCtlPath, dataDir, logFile }, io = {}) {
   const { execFileSync: execFileSyncFn } = { ...REAL_IO, ...io };
   try {
-    execFileSyncFn(pgCtlPath, ['start', '-D', dataDir, '-l', logFile, '-w', '-t', '30'], { stdio: 'pipe' });
+    // stdio: 'ignore', not 'pipe' — the daemonized postgres.exe (see comment above) inherits
+    // pg_ctl's stdio handles by default on Windows, so a 'pipe' keeps that pipe's write end open
+    // for as long as postgres.exe keeps running. execFileSync then blocks forever waiting for
+    // EOF that never comes, even though pg_ctl itself already exited successfully. Real startup
+    // output is unaffected — it already goes to `logFile` via -l, never through pg_ctl's own
+    // stdio.
+    execFileSyncFn(pgCtlPath, ['start', '-D', dataDir, '-l', logFile, '-w', '-t', '30'], { stdio: 'ignore' });
   } catch (err) {
-    throw new PostgresProvisioningError('start_failed', `pg_ctl start failed: ${err.message}`);
+    throw new PostgresProvisioningError(
+      'start_failed',
+      `pg_ctl start failed: ${err.message} (see ${logFile} for PostgreSQL's own startup output)`,
+    );
   }
 }
 
@@ -354,7 +573,98 @@ export async function provisionPostgres({
     const { port } = classification;
     const alreadyReady = await checkReady({ pgIsReadyPath: binaries.pg_isready, port }, io);
     if (!alreadyReady) {
-      startPostgres({ pgCtlPath: binaries.pg_ctl, dataDir: pgDataDir, logFile }, io);
+      // Upgrade-lifecycle fix (Option F using Option B — see
+      // migration/reports/ for the full identity-mismatch investigation): a registered
+      // StudixPostgreSQL service already owns this exact data directory (the common post-first-
+      // install case — e.g. an upgrade's PrepareToInstall having just stopped it before the
+      // [Files] copy). Starting PostgreSQL directly via pg_ctl here would run postgres.exe under
+      // THIS process's own identity (the elevated interactive installer) instead of the
+      // service's identity (LocalSystem, which owns/created the existing WAL segments) — the
+      // exact Windows identity/ACL mismatch that produces "could not open file
+      // pg_wal/...: Permission denied". Once a service owns the data directory, PostgreSQL
+      // lifecycle must go through the SCM (io.startPostgresServiceFn), never pg_ctl directly.
+      //
+      // This module never imports lib/windowsService.js to make that check/start happen (that
+      // module already depends on THIS one for resolvePgHome/resolvePgDataDir/locatePgBinaries —
+      // importing it back here would create a circular import). Instead, the caller
+      // (src/installer/firstInstall.js, which already imports both modules) injects three small
+      // callbacks via `io`. None provided (the default) means "no known service" — byte-for-byte
+      // the original ad-hoc pg_ctl-start behavior, unaffected for the genuine pre-service
+      // first-install bootstrap path this branch was originally written for.
+      //
+      // Case C (Phase 3B fix) — existing initialized pgdata, but NO service currently owns it:
+      // the reinstall/recovery-over-preserved-data state (a normal uninstall correctly removes
+      // StudixPostgreSQL while intentionally preserving pgdata; a later reinstall must not treat
+      // that preserved data as fresh/unowned). io.registerPostgresServiceFn — when the caller
+      // provides it — registers the service (reusing windowsService.js's own
+      // registerPostgresService() unmodified, never duplicated here) BEFORE any start is
+      // attempted, closing the exact identity-mismatch gap Case B's fix left open. Callers that
+      // only wire isPostgresServiceOwnedFn/startPostgresServiceFn (or wire nothing at all) never
+      // enter this branch — serviceOwnsDataDir simply stays false and the pre-existing ad-hoc
+      // path runs completely unchanged, so this is purely additive.
+      const { isPostgresServiceOwnedFn, registerPostgresServiceFn, startPostgresServiceFn } = io;
+      let serviceOwnsDataDir = typeof isPostgresServiceOwnedFn === 'function'
+        ? await isPostgresServiceOwnedFn(pgDataDir)
+        : false;
+
+      if (!serviceOwnsDataDir && typeof registerPostgresServiceFn === 'function') {
+        // Ground-truth version compatibility check BEFORE ever registering/starting a service
+        // against this data — never blindly treat an arbitrary directory that merely happens to
+        // have a PG_VERSION file as "our" preserved Studix database. Asks the BUNDLED postgres.exe
+        // itself what version it is (same "ask the real binary" philosophy verifyEffectiveConfig
+        // already uses below), never a hardcoded/duplicated version constant.
+        const dataDirMajor = readPgVersionMajor(pgDataDir, io);
+        const bundledMajor = getBundledPostgresMajorVersion(binaries.postgres, io);
+        if (dataDirMajor === null || dataDirMajor !== bundledMajor) {
+          throw new PostgresProvisioningError(
+            'unsupported_pgdata_version',
+            `${pgDataDir} PG_VERSION (${dataDirMajor ?? 'unreadable'}) does not match the PostgreSQL ` +
+            `version bundled with Studix (${bundledMajor}) — refusing to register or start a Windows ` +
+            'service against data that may not even be a compatible Studix database.'
+          );
+        }
+        // Reuses registerPostgresService()'s OWN fail-closed conflict check (throws
+        // WindowsServiceError('service_name_conflict', ...) if a same-named service already
+        // exists but points at a different pgDataDir) — never duplicated or re-implemented here.
+        try {
+          await registerPostgresServiceFn();
+        } catch (err) {
+          throw new PostgresProvisioningError(
+            'service_registration_failed',
+            `Failed to register the Windows service for the existing PostgreSQL data at ${pgDataDir}: ${err.message}`
+          );
+        }
+        serviceOwnsDataDir = true;
+      }
+
+      if (serviceOwnsDataDir) {
+        if (typeof startPostgresServiceFn !== 'function') {
+          throw new PostgresProvisioningError(
+            'service_lifecycle_not_configured',
+            `A registered PostgreSQL Windows service already owns ${pgDataDir}, but no ` +
+            'service-start dependency was provided — refusing to start PostgreSQL directly via ' +
+            'pg_ctl, which would run it under the wrong Windows identity.'
+          );
+        }
+        // No fallback to startPostgres()/pg_ctl on failure here, ever — that fallback would
+        // silently recreate the exact identity-mismatch bug this branch exists to close.
+        try {
+          await startPostgresServiceFn();
+        } catch (err) {
+          throw new PostgresProvisioningError(
+            'service_start_failed',
+            `Failed to start the existing PostgreSQL Windows service for ${pgDataDir}: ${err.message}`
+          );
+        }
+      } else {
+        // Option B — ground-truth check against PostgreSQL's own parser, immediately before the
+        // only place this branch would otherwise call startPostgres(). Throws
+        // PostgresProvisioningError('config_mismatch', ...) and never reaches startPostgres() if
+        // PostgreSQL's own effective config disagrees with what classifyDataDir extracted —
+        // never reselects a port, never rewrites postgresql.conf.
+        verifyEffectiveConfig({ pgCtlPath: binaries.pg_ctl, dataDir: pgDataDir, expectedPort: port }, io);
+        startPostgres({ pgCtlPath: binaries.pg_ctl, dataDir: pgDataDir, logFile }, io);
+      }
       await waitForReady({ pgIsReadyPath: binaries.pg_isready, port }, io);
     }
     return { status: 'already_initialized', port, pgDataDir, database };

@@ -67,8 +67,11 @@ import {
 import { validateDatabaseUrl } from '../lib/startupErrors.js';
 import {
   registerPostgresService, registerAppService, startService,
-  resolveInstallRoot, STUDIX_POSTGRES_SERVICE_NAME, STUDIX_APP_SERVICE_NAME,
+  resolveInstallRoot, isPostgresServiceRegisteredFor,
+  STUDIX_POSTGRES_SERVICE_NAME, STUDIX_APP_SERVICE_NAME,
 } from '../lib/windowsService.js';
+import { ensureStartupTask } from '../lib/scheduledTask.js';
+import { readRestoreState, RestoreStateError } from '../db/restoreState.js';
 
 export class FirstInstallError extends Error {
   constructor(step, cause) {
@@ -145,6 +148,9 @@ export async function runFirstInstall({
     registerPostgresServiceFn = registerPostgresService,
     registerAppServiceFn = registerAppService,
     startServiceFn = startService,
+    registerScheduledTaskFn = ensureStartupTask,
+    readRestoreStateFn = readRestoreState,
+    isPostgresServiceOwnedFn = (pgDataDir) => isPostgresServiceRegisteredFor(pgDataDir),
     resolveInstallRootFn = resolveInstallRoot,
     waitForHealthFn = defaultWaitForHealth,
     openBrowserFn = defaultOpenBrowser,
@@ -161,7 +167,32 @@ export async function runFirstInstall({
   // (provisioning) connection — INSTALL-10: no longer the app's own runtime connection.
   let pg;
   try {
-    pg = await provisionPostgresFn();
+    // Upgrade-lifecycle fix (Option F using Option B): if a registered StudixPostgreSQL service
+    // already owns this data directory (the common post-first-install state — e.g. an upgrade's
+    // PrepareToInstall having just stopped it), provisionPostgres() must start PostgreSQL through
+    // that service (SCM-owned, LocalSystem identity) rather than directly via elevated pg_ctl —
+    // see postgresProvisioning.js's own comment on the Windows identity/ACL mismatch this closes.
+    // startPostgresServiceFn reuses startServiceFn (the same injectable step 8-9 already use)
+    // rather than calling windowsService.js's startService directly, so a test overriding
+    // startServiceFn also controls this path.
+    //
+    // Phase 3B fix: registerPostgresServiceFn is the SAME function already injected/used at
+    // step 8 below (registerPostgresServiceFn = registerPostgresService, called with no
+    // arguments there too) — reused here unmodified, never a second registration mechanism.
+    // Wiring it into provisionPostgres's io lets its own Case C branch register the service
+    // BEFORE any start is attempted whenever existing, initialized pgdata has no service
+    // currently owning it (a normal uninstall correctly removes StudixPostgreSQL while
+    // intentionally preserving pgdata — reinstalling over that preserved data is exactly this
+    // state). Step 8's own registerPostgresServiceFn() call further down remains a harmless,
+    // already-idempotent no-op in that case (registerPostgresService() already recognizes an
+    // already-correctly-registered service and returns 'already_registered').
+    pg = await provisionPostgresFn({
+      io: {
+        isPostgresServiceOwnedFn,
+        registerPostgresServiceFn: () => registerPostgresServiceFn(),
+        startPostgresServiceFn: () => startServiceFn(STUDIX_POSTGRES_SERVICE_NAME),
+      },
+    });
   } catch (err) {
     throw new FirstInstallError('provision_postgres', err);
   }
@@ -263,19 +294,80 @@ export async function runFirstInstall({
   try {
     const nssmPath = path.join(resolveInstallRootFn(), 'tools', 'nssm.exe');
     registerAppServiceFn({ nssmPath });
-    startServiceFn(STUDIX_APP_SERVICE_NAME);
   } catch (err) {
     throw new FirstInstallError('start_app_service', err);
   }
 
-  // 12. Wait for /health.
+  // 11b. Audit fix (final pre-build audit, Issue B) — never start StudixApp directly while a
+  // database switch/rollback is genuinely in flight. restore-state.json's "switching"/
+  // "rolling_back" statuses mean the production database may currently be mid-rename (or
+  // already renamed back into place but not yet deep-health-verified/identity-promoted — see
+  // databaseSwitch.js's own checkpoint comments) — starting the app against that is exactly the
+  // gap this fix closes. Every OTHER known status (idle/preparing/restoring/verified/active/
+  // rolled_back/failed) never touches the production database's identity the way switching/
+  // rolling_back do, so this is deliberately a DENYLIST of those two in-flight statuses, not an
+  // allowlist — reusing readRestoreState()'s own existing status vocabulary/validation
+  // completely unmodified (never a second restore-state format/semantics).
+  //
+  // Reuses the SAME readRestoreState() every other caller (databaseSwitch.js,
+  // recoverRestoreState.js) already reads from — never a new file, path, or format. A corrupt/
+  // invalid-shape restore-state.json throws RestoreStateError('corrupt_state', ...) from
+  // readRestoreState() itself (unmodified); that failure is never silently treated as "safe to
+  // start" here — fails this step closed, exactly like every other unexpected error in this
+  // orchestrator.
+  //
+  // When skipped, StudixApp is deliberately left un-started for THIS run — the boot-time
+  // Scheduled Task's startupOrchestrator.js (PostgreSQL readiness -> this exact same
+  // recoverRestoreState.js/databaseSwitch.js recovery, reused completely unmodified here — this
+  // guard never invokes either itself) remains the one path that decides when it is safe to
+  // start the app again. This is intentionally NOT reported as a FirstInstallError — an in-flight
+  // restore is an expected, recoverable condition, never an installer failure by itself.
+  let restoreState;
+  try {
+    restoreState = readRestoreStateFn();
+  } catch (err) {
+    if (err instanceof RestoreStateError) {
+      throw new FirstInstallError('check_restore_state_before_app_start', err);
+    }
+    throw err;
+  }
+
+  const restoreInFlight = restoreState.status === 'switching' || restoreState.status === 'rolling_back';
+  if (restoreInFlight) {
+    console.warn(
+      `⚠️  تم تخطّي بدء تشغيل StudixApp عمداً — حالة الاستعادة الحالية في restore-state.json هي ` +
+      `"${restoreState.status}" (عملية تبديل/تراجع قاعدة بيانات جارية بالفعل). لن يُشغَّل StudixApp ` +
+      `ضمن هذه العملية؛ مهمة الإقلاع المجدولة (StudixStartupOrchestrator) هي المسؤولة عن انتظار ` +
+      `جاهزية PostgreSQL الفعلية، إكمال عملية الاسترداد هذه، ثم بدء StudixApp فقط بعد اكتمالها بأمان.`
+    );
+  } else {
+    try {
+      startServiceFn(STUDIX_APP_SERVICE_NAME);
+    } catch (err) {
+      throw new FirstInstallError('start_app_service', err);
+    }
+  }
+
+  // 12. Register/correct the boot-time Scheduled Task (Phase 3) — idempotently ensures
+  // StudixStartupOrchestrator exists and matches the desired configuration, so a future reboot
+  // runs startupOrchestrator.js (PostgreSQL readiness -> restore-state recovery -> start
+  // StudixApp) via SYSTEM at boot, never via the SCM's own DependOnService ordering. This step
+  // only maintains the task DEFINITION — it never runs the orchestrator itself and never starts
+  // the task, so it has no effect on THIS run's already-started StudixApp/StudixPostgreSQL.
+  try {
+    registerScheduledTaskFn();
+  } catch (err) {
+    throw new FirstInstallError('register_scheduled_task', err);
+  }
+
+  // 13. Wait for /health.
   const healthUrl = `http://127.0.0.1:${port}/health`;
   const healthy = await waitForHealthFn(healthUrl, { timeoutMs: healthTimeoutMs, intervalMs: healthIntervalMs, fetchImpl });
   if (!healthy) {
     throw new FirstInstallError('wait_for_health', new Error(`لم يستجب ${healthUrl} خلال ${healthTimeoutMs}ms.`));
   }
 
-  // 13. Open the default browser — best-effort. The installation itself already succeeded
+  // 14. Open the default browser — best-effort. The installation itself already succeeded
   // (services running, health confirmed) by this point; failing to auto-open a browser is a
   // cosmetic inconvenience the operator can work around manually, never a reason to report an
   // otherwise-successful installation as failed.

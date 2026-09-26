@@ -49,12 +49,16 @@ SERVICE_NAME: StudixPostgreSQL
         SERVICE_START_NAME : LocalSystem
 `;
 
+// START_TYPE is DEMAND_START here — this fixture represents an already-Phase-2-correct
+// registration, so the AppParameters-focused tests below (idempotent no-op, legacy repair) stay
+// about exactly what they say and never trigger an incidental start-type correction call.
+// SC_QC_APP_AUTO_START below is the dedicated fixture for the upgrade-correction scenario.
 const SC_QC_APP = `
 [SC] QueryServiceConfig SUCCESS
 
 SERVICE_NAME: StudixApp
         TYPE               : 10  WIN32_OWN_PROCESS
-        START_TYPE         : 2   AUTO_START
+        START_TYPE         : 3   DEMAND_START
         ERROR_CONTROL      : 1   NORMAL
         BINARY_PATH_NAME   : "C:\\Studix\\nssm.exe"
         LOAD_ORDER_GROUP   :
@@ -63,6 +67,11 @@ SERVICE_NAME: StudixApp
         DEPENDENCIES       : StudixPostgreSQL
         SERVICE_START_NAME : LocalSystem
 `;
+
+// Same service, but still SERVICE_AUTO_START — the realistic pre-Phase-2 state (a service
+// registered by the old registerAppService, or NSSM's own historical default) that Phase 2's
+// upgrade-correction path must detect and fix in place.
+const SC_QC_APP_AUTO_START = SC_QC_APP.replace('START_TYPE         : 3   DEMAND_START', 'START_TYPE         : 2   AUTO_START');
 
 const SC_QUERY_RUNNING = `
 SERVICE_NAME: StudixApp
@@ -207,8 +216,11 @@ describe('startService / stopService / serviceStatus — generic lifecycle', () 
     const execFileSync = vi.fn((cmd, args) => (args[0] === 'qc' ? SC_QC_APP : SC_QUERY_RUNNING));
     const status = serviceStatus('StudixApp', { execFileSync });
     expect(status).toEqual({
+      // SC_QC_APP's START_TYPE reflects the Phase-2-correct DEMAND_START shape — this test is
+      // about serviceStatus() correctly surfacing whatever sc qc reports, not about the value
+      // itself, so it tracks the fixture rather than hardcoding a stale one.
       registered: true, serviceName: 'StudixApp', state: 'RUNNING',
-      binaryPathName: 'C:\\Studix\\nssm.exe', startType: 'AUTO_START', dependencies: ['StudixPostgreSQL'],
+      binaryPathName: 'C:\\Studix\\nssm.exe', startType: 'DEMAND_START', dependencies: ['StudixPostgreSQL'],
     });
   });
 });
@@ -445,6 +457,10 @@ describe('registerAppService', () => {
     expect(result).toEqual({ status: 'registered', serviceName: 'StudixApp' });
     expect(calls).toContainEqual(['nssm.exe', 'install', 'StudixApp', 'C:\\Studix\\node\\node.exe', '"C:\\Studix\\backend\\src\\server.js"']);
     expect(calls).toContainEqual(['nssm.exe', 'set', 'StudixApp', 'AppDirectory', 'C:\\Studix']);
+    // Phase 2 — StudixApp is registered DEMAND_START, never AUTO_START, so the SCM can never
+    // start it ahead of the future startup-orchestrator Scheduled Task.
+    expect(calls).toContainEqual(['nssm.exe', 'set', 'StudixApp', 'Start', 'SERVICE_DEMAND_START']);
+    expect(calls.some((c) => c[3] === 'Start' && c[4] === 'SERVICE_AUTO_START')).toBe(false);
     expect(calls).toContainEqual(['nssm.exe', 'set', 'StudixApp', 'DependOnService', 'StudixPostgreSQL']);
     expect(calls.some((c) => c[0] === 'nssm.exe' && c[1] === 'set' && c[3] === 'AppStdout')).toBe(true);
     expect(calls.some((c) => c[0] === 'nssm.exe' && c[1] === 'set' && c[3] === 'AppStderr')).toBe(true);
@@ -471,7 +487,7 @@ describe('registerAppService', () => {
     expect(scriptArg.endsWith('"')).toBe(true);
   });
 
-  it('idempotent: an already-registered service whose NSSM AppParameters is already correctly quoted is a no-op', () => {
+  it('idempotent: an already-registered service whose NSSM AppParameters is already correctly quoted AND already DEMAND_START is a true no-op', () => {
     const { execFileSync, calls } = fakeIo({ scConfig: SC_QC_APP, appParamsShape: 'quoted' });
     const result = registerAppService(
       { installRoot: 'C:\\Studix', serviceName: 'StudixApp', nssmPath: 'nssm.exe' },
@@ -480,9 +496,10 @@ describe('registerAppService', () => {
     expect(result).toEqual({ status: 'already_registered', serviceName: 'StudixApp' });
     expect(calls.some((c) => c.includes('install'))).toBe(false);
     expect(calls.some((c) => c[1] === 'set' && c[3] === 'AppParameters')).toBe(false);
+    expect(calls.some((c) => c[1] === 'set' && c[3] === 'Start')).toBe(false);
   });
 
-  it('legacy repair: an already-registered service with the pre-fix UNQUOTED AppParameters is corrected in place via nssm set, never reinstalled', () => {
+  it('legacy repair: an already-registered, already-DEMAND_START service with the pre-fix UNQUOTED AppParameters is corrected in place via nssm set, never reinstalled', () => {
     const { execFileSync, calls } = fakeIo({ scConfig: SC_QC_APP, appParamsShape: 'legacy' });
     const result = registerAppService(
       { installRoot: 'C:\\Studix', serviceName: 'StudixApp', nssmPath: 'nssm.exe' },
@@ -492,6 +509,44 @@ describe('registerAppService', () => {
     expect(calls).toContainEqual(['nssm.exe', 'set', 'StudixApp', 'AppParameters', '"C:\\Studix\\backend\\src\\server.js"']);
     expect(calls.some((c) => c.includes('install'))).toBe(false); // non-destructive: no reinstall
     expect(calls.some((c) => c.includes('remove'))).toBe(false); // non-destructive: no unregister
+    expect(calls.some((c) => c[1] === 'set' && c[3] === 'Start')).toBe(false); // already DEMAND_START — nothing to correct
+  });
+
+  // ── Phase 2 — StudixApp DEMAND_START correction ─────────────────────────────────────────
+  it('upgrade correction: an existing StudixApp still registered SERVICE_AUTO_START (pre-Phase-2) is corrected to DEMAND_START via nssm set, never reinstalled', () => {
+    const { execFileSync, calls } = fakeIo({ scConfig: SC_QC_APP_AUTO_START, appParamsShape: 'quoted' });
+    const result = registerAppService(
+      { installRoot: 'C:\\Studix', serviceName: 'StudixApp', nssmPath: 'nssm.exe' },
+      { execFileSync }
+    );
+    expect(result).toEqual({ status: 'corrected', serviceName: 'StudixApp' });
+    expect(calls).toContainEqual(['nssm.exe', 'set', 'StudixApp', 'Start', 'SERVICE_DEMAND_START']);
+    expect(calls.some((c) => c.includes('install'))).toBe(false); // non-destructive: no reinstall
+    expect(calls.some((c) => c.includes('remove'))).toBe(false); // non-destructive: no unregister
+    expect(calls.some((c) => c[1] === 'set' && c[3] === 'AppParameters')).toBe(false); // params already fine — untouched
+  });
+
+  it('upgrade correction is idempotent: re-running against an already-DEMAND_START service issues no further Start change', () => {
+    const { execFileSync, calls } = fakeIo({ scConfig: SC_QC_APP, appParamsShape: 'quoted' });
+    const result = registerAppService(
+      { installRoot: 'C:\\Studix', serviceName: 'StudixApp', nssmPath: 'nssm.exe' },
+      { execFileSync }
+    );
+    expect(result).toEqual({ status: 'already_registered', serviceName: 'StudixApp' });
+    expect(calls.some((c) => c[1] === 'set' && c[3] === 'Start')).toBe(false);
+  });
+
+  it('both corrections at once: a legacy-unquoted, still-AUTO_START service gets AppParameters repaired AND Start corrected in the same call', () => {
+    const { execFileSync, calls } = fakeIo({ scConfig: SC_QC_APP_AUTO_START, appParamsShape: 'legacy' });
+    const result = registerAppService(
+      { installRoot: 'C:\\Studix', serviceName: 'StudixApp', nssmPath: 'nssm.exe' },
+      { execFileSync }
+    );
+    expect(result).toEqual({ status: 'repaired', serviceName: 'StudixApp' });
+    expect(calls).toContainEqual(['nssm.exe', 'set', 'StudixApp', 'AppParameters', '"C:\\Studix\\backend\\src\\server.js"']);
+    expect(calls).toContainEqual(['nssm.exe', 'set', 'StudixApp', 'Start', 'SERVICE_DEMAND_START']);
+    expect(calls.some((c) => c.includes('install'))).toBe(false);
+    expect(calls.some((c) => c.includes('remove'))).toBe(false);
   });
 
   it('fails closed: an already-registered service whose NSSM config does not match ours (neither quoted nor legacy-unquoted) is never overwritten', () => {
