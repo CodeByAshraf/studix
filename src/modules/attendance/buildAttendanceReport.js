@@ -69,7 +69,14 @@ function openWin(html) {
 // ═══════════════════════════════════════════════════════════════════════════
 // 1) تقرير بالمجموعة + حصة معيّنة (تاريخ محدد)
 // ═══════════════════════════════════════════════════════════════════════════
-export function openGroupSessionReport({ group, date, sessionTime, students, attendance, profile }) {
+// Group Closure (Attendance Integration) — eligibleStudentIds (fetched by the caller via
+// pgGetEligibleStudentsForSession, attendanceEligibility.js on the server, evaluated
+// against THIS report's own historical date — not today's current enrollment) replaces the
+// old students.groupId===group.id filter. Unioned with anyone who actually has a recorded
+// session for this exact group/date: a real persisted attendance record must never be
+// silently dropped just because that student's enrollment state has since changed — this
+// function stays a pure/sync renderer, so it never fetches eligibility itself.
+export function openGroupSessionReport({ group, date, sessionTime, students, attendance, profile, eligibleStudentIds = [] }) {
   if (!group || !date) return;
 
   // سجلات هذه الحصة (نفس المجموعة والتاريخ، واختيارياً نفس الوقت)
@@ -79,7 +86,9 @@ export function openGroupSessionReport({ group, date, sessionTime, students, att
     (!sessionTime || r.sessionTime === sessionTime)
   );
 
-  const groupStudents = students.filter(s => s.groupId === group.id && s.status === 'active');
+  const rosterIds = new Set(eligibleStudentIds);
+  sessionRecs.forEach(r => rosterIds.add(r.studentId));
+  const groupStudents = students.filter(s => rosterIds.has(s.id));
 
   const rows = groupStudents.map(s => {
     const rec = sessionRecs.find(r => r.studentId === s.id);

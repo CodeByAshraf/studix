@@ -254,7 +254,7 @@ describe('InventoryPage — material CRUD now writes through the real inv_materi
     expect(useAppStore.getState().invMaterials).toEqual([existing]);
   });
 
-  it('delete: calls DELETE /api/invMaterials/:id, does not touch local state before success, then removes the material', async () => {
+  it('delete: opens a confirmation dialog first (no network call yet), then calls DELETE /api/invMaterials/:id only after confirming, does not touch local state before success, then removes the material', async () => {
     const existing = { id: '1', code: 'MAT-000001', name: 'مادة للحذف', subject: DEFAULT_SUBJECT, grade: DEFAULT_GRADE, price: 50 };
     seedStore({ invMaterials: [existing] });
 
@@ -264,6 +264,12 @@ describe('InventoryPage — material CRUD now writes through the real inv_materi
     renderPage();
     fireEvent.click(screen.getByText('مادة للحذف'));
     fireEvent.click(screen.getByRole('button', { name: 'حذف' }));
+
+    // F-Inv1: a click on "حذف" must only open a confirmation dialog, not delete immediately.
+    expect(await screen.findByText('تأكيد الحذف')).toBeInTheDocument();
+    expect(deleteCalls()).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole('button', { name: 'نعم، احذف' }));
 
     await waitFor(() => expect(deleteCalls()).toHaveLength(1));
     expect(decodeURIComponent(deleteCalls()[0][0].split('/api/invMaterials/')[1])).toBe('1');
@@ -285,12 +291,13 @@ describe('InventoryPage — material CRUD now writes through the real inv_materi
     renderPage();
     fireEvent.click(screen.getByText('مادة للحذف'));
     fireEvent.click(screen.getByRole('button', { name: 'حذف' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'نعم، احذف' }));
 
     expect(await screen.findByText('انتهاك مفتاح خارجي (سجل مرتبط غير موجود).')).toBeInTheDocument();
     expect(useAppStore.getState().invMaterials).toEqual([existing]);
   });
 
-  it('delete blocked locally when the material has inventory transactions — no network call is made', async () => {
+  it('delete blocked locally when the material has inventory transactions — no network call is made, no confirmation dialog opens', async () => {
     const existing = { id: '1', code: 'MAT-000001', name: 'مادة محجوزة', subject: DEFAULT_SUBJECT, grade: DEFAULT_GRADE, price: 50 };
     const txn = { id: 't1', number: 'INV-000001', materialId: '1', type: 'purchase', quantity: 5, createdAt: '2026-01-01T00:00:00.000Z' };
     seedStore({ invMaterials: [existing], inventoryTxn: [txn] });
@@ -300,6 +307,23 @@ describe('InventoryPage — material CRUD now writes through the real inv_materi
     fireEvent.click(screen.getByRole('button', { name: 'حذف' }));
 
     expect(await screen.findByText('لا يمكن حذف مادة لها حركات مخزون')).toBeInTheDocument();
+    expect(screen.queryByText('تأكيد الحذف')).not.toBeInTheDocument();
+    expect(deleteCalls()).toHaveLength(0);
+    expect(useAppStore.getState().invMaterials).toEqual([existing]);
+  });
+
+  it('F-Inv1: dismissing the confirmation dialog (cancel) does not delete the material', async () => {
+    const existing = { id: '1', code: 'MAT-000001', name: 'مادة للحذف', subject: DEFAULT_SUBJECT, grade: DEFAULT_GRADE, price: 50 };
+    seedStore({ invMaterials: [existing] });
+
+    renderPage();
+    fireEvent.click(screen.getByText('مادة للحذف'));
+    fireEvent.click(screen.getByRole('button', { name: 'حذف' }));
+    expect(await screen.findByText('تأكيد الحذف')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'إلغاء' }));
+
+    await waitFor(() => expect(screen.queryByText('تأكيد الحذف')).not.toBeInTheDocument());
     expect(deleteCalls()).toHaveLength(0);
     expect(useAppStore.getState().invMaterials).toEqual([existing]);
   });

@@ -1,11 +1,12 @@
 // src/modules/homework/HomeworkTracking.jsx
 // Track submission status for every student in a group for a given homework
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useAppStore } from '../../store/app.store';
 import { useToast } from '../../components/Toast';
 import Button       from '../../components/ui/Button';
 import { SUB_STATUS, getHomeworkEligibleStudents } from '../../services/homeworkService';
-import { pgSaveHwSubmissions } from '../../services/api';
+import { pgSaveHwSubmissions, pgGetHwSubmissions } from '../../services/api';
+import { useAsyncData } from '../../hooks/useAsyncData';
 import { formatDate } from '../../utils/helpers';
 import { openHomeworkReportPrint } from './buildHomeworkReport';
 
@@ -124,9 +125,39 @@ function StudentRow({ student, sub, hw, onChange }) {
 }
 
 // ── Main tracking component ──────────────────────────────────
+// C4 Grades/hwSubmissions Frontend Migration (Batch A, feature 004): HomeworkTracking now
+// fetches its submissions scoped to this homework (GET /api/hwSubmissions?homeworkId=) instead
+// of reading the global store array. Correctness requirement, not cosmetic (research.md §5 of
+// the feature spec): the editable table below seeds its local per-student status state via a
+// ONE-TIME useState lazy initializer — if that table mounted before the scoped fetch resolved,
+// it would permanently seed itself blank and never re-sync. This outer component gates the
+// inner tracker's mount behind the fetch's loading flag, so the lazy initializer always runs
+// against real data.
 export default function HomeworkTracking({ hw, onClose }) {
+  const toast = useToast();
+  const { data: hwSubmissions = [], loading: subsLoading, error: subsError } = useAsyncData(
+    () => pgGetHwSubmissions({ homeworkId: hw.id }), [hw.id], []);
+
+  useEffect(() => {
+    if (subsError) toast.error(subsError.message || 'فشل تحميل تسليمات الواجب');
+  }, [subsError]);
+
+  if (subsLoading) {
+    return (
+      <div style={{ textAlign:'center', padding:'48px 20px', color:'var(--text3)' }}>
+        جارِ التحميل...
+      </div>
+    );
+  }
+
+  return <HomeworkTrackingBody hw={hw} onClose={onClose} hwSubmissions={hwSubmissions} />;
+}
+
+// The actual editable tracker — mounted only once HomeworkTracking above confirms the scoped
+// submissions fetch has resolved, so localSubs' lazy initializer (below) always seeds from
+// real data.
+function HomeworkTrackingBody({ hw, onClose, hwSubmissions }) {
   const groups               = useAppStore((s) => s.groups);
-  const hwSubmissions        = useAppStore((s) => s.hwSubmissions);
   const setHwSubmissions     = useAppStore((s) => s.setHwSubmissions);
   const students             = useAppStore((s) => s.students);
   const centerProfile        = useAppStore((s) => s.centerProfile);

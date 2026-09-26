@@ -1,11 +1,15 @@
 // src/modules/payments/PaymentReports.jsx
-import { useState, useMemo } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { useAppStore } from '../../store/app.store';
-import { MONTHS_AR, getMonthlyBreakdown, getRevenueByGroup, getStudentFee, getRefundedAmount, getNetRevenue } from '../../services/paymentService';
+import { MONTHS_AR, getStudentFee, zeroFillMonthlyAggregate, zeroFillGroupAggregate } from '../../services/paymentService';
+import { pgGetPayments, pgGetPaymentAggregates } from '../../services/api';
+import { useAsyncData } from '../../hooks/useAsyncData';
+import { useToast } from '../../components/Toast';
 import { formatCurrency } from '../../utils/helpers';
 import { PrintHeader } from '../../components/shared';
 import { openPaymentsReportPrint, openStudentPaymentsReport } from './buildPaymentsReport';
 import Button from '../../components/ui/Button';
+import StudentSearchSelect from '../../components/ui/StudentSearchSelect';
 
 function BarChart({ data, valueKey, labelKey, colorFn, maxVal, height = 120 }) {
   const max = maxVal || Math.max(...data.map(d => d[valueKey]), 1);
@@ -59,47 +63,63 @@ function StatCard({ title, value, sub, color = 'var(--text)' }) {
 // ─────────────────────────────────────────────────────────────
 export default function PaymentReports() {
   const groups               = useAppStore((s) => s.groups);
-  const payments             = useAppStore((s) => s.payments);
   const students             = useAppStore((s) => s.students);
   const treasuryTxn          = useAppStore((s) => s.treasuryTxn);
   const [reportTab, setReportTab] = useState('monthly');
   const [year, setYear] = useState(new Date().getFullYear());
   const centerProfile        = useAppStore((s) => s.centerProfile);
+  const toast = useToast();
   // اختيارات كشف الطباعة (مجموعة + شهر)
   const [printGroupId, setPrintGroupId] = useState('');
   const [printMonth, setPrintMonth] = useState(new Date().getMonth() + 1);
   const [printMode, setPrintMode] = useState('group'); // 'group' | 'student'
   const [printStudentId, setPrintStudentId] = useState('');
 
+  const currentMonth = new Date().getMonth() + 1;
+
+  // Scalability Architecture Phase 4 Cutover 1: كل الأرقام هنا تصل الآن من GET
+  // /api/payments/aggregate بدل مصفوفة payments الكاملة — بلا أي تغيير على صيغة أي حساب
+  // (نفس getMonthlyBreakdown/getRevenueByGroup/getRefundedAmount بالضبط)، مُتحقَّق تكافؤها
+  // في تدقيق Phase 4 Step 3، بما فيها الاحتفاظ بسلوك dailyData الحالي بالضبط: شهر "الآن"
+  // الحقيقي × سنة المُختارة من القائمة (تركيبة مقصودة موجودة أصلاً، لا تُصحَّح هنا).
+  const { data: monthlyAggRows = [], error: monthlyErr } = useAsyncData(
+    () => pgGetPaymentAggregates({ groupBy: 'month', year }), [year], []);
+  const { data: groupAggRows = [], error: groupErr } = useAsyncData(
+    () => pgGetPaymentAggregates({ groupBy: 'group' }), [], []);
+  const { data: dailyAggRows = [], error: dailyErr } = useAsyncData(
+    () => pgGetPaymentAggregates({ groupBy: 'day', month: currentMonth, year }), [currentMonth, year], []);
+  // إيراد كل مجموعة لشهر "الآن" الحقيقي × سنة المُختارة معاً (تبويب "حسب المجموعة") —
+  // نداء واحد لكل المجموعات معاً بدل نداء منفصل لكل صفّ جدول.
+  const { data: groupMonthAggRows = [], error: groupMonthErr } = useAsyncData(
+    () => pgGetPaymentAggregates({ groupBy: 'group', month: currentMonth, year }), [currentMonth, year], []);
+
+  useEffect(() => {
+    const err = monthlyErr || groupErr || dailyErr || groupMonthErr;
+    if (err) toast.error(err.message || 'فشل تحميل تقارير المدفوعات');
+  }, [monthlyErr, groupErr, dailyErr, groupMonthErr]);
+
   // ── Monthly breakdown ─────────────────────────────────────
-  const monthly = useMemo(() => getMonthlyBreakdown(payments, year, treasuryTxn), [payments, year, treasuryTxn]);
+  const monthly = useMemo(() => zeroFillMonthlyAggregate(monthlyAggRows), [monthlyAggRows]);
   const totalYear = monthly.reduce((s, m) => s + m.revenue, 0);
   const bestMonth = monthly.reduce((best, m) => m.revenue > best.revenue ? m : best, { revenue: 0, label: '—' });
   const avgMonthly = Math.round(totalYear / 12);
 
   // ── Group breakdown ───────────────────────────────────────
-  const byGroup = useMemo(() => getRevenueByGroup(payments, groups, treasuryTxn), [payments, groups, treasuryTxn]);
+  const byGroup = useMemo(() => zeroFillGroupAggregate(groupAggRows, groups), [groupAggRows, groups]);
   const maxGroupRev = Math.max(...byGroup.map(g => g.revenue), 1);
+  const revenueByGroupThisMonth = useMemo(
+    () => new Map(zeroFillGroupAggregate(groupMonthAggRows, groups).map(g => [g.id, g.revenue])),
+    [groupMonthAggRows, groups],
+  );
 
   // ── Daily (current month) ─────────────────────────────────
-  const currentMonth = new Date().getMonth() + 1;
-  const dailyData = useMemo(() => {
-    const thisMonthPayments = payments.filter(p => {
-      const d = new Date(p.date);
-      return d.getMonth() + 1 === currentMonth && d.getFullYear() === year;
-    });
-    const byDay = {};
-    thisMonthPayments.forEach(p => {
-      byDay[p.date] = (byDay[p.date] || 0) + (p.amount - getRefundedAmount(p.id, treasuryTxn));
-    });
-    return Object.entries(byDay)
-      .sort(([a],[b]) => a.localeCompare(b))
-      .map(([date, revenue]) => ({
-        date,
-        label: new Date(date).getDate() + '/' + (new Date(date).getMonth()+1),
-        revenue,
-      }));
-  }, [payments, currentMonth, year, treasuryTxn]);
+  const dailyData = useMemo(() =>
+    dailyAggRows.slice().sort((a, b) => a.key.localeCompare(b.key)).map(r => ({
+      date: r.key,
+      label: new Date(r.key).getDate() + '/' + (new Date(r.key).getMonth() + 1),
+      revenue: r.revenue,
+    })),
+  [dailyAggRows]);
 
   const dailyTotal = dailyData.reduce((s, d) => s + d.revenue, 0);
 
@@ -243,7 +263,7 @@ export default function PaymentReports() {
                   const groupActiveStudents = students.filter(s => s.groupId === g.id && s.status === 'active');
                   const studentCount = groupActiveStudents.length;
                   const expectedMonthly = groupActiveStudents.reduce((sum, s) => sum + getStudentFee(s, g), 0);
-                  const currentMonthRevenue = getNetRevenue(payments.filter(p => p.groupId === g.id && p.month === currentMonth && p.year === year), treasuryTxn);
+                  const currentMonthRevenue = revenueByGroupThisMonth.get(g.id) ?? 0;
                   const paymentRate = expectedMonthly > 0 ? Math.round(currentMonthRevenue/expectedMonthly*100) : 0;
                   return (
                     <tr key={g.id} onMouseOver={e=>Array.from(e.currentTarget.cells).forEach(td=>td.style.background='var(--surface2)')} onMouseOut={e=>Array.from(e.currentTarget.cells).forEach(td=>td.style.background='')}>
@@ -314,22 +334,36 @@ export default function PaymentReports() {
               {printMode === 'student' && (
                 <div>
                   <label style={lblStyle}>الطالب</label>
-                  <select value={printStudentId} onChange={e=>setPrintStudentId(e.target.value)} style={selStyle} disabled={!printGroupId}>
-                    <option value="">{!printGroupId ? 'اختر المجموعة أولاً...' : 'اختر الطالب...'}</option>
-                    {modeStudents.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-                  </select>
+                  <StudentSearchSelect
+                    students={modeStudents}
+                    value={printStudentId}
+                    onChange={(id) => setPrintStudentId(id)}
+                    disabled={!printGroupId}
+                    placeholder={!printGroupId ? 'اختر المجموعة أولاً...' : 'ابحث عن الطالب...'}
+                  />
                 </div>
               )}
 
               <Button variant="primary"
                 disabled={printMode==='group' ? !printGroupId : (!printGroupId || !printStudentId)}
-                onClick={() => {
+                onClick={async () => {
                   const group = groups.find(g => g.id === printGroupId);
-                  if (printMode === 'group') {
-                    openPaymentsReportPrint({ group, month:printMonth, year, students, payments, profile:centerProfile, treasuryTxn });
-                  } else {
-                    const student = students.find(s => s.id === printStudentId);
-                    openStudentPaymentsReport({ student, group, payments, profile:centerProfile, treasuryTxn });
+                  try {
+                    // Scalability Architecture Phase 4 Cutover 1: بدل مصفوفة payments
+                    // الكاملة، يُجلَب فقط نطاق هذا الكشف تحديداً (مجموعة+شهر+سنة، أو كل
+                    // تاريخ طالب واحد) عند الطلب — نفس المُدخَل الذي كانت
+                    // openPaymentsReportPrint/openStudentPaymentsReport تُصفّيانه داخلياً
+                    // من المصفوفة الكاملة أصلاً، بلا أي تغيير على الدالتين نفسيهما.
+                    if (printMode === 'group') {
+                      const scopedPayments = await pgGetPayments({ groupId: printGroupId, month: printMonth, year });
+                      openPaymentsReportPrint({ group, month:printMonth, year, students, payments: scopedPayments, profile:centerProfile, treasuryTxn });
+                    } else {
+                      const student = students.find(s => s.id === printStudentId);
+                      const scopedPayments = await pgGetPayments({ studentId: printStudentId });
+                      openStudentPaymentsReport({ student, group, payments: scopedPayments, profile:centerProfile, treasuryTxn });
+                    }
+                  } catch (e) {
+                    toast.error(e.message || 'فشل تحميل بيانات كشف المدفوعات');
                   }
                 }} style={{ marginTop:6 }}>
                 🖨 توليد الكشف وطباعته

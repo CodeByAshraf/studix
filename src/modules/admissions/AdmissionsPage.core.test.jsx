@@ -37,6 +37,9 @@ beforeEach(() => {
     const u = String(url);
     const method = opts.method || 'GET';
     const body = opts.body ? JSON.parse(opts.body) : {};
+    // AdmissionsPage.jsx's single page-mount fetch of admissionPayments (Phase 4) — not
+    // exercised by these core admissions/followups/system-log write-path tests.
+    if (u.includes('/api/admissionPayments') && method === 'GET') return Promise.resolve(okJson([]));
     if (u.endsWith('/api/admissions') && method === 'POST') return Promise.resolve(postAdmissionResponder(body));
     if (u.endsWith('/api/admissions') && method === 'GET')  return Promise.resolve(okJson(getAdmissionsResponder()));
     if (u.includes('/api/admissions/') && method === 'PUT') {

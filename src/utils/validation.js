@@ -84,6 +84,24 @@ export const validators = {
     return null;
   },
 
+  // Exams Phase 3C — "HH:MM", 24-hour, 00:00–23:59. Optional (empty is valid — same
+  // early-return pattern as dateString above), matching the existing groups.time /
+  // attendance.session_time convention (a plain string, not a real time-of-day widget
+  // constraint enforced anywhere else).
+  timeString: (value) => {
+    if (!value) return null;
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(value)) return 'تنسيق الوقت غير صحيح (HH:MM)';
+    return null;
+  },
+
+  // Exams Phase 3C — optional positive whole number (minutes). Empty is valid.
+  positiveInteger: (label = 'القيمة') => (value) => {
+    if (value === null || value === undefined || value === '') return null;
+    const n = Number(value);
+    if (!Number.isInteger(n) || n <= 0) return `${label} يجب أن يكون رقماً صحيحاً أكبر من صفر`;
+    return null;
+  },
+
   notFuture: (label = 'التاريخ') => (value) => {
     if (!value) return null;
     if (new Date(value) > new Date()) return `${label} لا يمكن أن يكون في المستقبل`;
@@ -208,6 +226,9 @@ export const examSchema = {
   date:    compose(validators.required('التاريخ'), validators.dateString),
   total:   compose(validators.required('الدرجة الكلية'), validators.positiveNumber('الدرجة الكلية')),
   pass:    compose(validators.required('درجة النجاح'), validators.nonNegative('درجة النجاح')),
+  // Exams Phase 3C — both optional; providing one never requires the other.
+  scheduledTime:   validators.timeString,
+  durationMinutes: validators.positiveInteger('المدة'),
 };
 
 export const materialSchema = {

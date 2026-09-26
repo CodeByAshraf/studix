@@ -1,6 +1,6 @@
 // src/modules/attendance/AbsenceFollowup.jsx
 // نظام متابعة الغياب — سبب الغياب من ولي الأمر + متابعة السكرتيرة
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { useAppStore } from '../../store/app.store';
 import { useAuth }     from '../../store/auth.context';
 import { useToast } from '../../components/Toast';
@@ -8,6 +8,8 @@ import Button       from '../../components/ui/Button';
 import { Modal }    from '../../components/ui/Modal';
 import { formatDate } from '../../utils/helpers';
 import { pgCreateAbsenceFollowup, pgUpdateAbsenceFollowup } from '../../services/api';
+import { buildAbsenceMessage, getAbsenceContactPhone, getSessionTeacherName, openWhatsapp } from './absenceWhatsappService';
+import { classifyAbsenceFollowups } from '../../services/attendanceService';
 
 // ── Status config ────────────────────────────────────────────
 const FOLLOW_STATUS = {
@@ -150,13 +152,176 @@ function FollowupModal({ record, student, group, onSave, onClose, currentUser })
   );
 }
 
+// ── Section table (نفس الجدول القديم بالضبط، مُستخرَج ليُستخدَم مرة لكل قسم) ──────
+function FollowupTable({ items, groups, onOpenRow, onWhatsapp, emptyText }) {
+  if (items.length === 0) {
+    return (
+      <div style={{ textAlign:'center', padding:'40px', color:'var(--text3)' }}>
+        <div style={{ fontSize:36, opacity:.3, marginBottom:8 }}>✅</div>
+        <div style={{ fontWeight:600, fontSize:'0.85rem' }}>{emptyText}</div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ overflowX:'auto' }}>
+      <table style={{ width:'100%', borderCollapse:'collapse', fontSize:'0.82rem' }}>
+        <thead>
+          <tr style={{ background:'var(--surface2)' }}>
+            {['الطالب','المجموعة','تاريخ الغياب','سبب الغياب','ولي الأمر أبلغ','حالة المتابعة','المتابع','آخر تحديث',''].map(h=>(
+              <th key={h} style={{ padding:'10px 14px', fontSize:'0.63rem', fontWeight:700, color:'var(--text3)', textAlign:'right', borderBottom:'1px solid var(--border)', textTransform:'uppercase', letterSpacing:'0.07em', whiteSpace:'nowrap' }}>{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {items.map(({ attendance: attRecord, student, followup }) => {
+            const group = groups.find(g => g.id === attRecord.groupId);
+            const { bg, color } = av(student?.name||'');
+            const letters = (student?.name||'').split(' ').map(w=>w[0]).slice(0,2).join('');
+            const statusKey = followup?.followStatus || 'pending';
+            const meta      = FOLLOW_STATUS[statusKey];
+            const isPending = statusKey === 'pending';
+
+            return (
+              <tr key={attRecord.id}
+                style={{ background: isPending ? 'rgba(239,68,68,.02)' : 'transparent', transition:'background .12s', cursor:'pointer' }}
+                onMouseOver={e=>Array.from(e.currentTarget.cells).forEach(td=>td.style.background='var(--surface2)')}
+                onMouseOut={e =>Array.from(e.currentTarget.cells).forEach(td=>td.style.background=isPending?'rgba(239,68,68,.02)':'')}
+                onClick={() => onOpenRow(attRecord, followup)}
+              >
+                {/* Student */}
+                <td style={{ padding:'11px 14px', borderBottom:'1px solid var(--border)' }}>
+                  <div style={{ display:'flex', alignItems:'center', gap:9 }}>
+                    <div style={{ width:32, height:32, borderRadius:'50%', background:bg, color, display:'flex', alignItems:'center', justifyContent:'center', fontSize:'0.72rem', fontWeight:700, flexShrink:0 }}>{letters}</div>
+                    <div>
+                      <div style={{ fontWeight:700, fontSize:'0.88rem' }}>{student?.name||'—'}</div>
+                      <div style={{ fontSize:'0.68rem', color:'var(--text3)', fontFamily:'Cairo,sans-serif' }}>{student?.phone}</div>
+                    </div>
+                  </div>
+                </td>
+
+                {/* Group */}
+                <td style={{ padding:'11px 14px', borderBottom:'1px solid var(--border)', fontSize:'0.76rem', color:'var(--text2)' }}>
+                  {group?.name||'—'}
+                </td>
+
+                {/* Date */}
+                <td style={{ padding:'11px 14px', borderBottom:'1px solid var(--border)', fontFamily:'Cairo,sans-serif', fontSize:'0.78rem', color:'var(--text3)', whiteSpace:'nowrap' }}>
+                  {formatDate(attRecord.date, {weekday:'short',month:'short',day:'numeric'})}
+                </td>
+
+                {/* Absence reason */}
+                <td style={{ padding:'11px 14px', borderBottom:'1px solid var(--border)', maxWidth:180, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                  {followup?.absenceReason
+                    ? <span style={{ color:'var(--text)' }}>{followup.absenceReason}</span>
+                    : <span style={{ color:'var(--text3)', fontStyle:'italic', fontSize:'0.76rem' }}>لم يُحدد بعد</span>
+                  }
+                </td>
+
+                {/* Parent contacted */}
+                <td style={{ padding:'11px 14px', borderBottom:'1px solid var(--border)', textAlign:'center' }}>
+                  {followup?.parentContactedUs
+                    ? <span style={{ color:'#10b981', fontWeight:700, fontSize:'0.82rem' }}>✓ نعم</span>
+                    : <span style={{ color:'var(--text3)', fontSize:'0.76rem' }}>—</span>
+                  }
+                </td>
+
+                {/* Follow status badge */}
+                <td style={{ padding:'11px 14px', borderBottom:'1px solid var(--border)', whiteSpace:'nowrap' }}>
+                  <span style={{ display:'inline-flex', alignItems:'center', gap:5, padding:'4px 10px', borderRadius:99, fontSize:'0.7rem', fontWeight:700,
+                    background:meta.bg, color:meta.color, border:`1px solid ${meta.border}`,
+                    animation: isPending ? 'pulse 2s infinite' : 'none',
+                  }}>
+                    {meta.icon} {meta.label}
+                  </span>
+                </td>
+
+                {/* Followed by */}
+                <td style={{ padding:'11px 14px', borderBottom:'1px solid var(--border)', fontSize:'0.76rem', color:'var(--text2)' }}>
+                  {followup?.followedBy || <span style={{ color:'var(--text3)' }}>—</span>}
+                </td>
+
+                {/* Last updated */}
+                <td style={{ padding:'11px 14px', borderBottom:'1px solid var(--border)', fontSize:'0.72rem', color:'var(--text3)', whiteSpace:'nowrap' }}>
+                  {followup?.followedAt
+                    ? formatDate(followup.followedAt.split('T')[0], {month:'short',day:'numeric'}) + ' ' + followup.followedAt.split('T')[1]?.slice(0,5)
+                    : <span style={{ color:'var(--red)', fontWeight:700 }}>لم تتم المتابعة</span>
+                  }
+                </td>
+
+                {/* Action */}
+                <td style={{ padding:'11px 14px', borderBottom:'1px solid var(--border)' }}>
+                  <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
+                    <button
+                      onClick={e => { e.stopPropagation(); onOpenRow(attRecord, followup); }}
+                      style={{ padding:'4px 12px', borderRadius:7, fontSize:'0.72rem', fontWeight:700, cursor:'pointer', fontFamily:'Cairo,sans-serif', transition:'all .12s',
+                        border:     isPending ? 'none'             : '1px solid var(--border)',
+                        background: isPending ? '#ef4444'          : 'var(--surface2)',
+                        color:      isPending ? '#fff'             : 'var(--text2)',
+                      }}
+                      onMouseOver={e => { if(!isPending){e.currentTarget.style.borderColor='var(--accent)';e.currentTarget.style.color='var(--accent)';} }}
+                      onMouseOut={e  => { if(!isPending){e.currentTarget.style.borderColor='var(--border)';e.currentTarget.style.color='var(--text2)';} }}
+                    >
+                      {isPending ? '⚡ متابعة' : '✎ تعديل'}
+                    </button>
+                    {(() => {
+                      const hasPhone = !!getAbsenceContactPhone(student);
+                      return (
+                        <button
+                          onClick={e => { e.stopPropagation(); onWhatsapp(student, group, attRecord); }}
+                          disabled={!hasPhone}
+                          title={hasPhone ? '' : 'لا يوجد رقم هاتف لولي الأمر أو الطالب'}
+                          style={{ padding:'4px 12px', borderRadius:7, fontSize:'0.72rem', fontWeight:700, fontFamily:'Cairo,sans-serif', transition:'all .12s',
+                            cursor:  hasPhone ? 'pointer' : 'not-allowed',
+                            opacity: hasPhone ? 1 : 0.5,
+                            border:  '1px solid rgba(37,211,102,.35)',
+                            background: hasPhone ? '#25D366' : 'var(--surface2)',
+                            color:      hasPhone ? '#fff'    : 'var(--text3)',
+                          }}
+                        >
+                          {hasPhone ? '📲 واتساب' : '📲 لا يوجد هاتف'}
+                        </button>
+                      );
+                    })()}
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ── Section wrapper (عنوان + عدّاد + الجدول) ──────────────────────────────────
+function FollowupSection({ title, icon, items, groups, onOpenRow, onWhatsapp, emptyText, alert }) {
+  return (
+    <div style={{ background:'var(--surface)', border:`1px solid ${alert ? 'rgba(239,68,68,.25)' : 'var(--border)'}`, borderRadius:14, overflow:'hidden' }}>
+      <div style={{ display:'flex', alignItems:'center', gap:8, padding:'12px 16px', borderBottom:'1px solid var(--border)', background:'var(--surface2)' }}>
+        <span style={{ fontSize:'0.95rem' }}>{icon}</span>
+        <span style={{ fontWeight:700, fontSize:'0.88rem' }}>{title}</span>
+        <span style={{
+          marginRight:'auto', fontSize:'0.7rem', fontWeight:700, padding:'2px 10px', borderRadius:99,
+          background: alert && items.length>0 ? 'rgba(239,68,68,.12)' : 'var(--surface3)',
+          color:      alert && items.length>0 ? '#ef4444' : 'var(--text3)',
+        }}>
+          {items.length}
+        </span>
+      </div>
+      <FollowupTable items={items} groups={groups} onOpenRow={onOpenRow} onWhatsapp={onWhatsapp} emptyText={emptyText}/>
+    </div>
+  );
+}
+
 // ════════════════════════════════════════════════════════════
-export default function AbsenceFollowup() {
+export default function AbsenceFollowup({ initialAttendanceId = null } = {}) {
   const absenceFollowup      = useAppStore((s) => s.absenceFollowup);
   const attendance           = useAppStore((s) => s.attendance);
   const groups               = useAppStore((s) => s.groups);
   const setAbsenceFollowup   = useAppStore((s) => s.setAbsenceFollowup);
   const students             = useAppStore((s) => s.students);
+  const centerProfile        = useAppStore((s) => s.centerProfile);
 
   const { currentUser } = useAuth();
   const toast = useToast();
@@ -167,50 +332,65 @@ export default function AbsenceFollowup() {
   const [filterDate,  setFilterDate]  = useState('');
   const [search,      setSearch]      = useState('');
 
-  // ── Get all absent records ────────────────────────────────
-  const absentRecords = useMemo(() => {
-    return attendance
-      .filter(r => r.status === 'absent')
-      .map(r => {
-        const student  = students.find(s => s.id === r.studentId);
-        const group    = groups.find(g => g.id === r.groupId);
-        const followup = absenceFollowup.find(f => f.attendanceId === r.id);
-        return { attRecord:r, student, group, followup };
-      })
-      .filter(x => x.student) // only known students
-      .sort((a,b) => b.attRecord.date.localeCompare(a.attRecord.date));
-  }, [attendance, students, groups, absenceFollowup]);
+  // ── تصنيف: تحتاج إجراء / متأخرة / سجل ──────────────────────
+  // classifyAbsenceFollowups (attendanceService.js) هو مصدر الحقيقة الوحيد للتصنيف —
+  // نفس معيار "غياب بلا متابعة مكتملة" المستخدَم بالفعل هنا سابقاً (followup?.followStatus
+  // || 'pending')، فقط مقسَّماً حسب attendance.date مقابل اليوم (مقارنة تقويمية، لا 24 ساعة).
+  const classification = useMemo(
+    () => classifyAbsenceFollowups(attendance, absenceFollowup, students),
+    [attendance, absenceFollowup, students],
+  );
 
-  // ── Filter ────────────────────────────────────────────────
-  const filtered = useMemo(() => {
+  const matchesFilters = useCallback((x) => {
     const q = search.toLowerCase();
-    return absentRecords.filter(x => {
-      if (filterGroup  && x.attRecord.groupId !== filterGroup) return false;
-      if (filterDate   && x.attRecord.date    !== filterDate)  return false;
-      if (filterStatus) {
-        const status = x.followup?.followStatus || 'pending';
-        if (status !== filterStatus) return false;
-      }
-      if (q) {
-        const match = x.student?.name.toLowerCase().includes(q) ||
-                      x.student?.phone?.includes(search)         ||
-                      x.followup?.absenceReason?.toLowerCase().includes(q);
-        if (!match) return false;
-      }
-      return true;
-    });
-  }, [absentRecords, filterGroup, filterStatus, filterDate, search]);
+    if (filterGroup  && x.attendance.groupId !== filterGroup) return false;
+    if (filterDate   && x.attendance.date    !== filterDate)  return false;
+    if (filterStatus) {
+      const status = x.followup?.followStatus || 'pending';
+      if (status !== filterStatus) return false;
+    }
+    if (q) {
+      const match = x.student?.name.toLowerCase().includes(q) ||
+                    x.student?.phone?.includes(search)         ||
+                    x.followup?.absenceReason?.toLowerCase().includes(q);
+      if (!match) return false;
+    }
+    return true;
+  }, [filterGroup, filterStatus, filterDate, search]);
 
-  // ── Summary stats ─────────────────────────────────────────
+  const sortByDateDesc = (a, b) => b.attendance.date.localeCompare(a.attendance.date);
+
+  const activeItems  = useMemo(() => classification.active.filter(matchesFilters).sort(sortByDateDesc),  [classification.active,  matchesFilters]);
+  const overdueItems = useMemo(() => classification.overdue.filter(matchesFilters).sort(sortByDateDesc), [classification.overdue, matchesFilters]);
+  const historyItems = useMemo(() => classification.history.filter(matchesFilters).sort(sortByDateDesc), [classification.history, matchesFilters]);
+
+  // ── Summary stats (على كل الأقسام الثلاثة، بلا فلاتر — نفس معنى الإحصائيات السابق) ──
   const stats = useMemo(() => {
-    const total     = absentRecords.length;
-    const pending   = absentRecords.filter(x => !x.followup || x.followup.followStatus==='pending').length;
-    const contacted = absentRecords.filter(x => x.followup?.followStatus==='contacted').length;
-    const excused   = absentRecords.filter(x => x.followup?.followStatus==='excused').length;
-    const unexcused = absentRecords.filter(x => x.followup?.followStatus==='unexcused').length;
-    const parentCalled = absentRecords.filter(x => x.followup?.parentContactedUs).length;
+    const { active, overdue, history } = classification;
+    const total     = active.length + overdue.length + history.length;
+    const pending   = active.length + overdue.length;
+    const contacted = history.filter(x => x.followup?.followStatus==='contacted').length;
+    const excused   = history.filter(x => x.followup?.followStatus==='excused').length;
+    const unexcused = history.filter(x => x.followup?.followStatus==='unexcused').length;
+    const parentCalled = [...active, ...overdue, ...history].filter(x => x.followup?.parentContactedUs).length;
     return { total, pending, contacted, excused, unexcused, parentCalled };
-  }, [absentRecords]);
+  }, [classification]);
+
+  // ── Deep link من إشعار غياب متأخر ("متابعة الآن") ──────────
+  // يفتح مودال المتابعة تلقائياً للسجل المستهدَف، مرة واحدة فقط (didAutoOpen) — لا يُعاد
+  // فتحه بعد ذلك حتى لو تغيّرت classification نتيجة الحفظ نفسه (وإلا كان سيُعيد فتح
+  // المودال فور نجاح الحفظ). لو لم يُوجَد السجل بعد (بيانات لم تصل من الخادم بعد)، يُعاد
+  // المحاولة تلقائياً في الـ render التالي (لا يُثبَّت didAutoOpen إلا عند النجاح).
+  const didAutoOpen = useRef(false);
+  useEffect(() => {
+    if (didAutoOpen.current || !initialAttendanceId) return;
+    const all = [...classification.active, ...classification.overdue, ...classification.history];
+    const match = all.find(x => x.attendance.id === initialAttendanceId);
+    if (match) {
+      didAutoOpen.current = true;
+      setModal({ open:true, attRecord: match.attendance, existing: match.followup || null });
+    }
+  }, [initialAttendanceId, classification]);
 
   // ── Save followup ─────────────────────────────────────────
   // مصدر الحقيقة هو الخادم (PostgreSQL) — لا تعديل محلي إلا بعد نجاح الاستدعاء،
@@ -245,6 +425,22 @@ export default function AbsenceFollowup() {
       toast.error(err.message || 'فشل حفظ متابعة الغياب — حاول مرة أخرى');
     }
   }, [modal, setAbsenceFollowup, currentUser, toast, students]);
+
+  // ── فتح واتساب لولي أمر طالب غائب واحد ──────────────────────
+  // نقرة واحدة صريحة لكل ولي أمر (لا حلقة window.open، لا "إرسال للكل") — نفس القيد
+  // المفروض على studentWhatsappService.openWhatsapp نفسها (نافذة منبثقة واحدة لكل
+  // نقرة مستخدم حقيقية، وإلا يحجبها المتصفح).
+  const handleWhatsapp = useCallback((student, group, attRecord) => {
+    const phone = getAbsenceContactPhone(student);
+    const message = buildAbsenceMessage({
+      studentName: student?.name,
+      groupName:   group?.name,
+      teacherName: getSessionTeacherName(group, centerProfile),
+      date:        attRecord.date,
+    });
+    const res = openWhatsapp(phone, message);
+    if (!res.ok) toast.error(res.error);
+  }, [centerProfile, toast]);
 
   const SEL = { background:'var(--surface2)', border:'1px solid var(--border)', borderRadius:9, padding:'7px 10px', color:'var(--text)', fontFamily:'Cairo,sans-serif', fontSize:'0.8rem', outline:'none', cursor:'pointer', direction:'rtl' };
 
@@ -298,144 +494,44 @@ export default function AbsenceFollowup() {
         )}
 
         <span style={{ fontSize:'0.78rem', color:'var(--text3)', marginRight:'auto' }}>
-          {filtered.length} غياب
+          {activeItems.length + overdueItems.length + historyItems.length} غياب
         </span>
       </div>
 
-      {/* ── Main table ────────────────────── */}
-      <div style={{ background:'var(--surface)', border:'1px solid var(--border)', borderRadius:14, overflow:'hidden' }}>
-        {filtered.length === 0 ? (
-          <div style={{ textAlign:'center', padding:'60px', color:'var(--text3)' }}>
-            <div style={{ fontSize:44, opacity:.3, marginBottom:10 }}>✅</div>
-            <div style={{ fontWeight:600 }}>لا توجد غيابات في هذا الفلتر</div>
-          </div>
-        ) : (
-          <div style={{ overflowX:'auto' }}>
-            <table style={{ width:'100%', borderCollapse:'collapse', fontSize:'0.82rem' }}>
-              <thead>
-                <tr style={{ background:'var(--surface2)' }}>
-                  {['الطالب','المجموعة','تاريخ الغياب','سبب الغياب','ولي الأمر أبلغ','حالة المتابعة','المتابع','آخر تحديث',''].map(h=>(
-                    <th key={h} style={{ padding:'10px 14px', fontSize:'0.63rem', fontWeight:700, color:'var(--text3)', textAlign:'right', borderBottom:'1px solid var(--border)', textTransform:'uppercase', letterSpacing:'0.07em', whiteSpace:'nowrap' }}>{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.map(({ attRecord, student, group, followup }) => {
-                  const { bg, color } = av(student?.name||'');
-                  const letters = (student?.name||'').split(' ').map(w=>w[0]).slice(0,2).join('');
-                  const statusKey = followup?.followStatus || 'pending';
-                  const meta      = FOLLOW_STATUS[statusKey];
-                  const isPending = statusKey === 'pending';
+      {/* ── القسم 1: تحتاج إجراء (اليوم) ────── */}
+      <FollowupSection
+        title="متابعة تحتاج إجراء"
+        icon="⚡"
+        items={activeItems}
+        groups={groups}
+        alert
+        onOpenRow={(attRecord, followup) => setModal({ open:true, attRecord, existing:followup||null })}
+        onWhatsapp={handleWhatsapp}
+        emptyText="لا توجد غيابات اليوم تحتاج متابعة"
+      />
 
-                  return (
-                    <tr key={attRecord.id}
-                      style={{ background: isPending ? 'rgba(239,68,68,.02)' : 'transparent', transition:'background .12s', cursor:'pointer' }}
-                      onMouseOver={e=>Array.from(e.currentTarget.cells).forEach(td=>td.style.background='var(--surface2)')}
-                      onMouseOut={e =>Array.from(e.currentTarget.cells).forEach(td=>td.style.background=isPending?'rgba(239,68,68,.02)':'')}
-                      onClick={() => setModal({ open:true, attRecord, existing:followup||null })}
-                    >
-                      {/* Student */}
-                      <td style={{ padding:'11px 14px', borderBottom:'1px solid var(--border)' }}>
-                        <div style={{ display:'flex', alignItems:'center', gap:9 }}>
-                          <div style={{ width:32, height:32, borderRadius:'50%', background:bg, color, display:'flex', alignItems:'center', justifyContent:'center', fontSize:'0.72rem', fontWeight:700, flexShrink:0 }}>{letters}</div>
-                          <div>
-                            <div style={{ fontWeight:700, fontSize:'0.88rem' }}>{student?.name||'—'}</div>
-                            <div style={{ fontSize:'0.68rem', color:'var(--text3)', fontFamily:'Cairo,sans-serif' }}>{student?.phone}</div>
-                          </div>
-                        </div>
-                      </td>
+      {/* ── القسم 2: متابعات متأخرة (أقدم من اليوم) ── */}
+      <FollowupSection
+        title="متابعات متأخرة"
+        icon="⏰"
+        items={overdueItems}
+        groups={groups}
+        alert
+        onOpenRow={(attRecord, followup) => setModal({ open:true, attRecord, existing:followup||null })}
+        onWhatsapp={handleWhatsapp}
+        emptyText="لا توجد متابعات متأخرة"
+      />
 
-                      {/* Group */}
-                      <td style={{ padding:'11px 14px', borderBottom:'1px solid var(--border)', fontSize:'0.76rem', color:'var(--text2)' }}>
-                        {group?.name||'—'}
-                      </td>
-
-                      {/* Date */}
-                      <td style={{ padding:'11px 14px', borderBottom:'1px solid var(--border)', fontFamily:'Cairo,sans-serif', fontSize:'0.78rem', color:'var(--text3)', whiteSpace:'nowrap' }}>
-                        {formatDate(attRecord.date, {weekday:'short',month:'short',day:'numeric'})}
-                      </td>
-
-                      {/* Absence reason */}
-                      <td style={{ padding:'11px 14px', borderBottom:'1px solid var(--border)', maxWidth:180, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
-                        {followup?.absenceReason
-                          ? <span style={{ color:'var(--text)' }}>{followup.absenceReason}</span>
-                          : <span style={{ color:'var(--text3)', fontStyle:'italic', fontSize:'0.76rem' }}>لم يُحدد بعد</span>
-                        }
-                      </td>
-
-                      {/* Parent contacted */}
-                      <td style={{ padding:'11px 14px', borderBottom:'1px solid var(--border)', textAlign:'center' }}>
-                        {followup?.parentContactedUs
-                          ? <span style={{ color:'#10b981', fontWeight:700, fontSize:'0.82rem' }}>✓ نعم</span>
-                          : <span style={{ color:'var(--text3)', fontSize:'0.76rem' }}>—</span>
-                        }
-                      </td>
-
-                      {/* Follow status badge */}
-                      <td style={{ padding:'11px 14px', borderBottom:'1px solid var(--border)', whiteSpace:'nowrap' }}>
-                        <span style={{ display:'inline-flex', alignItems:'center', gap:5, padding:'4px 10px', borderRadius:99, fontSize:'0.7rem', fontWeight:700,
-                          background:meta.bg, color:meta.color, border:`1px solid ${meta.border}`,
-                          animation: isPending ? 'pulse 2s infinite' : 'none',
-                        }}>
-                          {meta.icon} {meta.label}
-                        </span>
-                      </td>
-
-                      {/* Followed by */}
-                      <td style={{ padding:'11px 14px', borderBottom:'1px solid var(--border)', fontSize:'0.76rem', color:'var(--text2)' }}>
-                        {followup?.followedBy || <span style={{ color:'var(--text3)' }}>—</span>}
-                      </td>
-
-                      {/* Last updated */}
-                      <td style={{ padding:'11px 14px', borderBottom:'1px solid var(--border)', fontSize:'0.72rem', color:'var(--text3)', whiteSpace:'nowrap' }}>
-                        {followup?.followedAt
-                          ? formatDate(followup.followedAt.split('T')[0], {month:'short',day:'numeric'}) + ' ' + followup.followedAt.split('T')[1]?.slice(0,5)
-                          : <span style={{ color:'var(--red)', fontWeight:700 }}>لم تتم المتابعة</span>
-                        }
-                      </td>
-
-                      {/* Action */}
-                      <td style={{ padding:'11px 14px', borderBottom:'1px solid var(--border)' }}>
-                        <button
-                          onClick={e => { e.stopPropagation(); setModal({ open:true, attRecord, existing:followup||null }); }}
-                          style={{ padding:'4px 12px', borderRadius:7, fontSize:'0.72rem', fontWeight:700, cursor:'pointer', fontFamily:'Cairo,sans-serif', transition:'all .12s',
-                            border:     isPending ? 'none'             : '1px solid var(--border)',
-                            background: isPending ? '#ef4444'          : 'var(--surface2)',
-                            color:      isPending ? '#fff'             : 'var(--text2)',
-                          }}
-                          onMouseOver={e => { if(!isPending){e.currentTarget.style.borderColor='var(--accent)';e.currentTarget.style.color='var(--accent)';} }}
-                          onMouseOut={e  => { if(!isPending){e.currentTarget.style.borderColor='var(--border)';e.currentTarget.style.color='var(--text2)';} }}
-                        >
-                          {isPending ? '⚡ متابعة' : '✎ تعديل'}
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-
-      {/* ── Quick pending alert ────────────── */}
-      {stats.pending > 0 && (
-        <div style={{ display:'flex', alignItems:'center', gap:12, padding:'12px 18px', background:'rgba(239,68,68,.06)', border:'1px solid rgba(239,68,68,.2)', borderRadius:12 }}>
-          <span style={{ fontSize:'1.3rem' }}>⚠️</span>
-          <div style={{ flex:1 }}>
-            <div style={{ fontWeight:700, color:'var(--red)', fontSize:'0.88rem' }}>
-              {stats.pending} غياب لم تتم متابعته
-            </div>
-            <div style={{ fontSize:'0.72rem', color:'var(--text3)', marginTop:2 }}>
-              يرجى التواصل مع أولياء الأمور وتسجيل سبب الغياب
-            </div>
-          </div>
-          <button onClick={() => setFilterStatus('pending')}
-            style={{ padding:'6px 14px', borderRadius:8, background:'var(--red)', color:'#fff', border:'none', fontSize:'0.78rem', fontWeight:700, cursor:'pointer', fontFamily:'Cairo,sans-serif' }}>
-            عرض فقط
-          </button>
-        </div>
-      )}
+      {/* ── القسم 3: سجل المتابعة (مكتملة) ──── */}
+      <FollowupSection
+        title="سجل المتابعة"
+        icon="📋"
+        items={historyItems}
+        groups={groups}
+        onOpenRow={(attRecord, followup) => setModal({ open:true, attRecord, existing:followup||null })}
+        onWhatsapp={handleWhatsapp}
+        emptyText="لا توجد متابعات مكتملة بعد"
+      />
 
       {/* ── Modal ────────────────────────── */}
       <Modal

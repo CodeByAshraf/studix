@@ -1,8 +1,12 @@
 // src/modules/attendance/AttendancePage.jsx
-import { useState, useMemo }  from 'react';
+import { useState, useMemo, useEffect }  from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useAppStore } from '../../store/app.store';
 import { SectionBoundary }    from '../../components/ErrorBoundary';
-import { getAttendanceStats, getFrequentAbsentees } from '../../services/attendanceService';
+import { getAttendanceStats, getFrequentAbsentees, statsByStudentFromRecords } from '../../services/attendanceService';
+import { pgGetAttendanceAggregate } from '../../services/api';
+import { useAsyncData } from '../../hooks/useAsyncData';
+import { useToast } from '../../components/Toast';
 import SessionMarking          from './SessionMarking';
 import AttendanceReports       from './AttendanceReports';
 import AbsenceFollowup         from './AbsenceFollowup';
@@ -44,20 +48,41 @@ export default function AttendancePage() {
   const attendance           = useAppStore((s) => s.attendance);
   const groups               = useAppStore((s) => s.groups);
   const students             = useAppStore((s) => s.students);
-  const [view, setView] = useState('session');
+  // Deep link من إشعار غياب متأخر ("متابعة الآن"، ?view=followup&attendanceId=...) — يُقرأ
+  // مرة واحدة فقط عند أول تحميل (lazy init)، لا يُعاد تزامنه مع الـ URL بعد ذلك. أي تبديل
+  // تبويب لاحق (بما فيه SessionMarking's onDone={() => setView('followup')}) يبقى محلياً
+  // بحتاً تماماً كما كان — هذا السطر فقط يقرأ القيمة الابتدائية، لا يُغيّر آلية setView نفسها.
+  const [searchParams] = useSearchParams();
+  const [view, setView] = useState(() => (searchParams.get('view') === 'followup' ? 'followup' : 'session'));
+  const [deepLinkAttendanceId] = useState(() => searchParams.get('attendanceId'));
+  const toast = useToast();
+
+  // C4 Attendance Batch A: total/present/absent/late/pct now come from
+  // GET /api/attendance/aggregate?groupBy=status instead of the full global attendance array.
+  // `sessions` (distinct group+date pairs) and `pendingFollowup` (needs the out-of-scope
+  // absenceFollowup domain too) have no exact aggregate equivalent and are deliberately left
+  // unmigrated — see research.md §4 — so `attendance` stays selected below for exactly those
+  // two, plus the already-migrated (feature 001) `absentees` adapter.
+  const { data: statusAgg = [], error: statusAggError } = useAsyncData(
+    () => pgGetAttendanceAggregate({ groupBy: 'status' }), [], []);
+
+  useEffect(() => {
+    if (statusAggError) toast.error(statusAggError.message || 'فشل تحميل ملخّص الحضور');
+  }, [statusAggError]);
 
   // ── Overview stats ────────────────────────────────────────
   const overview = useMemo(() => {
-    const total   = attendance.length;
-    const present = attendance.filter(r => r.status === 'present').length;
-    const absent  = attendance.filter(r => r.status === 'absent').length;
-    const late    = attendance.filter(r => r.status === 'late').length;
+    const byStatus = new Map(statusAgg.map(r => [r.key, r.count]));
+    const present = byStatus.get('present') ?? 0;
+    const absent  = byStatus.get('absent')  ?? 0;
+    const late    = byStatus.get('late')    ?? 0;
+    const total   = present + absent + late;
     const pct     = total ? Math.round(present / total * 100) : null;
     const sessions= [...new Set(attendance.map(r => `${r.groupId}-${r.date}`))].length;
-    const absentees = getFrequentAbsentees(students, attendance, 3).length;
+    const absentees = getFrequentAbsentees(students, statsByStudentFromRecords(students, attendance), 3).length;
     const pendingFollowup = attendance.filter(r => r.status==='absent').filter(r => !absenceFollowup?.find(f => f.attendanceId===r.id)).length;
     return { total, present, absent, late, pct, sessions, absentees, pendingFollowup };
-  }, [students, attendance, absenceFollowup]);
+  }, [students, attendance, absenceFollowup, statusAgg]);
 
   const pctColor = overview.pct === null ? 'var(--text)'
     : overview.pct >= 80 ? '#10b981'
@@ -123,7 +148,7 @@ export default function AttendancePage() {
 
         <SectionBoundary label={`attendance:${view}`}>
           {view === 'session'  && <SessionMarking onDone={() => setView('followup')}/>}
-          {view === 'followup' && <AbsenceFollowup/>}
+          {view === 'followup' && <AbsenceFollowup initialAttendanceId={deepLinkAttendanceId}/>}
           {view === 'reports'  && <AttendanceReports/>}
           {view === 'qr'      && <QRAttendance/>}
         </SectionBoundary>

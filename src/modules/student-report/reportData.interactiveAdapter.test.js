@@ -103,6 +103,12 @@ function oldReferenceData(studentId, store) {
     hwRows, hwSubmitted, hwLate, hwMissing,
     matRows, matReceived, matPaid, matTotal,
     payRows, totalPaid, refundedTotal, netPaid, paidCount,
+    // Recitation didn't exist when this reference was frozen (recitations table is a
+    // later addition) — no fixture below ever sets bundle.recitations, so the real
+    // adapter always produces these exact empty/null values too. Not a behavior change
+    // to reconcile, just keeping this frozen reference's shape matching the new adapter's
+    // additional (always-empty-here) output for this equivalence test's own toEqual check.
+    recitationRows: [], avgRecitationPct: null, evaluatedRecitationCount: 0,
     timeline,
   };
 }

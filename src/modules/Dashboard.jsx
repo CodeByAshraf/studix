@@ -1,5 +1,5 @@
 // src/modules/Dashboard.jsx
-import { useMemo } from 'react';
+import { useEffect, useMemo } from 'react';
 import { useAppStore } from '../store/app.store';
 import { useUI }        from '../store/ui.context';
 import { SectionBoundary } from '../components/ErrorBoundary';
@@ -7,6 +7,9 @@ import { PageHeader } from '../components/shared';
 import { KpiCard, KpiGrid } from '../components/ui';
 import { formatCurrency } from '../utils/helpers';
 import { getNetRevenue } from '../services/paymentService';
+import { pgGetPayments, pgGetPaymentAggregates, pgGetActivityLogs, pgGetAttendance } from '../services/api';
+import { useAsyncData } from '../hooks/useAsyncData';
+import { useToast } from '../components/Toast';
 
 // ── Mini bar chart component ─────────────────────────────────
 function BarRow({ label, value, max, color = 'var(--accent)' }) {
@@ -150,11 +153,63 @@ export default function Dashboard() {
   // بدلاً من useApp() الذي يُعيد render عند أي تغيير في الـ store
   const students      = useAppStore((s) => s.students);
   const groups        = useAppStore((s) => s.groups);
-  const payments      = useAppStore((s) => s.payments);
   const treasuryTxn   = useAppStore((s) => s.treasuryTxn);
   const attendance    = useAppStore((s) => s.attendance);
-  const activityLogs  = useAppStore((s) => s.activityLogs);
   const { notifications, navigate } = useUI();
+  const toast = useToast();
+
+  const now           = new Date();
+  const currentMonth  = now.getMonth() + 1;
+  const currentYear   = now.getFullYear();
+  const lastMonthNum  = currentMonth === 1 ? 12 : currentMonth - 1;
+  const lastMonthYear = currentMonth === 1 ? currentYear - 1 : currentYear;
+
+  // Scalability Architecture Phase 4 Cutover 1: بدل مصفوفة payments الكاملة من الـ store —
+  // monthPayments (يخدم monthPaid + monthRev معاً، نفس getNetRevenue المحلية غير المُعدَّلة)
+  // يُجلَب عبر GET /api/payments?month=&year= لهذا الشهر فقط؛ lastMonthRev (رقم واحد
+  // فقط، لا حاجة لصفوف خام لشهر آخر تماماً) يُجلَب مباشرة عبر GET /api/payments/aggregate
+  // ?groupBy=none — نفس صيغة getNetRevenue بالضبط، محسوبة من جهة الخادم.
+  const { data: monthPayments = [], error: monthPaymentsError } = useAsyncData(
+    () => pgGetPayments({ month: currentMonth, year: currentYear }),
+    [currentMonth, currentYear],
+    [],
+  );
+  const { data: lastMonthAgg = [], error: lastMonthAggError } = useAsyncData(
+    () => pgGetPaymentAggregates({ groupBy: 'none', month: lastMonthNum, year: lastMonthYear }),
+    [lastMonthNum, lastMonthYear],
+    [],
+  );
+
+  useEffect(() => {
+    const err = monthPaymentsError || lastMonthAggError;
+    if (err) toast.error(err.message || 'فشل تحميل مؤشرات الإيراد');
+  }, [monthPaymentsError, lastMonthAggError]);
+
+  // Scalability Architecture Phase 4 (activityLogs) — بدل مصفوفة activityLogs الكاملة من
+  // الـ store (لم تعد تُزامَن عند الإقلاع)، تُجلَب أحدث 5 حركات فقط عبر GET /api/
+  // activityLogs?limit=5 — لا toast/حالة تحميل مخصّصة لهذا العنصر الزخرفي الثانوي (يبقى
+  // فارغاً بصمت حتى الاستقرار أو عند الفشل، بنفس معاملة monthPayments/lastMonthAgg
+  // الافتراضية []، لا تصميماً جديداً).
+  const { data: activityData } = useAsyncData(
+    () => pgGetActivityLogs({ limit: 5 }),
+    [],
+    null,
+  );
+
+  // C4 Attendance Batch A: StudentRow's heat indicator is scoped to exactly the 5 students
+  // rendered below (students.slice(0,5)) via GET /api/attendance?studentIds=, instead of
+  // filtering the full global attendance array per row — same batching pattern as feature
+  // 001's AttendanceReports.jsx and StudentsPage.jsx. stats.attPct below (attendance.slice(-50))
+  // is a SEPARATE, out-of-scope computation and still reads the full `attendance` selector.
+  const visibleStudentIds = useMemo(() => students.slice(0, 5).map(s => s.id), [students]);
+  const visibleStudentIdsKey = visibleStudentIds.join(',');
+  const { data: visibleAttendance = [], error: visibleAttendanceError } = useAsyncData(
+    () => (visibleStudentIds.length ? pgGetAttendance({ studentIds: visibleStudentIdsKey }) : Promise.resolve([])),
+    [visibleStudentIdsKey], []);
+
+  useEffect(() => {
+    if (visibleAttendanceError) toast.error(visibleAttendanceError.message || 'فشل تحميل حضور الطلاب');
+  }, [visibleAttendanceError]);
 
   // BUG-02 (remaining part, final sweep): كانت "إيراد مارس" ثابتة على شهر مارس (month===3)
   // بغضّ النظر عن التاريخ الفعلي، وتجمع payments.amount الخام دون طرح أي استرداد فعّال —
@@ -163,23 +218,23 @@ export default function Dashboard() {
   // مكرَّر)، مع نسبة نمو حقيقية مقارنةً بالشهر السابق (نفس نمط FinancialAnalytics.jsx
   // بالضبط) بدل نص "+12%" ثابت.
   const stats = useMemo(() => {
-    const now           = new Date();
-    const currentMonth  = now.getMonth() + 1;
-    const currentYear   = now.getFullYear();
-    const lastMonthNum  = currentMonth === 1 ? 12 : currentMonth - 1;
-    const lastMonthYear = currentMonth === 1 ? currentYear - 1 : currentYear;
-
     const activeStudents = students.filter(s => s.status === 'active').length;
-    const monthPayments  = payments.filter(p => p.month === currentMonth && (!p.year || p.year === currentYear));
     const monthPaid      = [...new Set(monthPayments.filter(p => p.status === 'paid').map(p => p.studentId))].length;
     const monthRev       = getNetRevenue(monthPayments, treasuryTxn);
-    const lastMonthRev   = getNetRevenue(payments.filter(p => p.month === lastMonthNum && (!p.year || p.year === lastMonthYear)), treasuryTxn);
+    const lastMonthRev   = lastMonthAgg[0]?.revenue ?? 0;
     const revGrowth      = lastMonthRev > 0 ? Math.round(((monthRev - lastMonthRev) / lastMonthRev) * 100) : null;
-    const attRecs        = attendance.slice(-50);
+    // Pre-installer defect audit (F-Dash1): `attendance` هو ترتيب إدراج/إلحاق محلي
+    // (saveAttendanceSession يُلحق دائماً في نهاية المصفوفة بغضّ النظر عن تاريخ الجلسة
+    // المحفوظة — تحقّق فعلي من src/store/slices/attendance.slice.js)، لا ترتيب زمني
+    // مضمون — فكان .slice(-50) الخام يلتقط آخر 50 عنصراً بترتيب المصفوفة، لا آخر 50
+    // سجلاً بالتاريخ الفعلي (مثلاً بعد تسجيل حضور جلسة قديمة بأثر رجعي). الفرز حسب
+    // date (نص "YYYY-MM-DD" مُطبَّع بالفعل عبر normalizeDateOnly، فمقارنة نصية كافية)
+    // تنازلياً ثم أخذ أول 50 يضمن أنها فعلاً الأحدث بالتاريخ.
+    const attRecs        = [...attendance].sort((a, b) => (b.date || '').localeCompare(a.date || '')).slice(0, 50);
     const attPct         = attRecs.length ? Math.round(attRecs.filter(a => a.status === 'present').length / attRecs.length * 100) : null;
     const unread         = notifications.filter(n => !n.read).length;
     return { activeStudents, monthPaid, monthRev, revGrowth, attPct, unread };
-  }, [students, payments, treasuryTxn, attendance, notifications]);
+  }, [students, monthPayments, lastMonthAgg, treasuryTxn, attendance, notifications]);
 
   const QUICK_ACTIONS = [
     { icon:'👤', label:'تسجيل طالب',   sub:'إضافة جديد',      bg:'rgba(59,130,246,.1)',  color:'#3b82f6',  page:'students'      },
@@ -214,7 +269,7 @@ export default function Dashboard() {
     if (hr < 24) return `منذ ${hr} ساعة`;
     return new Date(ts).toLocaleDateString('ar-EG', { day:'numeric', month:'short' });
   };
-  const TIMELINE = (activityLogs || []).slice(0, 5).map((log) => {
+  const TIMELINE = (activityData?.items || []).map((log) => {
     const meta = ACTION_ICON[log.action] || ACTION_ICON.info;
     return {
       icon: meta.icon, iconBg: meta.bg, iconColor: meta.color,
@@ -380,7 +435,7 @@ export default function Dashboard() {
                 </thead>
                 <tbody>
                   {students.slice(0, 5).map(s => (
-                    <StudentRow key={s.id} student={s} groups={groups} navigate={navigate} attendance={attendance}/>
+                    <StudentRow key={s.id} student={s} groups={groups} navigate={navigate} attendance={visibleAttendance}/>
                   ))}
                 </tbody>
               </table>

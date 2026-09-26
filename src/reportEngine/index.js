@@ -16,5 +16,5 @@ export {
   Grid, Row, Column, Stack, Card, Spacer, PageBreak, KeepTogether,
 } from './layout';
 export {
-  buildReportMeta, buildReportConfig, DEFAULT_REPORT_CONFIG,
+  buildReportMeta, buildReportConfig, DEFAULT_REPORT_CONFIG, REPORT_SECTIONS, isSectionVisible,
 } from './reportMeta';

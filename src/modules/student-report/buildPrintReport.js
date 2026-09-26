@@ -10,7 +10,15 @@
 //
 // كل الدوال هنا خالصة (pure): تأخذ بيانات وتُعيد HTML string. لا تلمس الـ DOM
 // إلا في الدالة النهائية openStudentReportPrint.
+//
+// إعدادات أقسام التقرير (Settings ← أقسام تقرير الطالب، src/reportEngine/reportMeta.js)
+// — كانت غير مقروءة هنا إطلاقاً قبل مراجعة توحيد الرؤية (تدقيق أثبت أن هذا المسار يعرض
+// كل شيء دائماً بصرف النظر عن الإعداد، بخلاف "التقرير الاحترافي" الذي كان يقرأها بالفعل).
+// config اختياري (افتراضي {} = كل الأقسام ظاهرة، نفس السلوك القديم تماماً) — isSectionVisible
+// تُعيد true لأي مفتاح غائب، فطالب لم يمرَّر له config إطلاقاً (لو استُدعيت هذه الدالة من
+// مكان آخر غير StudentReportPage.jsx مستقبلاً) لا ينكسر ولا يفقد أي قسم.
 // ─────────────────────────────────────────────────────────────────────────────
+import { isSectionVisible } from '../../reportEngine';
 
 const MONTHS_AR = ['يناير','فبراير','مارس','أبريل','مايو','يونيو',
                    'يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
@@ -126,7 +134,7 @@ function headerHTML(profile) {
   return `
     <div class="report-header">
       <div class="rh-right">
-        ${hasLogo ? `<img class="rh-logo" src="${esc(profile.logoUrl)}" alt="logo"/>` : `<div class="rh-logo rh-logo-ph">${esc(initials(name))}</div>`}
+        ${hasLogo ? `<img class="rh-logo" src="${esc(profile.logoUrl)}" alt="logo"/>` : ''}
         <div>
           <div class="rh-name">${esc(name)}</div>
           ${profile && profile.slogan ? `<div class="rh-slogan">${esc(profile.slogan)}</div>` : ''}
@@ -145,7 +153,7 @@ function studentCardHTML(student, group) {
     ['كود الطالب', student.code],
     ['السنة الدراسية', student.grade],
     ['المجموعة', group ? `${group.name}${group.subject ? ' — ' + group.subject : ''}` : '—'],
-    ['المدرس', group && group.teacher ? group.teacher : '—'],
+    ['المدرس', group && group.teacherName ? group.teacherName : '—'],
     ['رقم الهاتف', student.phone],
     ['رقم ولي الأمر', student.parentPhone],
     ['المدرسة', student.school],
@@ -176,19 +184,28 @@ function studentCardHTML(student, group) {
     </div>`;
 }
 
-function summaryHTML(d) {
+function summaryHTML(d, config) {
   // BUG-02 (بيان مطبوع — NEEDS BUSINESS DECISION مُغلَق): إجمالي المدفوع هنا يبقى خاماً
   // (Gross) مطابقاً لمجموع جدول المدفوعات أدناه؛ عند وجود استرداد فعلي، تُستبدَل هذه
   // الخانة بالصافي (Net) صراحةً بدل ترك رقم خام يُقرأ كأنه الوضع المالي الحالي.
   const moneyKpi = d.refundedTotal > 0
     ? kpi('صافي المدفوع', fmtMoney(d.netPaid), '#10b981', `${fmtMoney(d.totalPaid)} إجمالي − ${fmtMoney(d.refundedTotal)} مسترد`)
     : kpi('إجمالي المدفوع', fmtMoney(d.totalPaid), '#10b981', `${d.paidCount} دفعة`);
+
+  // كل KPI مربوط بعلم قسمه — إخفاء "الملخّص المالي" مثلاً يُخفي خانة المبلغ هنا أيضاً، لا
+  // تكفي تصفية summaryHTML نفسها لو استُدعيت مباشرة. عدد الأعمدة يتبع عدد الخانات الظاهرة
+  // فعلياً (inline style يتفوّق على .kpi-row الثابتة في reportCSS) لتفادي فراغ الشبكة.
+  const items = [
+    { flag: 'showAttendance',       html: kpi('نسبة الحضور', d.attPct != null ? d.attPct + '%' : '—', pctColor(d.attPct), `${d.attPresent} من ${d.attAll.length} حصة`) },
+    { flag: 'showExams',            html: kpi('متوسط الدرجات', d.avgExamPct != null ? d.avgExamPct + '%' : '—', pctColor(d.avgExamPct), `تقدير ${grade(d.avgExamPct)}`) },
+    { flag: 'showFinancialSummary', html: moneyKpi },
+    { flag: 'showHomework',         html: kpi('الواجبات المُسلَّمة', `${d.hwSubmitted}/${d.hwRows.length}`, '#8b5cf6', `${d.hwMissing} غير مُسلَّم`) },
+  ].filter((k) => isSectionVisible(config, k.flag));
+
+  if (!items.length) return '';
   return `
-    <div class="kpi-row">
-      ${kpi('نسبة الحضور', d.attPct != null ? d.attPct + '%' : '—', pctColor(d.attPct), `${d.attPresent} من ${d.attAll.length} حصة`)}
-      ${kpi('متوسط الدرجات', d.avgExamPct != null ? d.avgExamPct + '%' : '—', pctColor(d.avgExamPct), `تقدير ${grade(d.avgExamPct)}`)}
-      ${moneyKpi}
-      ${kpi('الواجبات المُسلَّمة', `${d.hwSubmitted}/${d.hwRows.length}`, '#8b5cf6', `${d.hwMissing} غير مُسلَّم`)}
+    <div class="kpi-row" style="grid-template-columns:repeat(${items.length},1fr)">
+      ${items.map((k) => k.html).join('')}
     </div>`;
 }
 
@@ -238,6 +255,36 @@ function examsHTML(d) {
       </div>
       <table class="report-table">
         <thead><tr><th>الامتحان</th><th>التاريخ</th><th class="num">الدرجة</th><th class="num">النسبة</th><th class="num">الحالة</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+// نفس نمط examsHTML أعلاه بالضبط — تُعيد '' (لا قسم إطلاقاً) عند غياب أي سجل، بدل
+// رسالة "لا توجد بيانات"، نفس سلوك examsHTML/homeworksHTML الحالي هنا تحديداً (يختلف
+// عمداً عن سلوك تبويب الشاشة الحيّة الذي يعرض EmptySection دائماً).
+function recitationHTML(d) {
+  if (!d.recitationRows.length) return '';
+  const rows = d.recitationRows.map((r) => `
+    <tr>
+      <td>${esc(r.groupName || '—')}</td>
+      <td>${fmtDateShort(r.date)}</td>
+      <td>${r.sessionTime ? esc(r.sessionTime) : '—'}</td>
+      <td class="num">${r.pct != null ? `${esc(r.score)}/${esc(r.maxScore)}` : '—'}</td>
+      <td class="num">${r.pct != null ? `<span style="color:${pctColor(r.pct)};font-weight:700">${r.pct}%</span>` : '—'}</td>
+      <td>${r.note ? esc(r.note) : '—'}</td>
+    </tr>`).join('');
+
+  return `
+    <div class="section avoid-break">
+      ${sectionTitle('🎤', 'التسميع', d.recitationRows.length)}
+      <div class="mini-kpis">
+        ${kpi('إجمالي الجلسات', d.recitationRows.length, '#0d9488')}
+        ${kpi('تم تقييمها', d.evaluatedRecitationCount, '#10b981')}
+        ${kpi('المتوسط', d.avgRecitationPct != null ? d.avgRecitationPct + '%' : '—', pctColor(d.avgRecitationPct))}
+      </div>
+      <table class="report-table">
+        <thead><tr><th>المجموعة</th><th>التاريخ</th><th>الحصة</th><th class="num">الدرجة</th><th class="num">النسبة</th><th>ملاحظة</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>`;
@@ -455,7 +502,7 @@ function reportCSS() {
  * @param {object} args.data     كل البيانات المحسوبة (حضور، امتحانات...)
  * @param {object} args.profile  بيانات المركز (اسم، لوجو، هواتف)
  */
-export function openStudentReportPrint({ student, group, data, profile }) {
+export function openStudentReportPrint({ student, group, data, profile, config = {} }) {
   if (!student || !data) return;
 
   const now = new Date();
@@ -500,15 +547,16 @@ export function openStudentReportPrint({ student, group, data, profile }) {
 
   <div class="page">
     ${headerHTML(profile)}
-    <div class="report-title">تقرير الطالب الشامل</div>
-    ${studentCardHTML(student, group)}
-    ${summaryHTML(data)}
-    ${attendanceHTML(data)}
-    ${examsHTML(data)}
-    ${homeworksHTML(data)}
-    ${materialsHTML(data)}
-    ${paymentsHTML(data)}
-    ${timelineHTML(data)}
+    <div class="report-title">تقرير الطالب الشامل — ${esc(student.name)}</div>
+    ${isSectionVisible(config, 'showProfile') ? studentCardHTML(student, group) : ''}
+    ${summaryHTML(data, config)}
+    ${isSectionVisible(config, 'showAttendance')     ? attendanceHTML(data) : ''}
+    ${isSectionVisible(config, 'showExams')          ? examsHTML(data)      : ''}
+    ${isSectionVisible(config, 'showRecitation')     ? recitationHTML(data) : ''}
+    ${isSectionVisible(config, 'showHomework')       ? homeworksHTML(data)  : ''}
+    ${isSectionVisible(config, 'showBooklets')       ? materialsHTML(data)  : ''}
+    ${isSectionVisible(config, 'showPaymentHistory') ? paymentsHTML(data)   : ''}
+    ${isSectionVisible(config, 'showAcademicTimeline') ? timelineHTML(data) : ''}
 
     <div class="report-footer">
       <span>${esc((profile && profile.name) || 'مركز التعليم')}</span>

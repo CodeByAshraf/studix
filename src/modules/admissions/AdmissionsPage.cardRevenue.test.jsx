@@ -4,13 +4,23 @@
 // The reference source of truth (already correct elsewhere in this same file, in
 // DetailsPanel) is treasury_txn linked by admissionId. The card now reuses that exact
 // same derivation (getAdmissionTreasuryTotals) instead of a second, divergent calculation.
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import AdmissionsPage from './AdmissionsPage';
 import { useAppStore } from '../../store/app.store';
 import { AuthProvider } from '../../store/auth.context';
 import { ToastProvider } from '../../components/Toast';
+
+// AdmissionsPage.jsx now fetches admissionPayments once on mount (Phase 4 — no longer
+// boot-synced via PG_COLLECTIONS). These tests assert synchronously right after render
+// (no awaits), before that fetch can resolve, so the store's directly-seeded
+// admissionPayments (below) is what actually drives every assertion here — this mock only
+// prevents an unmocked/real network call in the background.
+beforeEach(() => {
+  globalThis.fetch = vi.fn(() => Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true, data: [] }) }));
+});
+afterEach(() => { vi.restoreAllMocks(); });
 
 const ADMISSION = {
   id: 'adm_1', admissionNo: 'ADM-000001', name: 'أحمد علي', phone: '01012345678', parentPhone: '01198765432',

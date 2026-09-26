@@ -121,3 +121,98 @@ describe('NotificationsPage — derived from reminderService.js (Product Complet
     expect(screen.getByText('0 غير مقروء')).toBeInTheDocument();
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// إشعارات متابعة الغياب المتأخرة — نفس مبدأ الوصف أعلاه بالضبط، لكن مصدرها attendance/
+// absenceFollowup/students/groups (لا communications/commTasks). يثبت أن الأنبوب
+// الموجود بالفعل (ui.context.jsx) يحمل النوعين معاً بلا تعارض.
+describe('NotificationsPage — absence follow-up notifications (attendance + absenceFollowup)', () => {
+  const STUDENT = { id: 's1', name: 'أحمد محمد' };
+  const GROUP   = { id: 'g1', name: 'مجموعة الرياضيات', subject: 'رياضيات' };
+
+  beforeEach(() => {
+    localStorage.clear();
+    useAppStore.setState({
+      communications: [], commTasks: [],
+      students: [STUDENT], groups: [GROUP], attendance: [], absenceFollowup: [],
+    });
+  });
+
+  it('an overdue unresolved absence renders exactly one absence notification', () => {
+    useAppStore.setState({
+      attendance: [{ id: 'att1', studentId: 's1', groupId: 'g1', date: pastStr(1), status: 'absent' }],
+    });
+    renderPage();
+    expect(screen.getAllByText('متابعة غياب متأخرة')).toHaveLength(1);
+    expect(screen.getByText(/أحمد محمد/)).toBeInTheDocument();
+  });
+
+  it("today's absence does not create an overdue notification (becomes overdue only the next calendar day)", () => {
+    useAppStore.setState({
+      attendance: [{ id: 'att2', studentId: 's1', groupId: 'g1', date: todayStr(), status: 'absent' }],
+    });
+    renderPage();
+    expect(screen.queryByText('متابعة غياب متأخرة')).not.toBeInTheDocument();
+  });
+
+  it('reading the notification marks it read but never creates/modifies an absenceFollowup record (read != completed)', () => {
+    useAppStore.setState({
+      attendance: [{ id: 'att3', studentId: 's1', groupId: 'g1', date: pastStr(1), status: 'absent' }],
+    });
+    renderPage();
+    fireEvent.click(screen.getByText('متابعة غياب متأخرة'));
+    expect(useAppStore.getState().absenceFollowup).toEqual([]);
+    expect(screen.getByText('0 غير مقروء')).toBeInTheDocument();
+  });
+
+  it('completing the follow-up removes the derived notification automatically, even after it was read', () => {
+    useAppStore.setState({
+      attendance: [{ id: 'att4', studentId: 's1', groupId: 'g1', date: pastStr(1), status: 'absent' }],
+    });
+    renderPage();
+    fireEvent.click(screen.getByText('متابعة غياب متأخرة')); // يُقرأ أولاً، بلا اكتمال المتابعة بعد
+    expect(screen.getByText('متابعة غياب متأخرة')).toBeInTheDocument(); // القراءة لا تُزيله
+
+    act(() => {
+      useAppStore.setState({ absenceFollowup: [{ id: 'f1', attendanceId: 'att4', followStatus: 'contacted' }] });
+    });
+
+    expect(screen.queryByText('متابعة غياب متأخرة')).not.toBeInTheDocument();
+  });
+
+  it('multiple overdue absences each produce their own notification, and existing CRM notifications keep working alongside them', () => {
+    useAppStore.setState({
+      students: [STUDENT, { id: 's2', name: 'سارة علي' }],
+      attendance: [
+        { id: 'att5', studentId: 's1', groupId: 'g1', date: pastStr(1), status: 'absent' },
+        { id: 'att6', studentId: 's2', groupId: 'g1', date: pastStr(3), status: 'absent' },
+      ],
+      communications: [
+        { id: 'c1', status: 'open', followupDate: pastStr(2), studentName: 'قديم', phone: '2010', result: 'followupRequired' },
+      ],
+    });
+    renderPage();
+    expect(screen.getAllByText('متابعة غياب متأخرة')).toHaveLength(2);
+    expect(screen.getByText('متابعة متأخرة')).toBeInTheDocument(); // إشعار CRM الحالي لم يتأثر
+  });
+
+  it('provides a "متابعة الآن" action only for absence notifications, not for existing CRM ones', () => {
+    useAppStore.setState({
+      attendance: [{ id: 'att7', studentId: 's1', groupId: 'g1', date: pastStr(1), status: 'absent' }],
+      communications: [
+        { id: 'c2', status: 'open', followupDate: pastStr(2), studentName: 'قديم', phone: '2010', result: 'followupRequired' },
+      ],
+    });
+    renderPage();
+    expect(screen.getAllByRole('button', { name: 'متابعة الآن' })).toHaveLength(1);
+  });
+
+  it('a deleted/missing student never generates an absence notification', () => {
+    useAppStore.setState({
+      students: [],
+      attendance: [{ id: 'att8', studentId: 'ghost', groupId: 'g1', date: pastStr(1), status: 'absent' }],
+    });
+    renderPage();
+    expect(screen.queryByText('متابعة غياب متأخرة')).not.toBeInTheDocument();
+  });
+});

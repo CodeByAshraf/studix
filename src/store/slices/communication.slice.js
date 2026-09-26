@@ -12,6 +12,12 @@ import {
 
 export const createCommunicationSlice = (set) => ({
   // ── State ────────────────────────────────────────────────
+  // Pre-Installer Audit C4: communications/commTasks no longer boot-sync from PostgreSQL
+  // (db.middleware.js's PG_COLLECTIONS) — both are used live, exclusively, by
+  // CommunicationPage.jsx, which now fetches and seeds them itself on mount via
+  // setCommunications/setCommTasks below (same "fetch on the one page that needs it, not
+  // at every login" pattern already established for payments/admissionPayments). These
+  // seed defaults remain only as the pre-first-fetch placeholder.
   communications: INITIAL_COMMUNICATIONS,
   commTasks:      INITIAL_COMM_TASKS,
   // parents: Phase 3B-16 — PostgreSQL هو مصدر الحقيقة الوحيد لبيانات ولي الأمر
@@ -21,6 +27,12 @@ export const createCommunicationSlice = (set) => ({
   parents:        [],
 
   // ── سجلات التواصل ─────────────────────────────────────────
+  // C4 fix: seeds the whole collection on CommunicationPage.jsx's mount (replaces, doesn't
+  // merge — safe because every write already goes server-first via pgCreate*/pgUpdate*
+  // before any local state changes, so there is never unsynced local-only data to lose).
+  setCommunications: (v) =>
+    set((s) => ({ communications: typeof v === 'function' ? v(s.communications) : v })),
+
   addCommunication: (record) =>
     set((s) => ({ communications: [record, ...s.communications] })),
 
@@ -40,6 +52,9 @@ export const createCommunicationSlice = (set) => ({
     })),
 
   // ── مهام المتابعة ─────────────────────────────────────────
+  setCommTasks: (v) =>
+    set((s) => ({ commTasks: typeof v === 'function' ? v(s.commTasks) : v })),
+
   addCommTask: (task) =>
     set((s) => ({ commTasks: [task, ...s.commTasks] })),
 

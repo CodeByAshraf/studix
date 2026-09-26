@@ -3,7 +3,7 @@
 // وحدة التسجيل والقبول — CRM خفيف لرحلة الطالب من أول اتصال حتى التفعيل.
 // واجهة فقط (بيانات تجريبية). كل شيء داخل صفحة واحدة بتبويبات.
 // ─────────────────────────────────────────────────────────────────────────────
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect, useRef } from 'react';
 import {
   STAGES, LEAD_STATUS, RESERVATION_STATUS, LEAD_SOURCES,
   FOLLOWUP_TYPES, ADMISSION_PAYMENT_TYPES, MOCK_GROUPS, nextAdmissionNumber, SYSTEM_EVENTS,
@@ -21,11 +21,13 @@ import { GRADES } from '../../services/groupService';
 import {
   pgGetCollection, pgActivateAdmission, pgCreateParent,
   pgCreateAdmission, pgUpdateAdmission, pgCreateAdmissionFollowup, pgCreateAdmissionSystemLog,
-  pgCreateAdmissionPayment, pgCancelAdmissionWithRefund,
+  pgCreateAdmissionPayment, pgCancelAdmissionWithRefund, pgGetAdmissionPayments,
 } from '../../services/api';
+import { useAsyncData } from '../../hooks/useAsyncData';
 import { normalizeParentPhone } from '../communication/parentService';
 import { getAdmissionTreasuryTotals } from '../../services/treasuryService';
 import { openAdmissionReport } from './buildAdmissionReport';
+import { uuid } from '../../utils/helpers';
 
 // Product Completion Phase 1 — Issue 3: نفس findOrCreateParentId المستخدَم في
 // StudentsPage.jsx بالضبط (مكرَّر عمداً لا util مشترك — نفس نمط normalizeParentPhone
@@ -86,6 +88,22 @@ export default function AdmissionsPage() {
   const setAdmissionFollowups = useAppStore((s) => s.setAdmissionFollowups);
   const setAdmissionSystemLog = useAppStore((s) => s.setAdmissionSystemLog);
   const setAdmissionPayments  = useAppStore((s) => s.setAdmissionPayments);
+
+  // Scalability Architecture Phase 4 (admissionPayments) — admissionPayments لم تعد
+  // مُزامَنة عند الإقلاع (أُزيلت من PG_COLLECTIONS)؛ تُجلَب مرة واحدة فقط هنا عند تحميل
+  // الصفحة (بلا admissionId — كل الصفوف معاً، نفس السلوك غير المُفلتَر السابق بالضبط،
+  // لا طلب منفصل لكل سجل قبول) وتُزرَع في نفس admissionPayments state (setAdmissionPayments)
+  // — composeAdmission وكل مسارات الكتابة (addPayment/doCancelWithRefund) تبقى دون أي
+  // تغيير، تقرأ/تكتب نفس الـ state كما كانت قبل هذه المرحلة تماماً.
+  const { data: fetchedAdmissionPayments, error: paymentsError } = useAsyncData(
+    () => pgGetAdmissionPayments(), [], null,
+  );
+  useEffect(() => {
+    if (fetchedAdmissionPayments) setAdmissionPayments(fetchedAdmissionPayments);
+  }, [fetchedAdmissionPayments]);
+  useEffect(() => {
+    if (paymentsError) toast.error(paymentsError.message || 'تعذّر تحميل دفعات القبول');
+  }, [paymentsError]);
 
   // العرض المركَّب — كل قراءة أدناه (stats/leadRecords/.../selected) تستخدم هذا، بنفس
   // الشكل بالضبط الذي كانت تقرأه من قبل (r.followups/r.payments/r.systemLog) — لا تغيير
@@ -360,10 +378,13 @@ export default function AdmissionsPage() {
   // لاحقاً، بعكس payments في 3B-14C). لا اختيار ضمني لخزنة إطلاقاً (قرار صريح) —
   // payment.cashboxId مطلوب من المستدعي (نموذج الدفعة أدناه). لا تعديل محلي قبل نجاح
   // الخادم؛ عند النجاح تُتبنّى الاستجابة الكاملة (payment + treasuryTxn + logs معاً).
+  // يُعيد true عند نجاح حقيقي على الخادم، false عند فشل — نفس نمط addReservation
+  // (onAdd يُرجع السجل المحفوظ أو null)، ليقرر المستدعي إغلاق المودال فقط عند نجاح حقيقي
+  // بدل الإغلاق الفوري بلا انتظار (الفجوة الحقيقية التي سمحت بنقرة مزدوجة/طلب مكرَّر).
   const addPayment = async (recordId, payment) => {
     const amount = Number(payment.amount) || 0;
-    if (amount <= 0) { toast.error('أدخل مبلغاً صحيحاً'); return; }
-    if (!payment.cashboxId) { toast.error('اختر الخزنة أولاً'); return; }
+    if (amount <= 0) { toast.error('أدخل مبلغاً صحيحاً'); return false; }
+    if (!payment.cashboxId) { toast.error('اختر الخزنة أولاً'); return false; }
 
     const label = ADMISSION_PAYMENT_TYPES[payment.type]?.label || 'دفعة';
 
@@ -377,13 +398,18 @@ export default function AdmissionsPage() {
         method:      payment.method || 'cash',
         materialId:  payment.materialId || null,
         cashboxId:   payment.cashboxId,
+        // مفتاح idempotency — نفس محاولة الإرسال (نقرة مزدوجة/إعادة محاولة شبكة) تُعيد
+        // نفس السجل بدل تكراره؛ يولّده المستدعي (ReservedTab) مرة واحدة لكل نقرة "حفظ".
+        clientRequestId: payment.clientRequestId,
       });
       setAdmissionPayments(prev => [...prev, savedPayment]);
       setTreasuryTxn(prev => [...prev, txn]);
       if (logs.length > 0) setAdmissionSystemLog(prev => [...prev, ...logs]);
       toast.success(`تم تسجيل ${label}: ${amount} ج.م ودخلت الخزنة ✓`);
+      return true;
     } catch (e) {
       toast.error(e.message || 'فشل تسجيل الدفعة');
+      return false;
     }
   };
 
@@ -585,6 +611,14 @@ function ReservedTab({ records, onSelect, onConfirm, onCancel, onWaiting, onFrom
   const [showForm, setShowForm] = useState(false);
   const [payFor, setPayFor] = useState(null); // الطالب اللي بنسجّل له دفعة
   const [payForm, setPayForm] = useState({ type: PaymentType.DEPOSIT, amount: '', materialId: '', cashboxId: '' });
+  // حماية النقرة المزدوجة على "حفظ الدفعة": submittingPaymentRef فحص متزامن (لا يعتمد على
+  // إعادة رندر React) يمنع تنفيذ نقرة ثانية بينما الأولى ما زالت قيد التنفيذ فعلياً؛
+  // submittingPayment (state) لتعطيل الزر بصرياً وإظهار حالة الانتظار. الإغلاق الفوري
+  // للمودال بلا انتظار (السلوك السابق) كان هو الفجوة الحقيقية: زر لا يُعطَّل أبداً على
+  // نتيجة خادم لم تصل بعد. clientRequestId يولَّد مرة واحدة هنا لكل نقرة "حفظ" ويُمرَّر
+  // للخادم كمفتاح idempotency (دفاع في العمق — لا يُعتمَد عليه وحده).
+  const submittingPaymentRef = useRef(false);
+  const [submittingPayment, setSubmittingPayment] = useState(false);
   const activeCashboxes = (cashboxes || []).filter(cb => cb.active);
   // مذكرات سنة الطالب (تظهر عند اختيار نوع الدفع = مذكرات)
   const payMaterials = payFor ? (materials || []).filter(m => m.grade === payFor.grade) : [];
@@ -758,13 +792,22 @@ function ReservedTab({ records, onSelect, onConfirm, onCancel, onWaiting, onFrom
             </div>
 
             <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', marginTop: 20 }}>
-              <button onClick={() => setPayFor(null)} style={btnSecondary}>إلغاء</button>
-              <button disabled={activeCashboxes.length === 0} onClick={() => {
+              <button onClick={() => setPayFor(null)} disabled={submittingPayment} style={btnSecondary}>إلغاء</button>
+              <button disabled={activeCashboxes.length === 0 || submittingPayment} onClick={async () => {
+                if (submittingPaymentRef.current) return; // فحص متزامن — يمنع نقرة ثانية قبل حتى إعادة رندر تعطيل الزر
                 if (!payForm.amount || Number(payForm.amount) <= 0) { toast.error('أدخل مبلغاً صحيحاً'); return; }
                 if (!payForm.cashboxId) { toast.error('اختر الخزنة أولاً'); return; }
-                onAddPayment(payFor.id, { type: payForm.type, amount: Number(payForm.amount), materialId: payForm.materialId || null, at: new Date().toISOString().split('T')[0], cashboxId: payForm.cashboxId });
-                setPayFor(null);
-              }} style={{ ...btnPrimary, marginBottom: 0 }}>حفظ الدفعة</button>
+                submittingPaymentRef.current = true;
+                setSubmittingPayment(true);
+                const clientRequestId = uuid();
+                try {
+                  const ok = await onAddPayment(payFor.id, { type: payForm.type, amount: Number(payForm.amount), materialId: payForm.materialId || null, at: new Date().toISOString().split('T')[0], cashboxId: payForm.cashboxId, clientRequestId });
+                  if (ok) setPayFor(null); // يُغلَق فقط عند نجاح حقيقي — الفشل يُبقي المودال مفتوحاً مع toast.error الموجود بالفعل
+                } finally {
+                  submittingPaymentRef.current = false;
+                  setSubmittingPayment(false);
+                }
+              }} style={{ ...btnPrimary, marginBottom: 0 }}>{submittingPayment ? 'جارٍ الحفظ...' : 'حفظ الدفعة'}</button>
             </div>
           </div>
         </div>

@@ -67,3 +67,44 @@ export function deriveNotifications(reminders) {
   // المستخدَم بالفعل في ReminderCenter (crmParts.jsx)
   return [...overdue, ...noAnswer, ...promises, ...today];
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// إشعارات متابعة الغياب المتأخرة — نفس مبدأ deriveNotifications أعلاه بالضبط: دالة
+// مشتقّة نقية، بلا تخزين مستقل، بلا آلية إشعارات جديدة. تُستدعى من ui.context.jsx
+// بجانب deriveNotifications الحالية (لا تُعدِّلها) — انظر تقرير التفتيش.
+//
+// المُدخَل overdueAbsences هو حصراً classifyAbsenceFollowups(...).overdue من
+// attendanceService.js (كل عنصر: { attendance, student, followup }) — التصنيف نفسه
+// (متأخر = غائب + لا متابعة مكتملة + attendance.date < اليوم) محسوب هناك فقط، لا يُعاد
+// حسابه هنا.
+//
+// معرِّف الإشعار = notif-absence-${attendance.id} حصراً — مفتاح ثابت مشتق من سجل
+// الحضور نفسه، لا التاريخ الحالي ولا رقم عشوائي. نفس السجل يُنتج نفس المعرِّف دائماً مهما
+// تكرر الاستدعاء أو مرّت الأيام (طالما لم تُستكمَل متابعته) → إشعار منطقي واحد فقط لكل
+// حالة غياب غير محلولة، لا تكرار يومي (يمنع تماماً المثال الممنوع في التدقيق: سبت→أحد→
+// اثنين→ثلاثاء بإشعار جديد كل يوم).
+function absenceSubjectLabel(groupId, groups) {
+  const group = groups.find((g) => g.id === groupId);
+  return group?.subject || group?.name || 'الحصة';
+}
+
+export function deriveAbsenceNotifications(overdueAbsences = [], groups = []) {
+  return overdueAbsences.map(({ attendance, student }) => {
+    const studentName = student?.name || 'طالب';
+    const subject      = absenceSubjectLabel(attendance.groupId, groups);
+    const dateLabel    = fmtDate(attendance.date);
+
+    return {
+      id:     `notif-absence-${attendance.id}`,
+      type:   'absence',
+      title:  'متابعة غياب متأخرة',
+      body:   `${studentName} لم تتم متابعة غيابه عن حصة ${subject} بتاريخ ${dateLabel}.`,
+      time:   dateLabel,
+      read:   false,
+      urgent: true,
+      // معرِّف السجل الفعلي للتنقّل ("متابعة الآن") — Topbar.jsx/NotificationsPage.jsx
+      // يقرآن هذا الحقل فقط، لا يُنشئان أي منطق تصنيف/بحث خاص بهما.
+      link: { page: 'attendance', view: 'followup', attendanceId: attendance.id },
+    };
+  });
+}

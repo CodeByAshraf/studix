@@ -5,6 +5,7 @@ import { useAuth }     from '../../../store/auth.context';
 import { useState, useCallback, useRef } from 'react';
 import { useToast } from '../../../components/Toast';
 import { formatDate } from '../../../utils/helpers';
+import { pgGetAttendance } from '../../../services/api';
 
 const AV_PAL = [
   {bg:'rgba(59,130,246,.2)',color:'#3b82f6'},{bg:'rgba(16,185,129,.2)',color:'#10b981'},
@@ -14,7 +15,6 @@ const AV_PAL = [
 const av = n => AV_PAL[((n?.charCodeAt(0)||0)+(n?.charCodeAt(1)||0))%AV_PAL.length];
 
 export default function QRScanner() {
-  const attendance           = useAppStore((s) => s.attendance);
   const groups               = useAppStore((s) => s.groups);
   const setAttendance        = useAppStore((s) => s.setAttendance);
   const students             = useAppStore((s) => s.students);
@@ -30,7 +30,7 @@ export default function QRScanner() {
   const today = new Date().toISOString().split('T')[0];
 
   // Process a scanned/typed code
-  const processCode = useCallback((code) => {
+  const processCode = useCallback(async (code) => {
     if (!code?.trim()) return;
 
     let studentId = null;
@@ -58,10 +58,17 @@ export default function QRScanner() {
       return;
     }
 
-    // Check if already scanned today
-    const existingToday = attendance.find(r =>
-      r.studentId === studentId && r.date === today
-    );
+    // C4 Attendance Batch A: scoped GET /api/attendance?studentId=&date= instead of
+    // scanning the full global attendance array — a single-student, single-date lookup,
+    // same pattern as SessionMarking.jsx's own existing-session check.
+    let existingToday;
+    try {
+      const rows = await pgGetAttendance({ studentId, date: today });
+      existingToday = rows[0] ?? null;
+    } catch (e) {
+      toast.error(e.message || 'فشل التحقّق من سجل حضور الطالب لهذا اليوم');
+      return;
+    }
 
     if (existingToday) {
       toast.warning(`${studentObj.name} — تم تسجيله مسبقاً اليوم (${existingToday.status})`);
@@ -97,7 +104,7 @@ export default function QRScanner() {
     toast.success(`✓ ${studentObj.name} — ${scanType === 'present' ? 'تم تسجيل الحضور' : scanType === 'late' ? 'تسجيل متأخر' : 'تم التسجيل'}`);
     setManualCode('');
     inputRef.current?.focus();
-  }, [students, groups, attendance, setAttendance, scanType, today, currentUser, toast]);
+  }, [students, groups, setAttendance, scanType, today, currentUser, toast]);
 
   const handleKeyDown = (e) => {
     if (e.key === 'Enter') processCode(manualCode);

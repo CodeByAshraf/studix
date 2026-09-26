@@ -15,9 +15,9 @@ import { ToastProvider } from '../../components/Toast';
 
 vi.mock('../../services/api', async () => {
   const actual = await vi.importActual('../../services/api');
-  return { ...actual, pgDeleteStudent: vi.fn(), pgCreateActivityLog: vi.fn() };
+  return { ...actual, pgDeleteStudent: vi.fn(), pgCreateActivityLog: vi.fn(), pgGetPayments: vi.fn(), pgGetCommunications: vi.fn(), pgGetGrades: vi.fn(), pgGetHwSubmissions: vi.fn() };
 });
-import { pgDeleteStudent, pgCreateActivityLog } from '../../services/api';
+import { pgDeleteStudent, pgCreateActivityLog, pgGetPayments, pgGetCommunications, pgGetGrades, pgGetHwSubmissions } from '../../services/api';
 
 const GROUP_ID = 'g1';
 const S1 = 's1';
@@ -47,7 +47,19 @@ async function openConfirmAndClick() {
 }
 
 describe('StudentsPage — activity log integration (Phase 3B-15)', () => {
-  beforeEach(() => { vi.clearAllMocks(); });
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Scalability Architecture Phase 4 Cutover 1: the delete flow's payments-count guard
+    // now calls pgGetPayments({studentId}) instead of reading the store's payments array.
+    pgGetPayments.mockResolvedValue([]);
+    // Pre-Installer Audit C4: the delete flow's communicationsCount guard now calls
+    // pgGetCommunications({studentId}) instead of reading the store's communications array.
+    pgGetCommunications.mockResolvedValue([]);
+    // C4 Grades/hwSubmissions Frontend Migration (Batch A, feature 004): same reason —
+    // the delete flow's grades/hwSubmissions guards now call pgGetGrades/pgGetHwSubmissions.
+    pgGetGrades.mockResolvedValue([]);
+    pgGetHwSubmissions.mockResolvedValue([]);
+  });
 
   it('delete: calls addLog with the real entity (entityType/entityId), never a client-supplied user field', async () => {
     seedStore();

@@ -124,6 +124,16 @@ const COLLECTION_FIXUPS = {
   },
   // inv_materials.price/cost/min_stock أعمدة Decimal — نفس مشكلة exams.total/pass أعلاه.
   // material.price يُستخدَم حسابياً (ضرب/مقارنة) في MaterialDistribution.jsx/
+  // Pre-installer defect audit — groups.teacher_name يصل هنا كـ "teacherName" (snakeToCamel
+  // الخام، بلا أي تطبيع سابقاً — لم يكن لِـ groups أي إدخال في COLLECTION_FIXUPS إطلاقاً).
+  // GroupForm.jsx/GroupsPage.jsx/GroupCard.jsx تقرأ جميعها "teacher" حصراً (الحقل المحلي
+  // القديم)، لا "teacherName" — وmergeById (أعلاه) يستبدل الصف المحلي بالكامل بصف الخادم
+  // الخام عند أي مزامنة، فتُفقَد "teacher" كلياً، فيظهر حقل "المدرس" فارغاً في نموذج
+  // التعديل رغم وجود اسم حقيقي، وحفظ التعديل بلا إعادة كتابته يدوياً يُرسِل teacherName:''
+  // فيمحو الاسم الحقيقي من القاعدة صامتاً. نفس مبدأ communications.legacyParentName أعلاه
+  // بالضبط: إعادة تسمية على مسار القراءة/الدمج فقط، لا تغيير على pgCreateGroup/
+  // pgUpdateGroup (api.js) ولا على أي حقل آخر.
+  groups: (r) => ({ ...r, teacher: r.teacherName ?? '' }),
   // MaterialReports.jsx، فنص هنا يعني NaN أو مقارنة نصّية خاطئة — التطبيع ضروري فعلاً.
   // addedAt عمود @db.Date جديد (added_at) — نفس مشكلة attendance.date/exams.date أعلاه
   // (يصل كطابع زمني كامل عبر المسار العام)، نفس normalizeDateOnly.

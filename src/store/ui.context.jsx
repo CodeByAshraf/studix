@@ -16,7 +16,10 @@ import { DEFAULT_THEME } from '../constants/theme';
 import { ROUTES }        from '../constants/routes';
 import { useAppStore } from './app.store';
 import { generateReminders } from '../modules/communication/reminderService';
-import { deriveNotifications } from '../services/notificationService';
+import { deriveNotifications, deriveAbsenceNotifications } from '../services/notificationService';
+import { classifyAbsenceFollowups } from '../services/attendanceService';
+import { pgGetCollection } from '../services/api';
+import { normalizeCollectionForMerge } from './db.middleware';
 
 const UIContext = createContext(null);
 
@@ -31,14 +34,52 @@ export function UIProvider({ children, canAccess }) {
   const [theme,          setThemeState]     = useState(() => storage.get('tc_theme', DEFAULT_THEME));
 
   // ── Notifications (Issue 4 — derived, not independently stored) ────────────
-  // communications/commTasks are already real, already boot-synced Zustand state (Issue 4
-  // reads them read-only; reminderService.js itself is never modified). Zustand needs no
-  // Provider — useAppStore is reachable directly from any component, so no new prop
-  // threading into UIProvider is needed for this.
+  // communications/commTasks are read-only here (Issue 4 reads them read-only;
+  // reminderService.js itself is never modified). Zustand needs no Provider — useAppStore
+  // is reachable directly from any component, so no new prop threading into UIProvider is
+  // needed for this.
+  //
+  // Pre-Installer Audit C4: communications/commTasks no longer boot-sync from PostgreSQL
+  // (db.middleware.js's PG_COLLECTIONS) — CommunicationPage.jsx fetches its own copy on
+  // mount, but UIProvider wraps the WHOLE app and this notification bell must stay
+  // populated even when that page is never visited in the session. UIProvider mounts
+  // exactly once at app start, so fetching here once mirrors the old boot-sync's timing
+  // and freshness exactly — best-effort (console.warn only, no toast — this is a
+  // background derivation, not a user-initiated action, same principle as
+  // db.middleware.js's own per-collection failure handling).
+  const setCommunications = useAppStore((s) => s.setCommunications);
+  const setCommTasks      = useAppStore((s) => s.setCommTasks);
+  useEffect(() => {
+    let cancelled = false;
+    pgGetCollection('communications')
+      .then((data) => { if (!cancelled) setCommunications(normalizeCollectionForMerge('communications', data)); })
+      .catch((err) => console.warn('[UIProvider] فشل جلب communications للتذكيرات:', err.message));
+    pgGetCollection('commTasks')
+      .then((data) => { if (!cancelled) setCommTasks(normalizeCollectionForMerge('commTasks', data)); })
+      .catch((err) => console.warn('[UIProvider] فشل جلب commTasks للتذكيرات:', err.message));
+    return () => { cancelled = true; };
+  }, [setCommunications, setCommTasks]);
+
   const communications = useAppStore((s) => s.communications);
   const commTasks      = useAppStore((s) => s.commTasks);
   const reminders    = useMemo(() => generateReminders(communications, commTasks), [communications, commTasks]);
-  const derivedNotifs = useMemo(() => deriveNotifications(reminders), [reminders]);
+
+  // متابعة الغياب المتأخرة — نفس مبدأ communications/commTasks أعلاه بالضبط: قراءة من
+  // Zustand الموجود بالفعل (بلا أي تخزين/API/متجر جديد)، تصنيف نقي (classifyAbsenceFollowups)
+  // ثم اشتقاق إشعارات (deriveAbsenceNotifications) — deriveNotifications نفسها لا تُعدَّل.
+  const attendance      = useAppStore((s) => s.attendance);
+  const absenceFollowup = useAppStore((s) => s.absenceFollowup);
+  const students        = useAppStore((s) => s.students);
+  const groups          = useAppStore((s) => s.groups);
+  const { overdue: overdueAbsences } = useMemo(
+    () => classifyAbsenceFollowups(attendance, absenceFollowup, students),
+    [attendance, absenceFollowup, students],
+  );
+
+  const derivedNotifs = useMemo(
+    () => [...deriveNotifications(reminders), ...deriveAbsenceNotifications(overdueAbsences, groups)],
+    [reminders, overdueAbsences, groups],
+  );
 
   const [readIds, setReadIds] = useState(() => new Set(storage.get(NOTIF_READ_IDS_KEY, [])));
 
@@ -80,13 +121,18 @@ export function UIProvider({ children, canAccess }) {
 
   // ── Navigate ──────────────────────────────────────────────────────────────
   // يُحدّث UIContext state + React Router URL في نفس الوقت
-  const navigate = useCallback((pageId) => {
+  // query اختياري — يضيف query string للانتقال المباشر (deep link)، مثل "متابعة الآن" في
+  // إشعار الغياب (?view=followup&attendanceId=...). كل استدعاء موجود بالفعل بمعامل واحد
+  // فقط يبقى يعمل بلا أي تغيير — لا يُغيَّر currentPage/syncFromUrl (يعتمدان على pathname
+  // فقط، غير مُتأثِّرَين بـ query string).
+  const navigate = useCallback((pageId, query) => {
     if (!canAccess || canAccess(pageId)) {
       setCurrentPage(pageId);
       // Push to browser history if React Router is available
       if (rrNavigateFn) {
-        const path = pageId === ROUTES.DASHBOARD ? '/' : `/${pageId}`;
-        rrNavigateFn(path);
+        const base = pageId === ROUTES.DASHBOARD ? '/' : `/${pageId}`;
+        const qs = query ? `?${new URLSearchParams(query).toString()}` : '';
+        rrNavigateFn(base + qs);
       }
     }
   }, [canAccess, rrNavigateFn]);

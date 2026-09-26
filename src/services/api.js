@@ -36,6 +36,21 @@ export async function pgGetCollection(name) {
   return json.data;
 }
 
+// pgGetStudentReportData: GET /api/students/:studentId/report-data — Phase 2 (Scalability
+// Architecture) — حزمة مصغَّرة من صفوف طالب واحد فقط (attendance/grades/exams/
+// hwSubmissions/payments/treasuryTxn/communications/inventoryTxn/invMaterials)، مُطبَّعة
+// مسبقاً من جهة الخادم (Decimal→رقم، date→نص يوم) بنفس تطبيع COLLECTION_FIXUPS
+// (db.middleware.js) بالضبط — جاهزة للتغذية المباشرة في gatherStudentData(studentId, bundle)
+// بلا أي تحويل إضافي هنا، تماماً كما لو كانت "store" مصغَّراً.
+export async function pgGetStudentReportData(studentId) {
+  const res = await fetch(`${PG_API_BASE}/api/students/${encodeURIComponent(studentId)}/report-data`, {
+    credentials: 'include',
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG GET /students/${studentId}/report-data → ${res.status}`);
+  return json.data;
+}
+
 // يُرمى فقط عند تعذّر الوصول للـ backend (شبكة/timeout) — يُميَّز عن رفض بيانات الدخول (401)
 export class BackendUnreachableError extends Error {
   constructor(message) {
@@ -76,12 +91,15 @@ export async function pgLogin(id, password) {
 // pgCreateStudent: POST /api/students. الخادم يتجاهل أي id يُرسَل من العميل
 // ويولّد UUID جديداً دائماً (حقل id بلا default في الـ schema) — استخدم دائماً
 // id السجل المُعاد من الاستجابة، وليس أي id مُولَّد محلياً قبل الإرسال.
+// Production hardening pass: enroll_date عمود @db.Date — نفس مشكلة exams.date بالضبط
+// (توضيح toRequestDate أعلاه) — يُحوَّل هنا قبل الإرسال، لا يبقى "YYYY-MM-DD" خاماً.
 export async function pgCreateStudent(data) {
+  const body = { ...data, enrollDate: toRequestDate(data.enrollDate) };
   const res = await fetch(`${PG_API_BASE}/api/students`, {
     method: 'POST',
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data),
+    body: JSON.stringify(body),
   });
   const json = await res.json().catch(() => null);
   if (!res.ok) throw new Error(json?.error || `PG POST /students → ${res.status}`);
@@ -90,11 +108,12 @@ export async function pgCreateStudent(data) {
 
 // pgUpdateStudent: PUT /api/students/:id
 export async function pgUpdateStudent(id, data) {
+  const body = { ...data, enrollDate: toRequestDate(data.enrollDate) };
   const res = await fetch(`${PG_API_BASE}/api/students/${encodeURIComponent(id)}`, {
     method: 'PUT',
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data),
+    body: JSON.stringify(body),
   });
   const json = await res.json().catch(() => null);
   if (!res.ok) throw new Error(json?.error || `PG PUT /students/${id} → ${res.status}`);
@@ -110,6 +129,77 @@ export async function pgDeleteStudent(id) {
   const json = await res.json().catch(() => null);
   if (!res.ok) throw new Error(json?.error || `PG DELETE /students/${id} → ${res.status}`);
   return true;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 3A (Multi-Group Enrollment — Enrollment API) — student_group_enrollments، عبر
+// مسار مخصَّص (backend/src/routes/enrollments.js)، عمداً NOT عبر pgGetCollection/
+// PG_COLLECTIONS العام (db.middleware.js): هذا الجدول ينمو مع كل عملية تسجيل/سحب لكل
+// طالب، بنفس مبدأ الاستبعاد المتعمَّد لـ payments/activityLogs/admissionPayments من
+// db.middleware.js (انظر تعليقه هناك) — يُجلَب عند الطلب فقط، لا عند الإقلاع/تسجيل
+// الدخول. المجموعة الرئيسية (Primary Group) تبقى بلا تغيير عبر pgCreateStudent/
+// pgUpdateStudent أعلاه (مسار Phase 1 الموجود مسبقاً) — هذه الدوال الأربع فقط لِقراءة
+// تسجيلات طالب وعمليات المجموعات الإضافية (Additional Groups) وتعديل جدول تسجيل قائم.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// pgGetStudentEnrollments: GET /api/students/:studentId/enrollments — التسجيلات النشطة
+// فقط لطالب واحد (Primary + Additional معاً، role حقل في كل صف مُعاد).
+export async function pgGetStudentEnrollments(studentId) {
+  const res = await fetch(`${PG_API_BASE}/api/students/${encodeURIComponent(studentId)}/enrollments`, {
+    credentials: 'include',
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG GET /students/${studentId}/enrollments → ${res.status}`);
+  return json.data;
+}
+
+// pgAddAdditionalGroup: POST /api/students/:studentId/enrollments — يضيف مجموعة إضافية
+// (لا يمسّ students.group_id إطلاقاً). startDate/endDate/attendDays اختيارية.
+export async function pgAddAdditionalGroup(studentId, { groupId, startDate, endDate, attendDays } = {}) {
+  const res = await fetch(`${PG_API_BASE}/api/students/${encodeURIComponent(studentId)}/enrollments`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      groupId,
+      startDate: toRequestDate(startDate),
+      endDate: toRequestDate(endDate),
+      attendDays,
+    }),
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG POST /students/${studentId}/enrollments → ${res.status}`);
+  return json.data;
+}
+
+// pgWithdrawEnrollment: DELETE /api/enrollments/:enrollmentId — مجموعة إضافية فقط (الخادم
+// يرفض role='primary' هنا صراحةً — لتغيير المجموعة الرئيسية استخدم pgUpdateStudent).
+export async function pgWithdrawEnrollment(enrollmentId) {
+  const res = await fetch(`${PG_API_BASE}/api/enrollments/${encodeURIComponent(enrollmentId)}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG DELETE /enrollments/${enrollmentId} → ${res.status}`);
+  return json.data;
+}
+
+// pgUpdateEnrollmentSchedule: PATCH /api/enrollments/:enrollmentId — attendDays/startDate/
+// endDate لتسجيل نشط قائم فقط.
+export async function pgUpdateEnrollmentSchedule(enrollmentId, { attendDays, startDate, endDate } = {}) {
+  const res = await fetch(`${PG_API_BASE}/api/enrollments/${encodeURIComponent(enrollmentId)}`, {
+    method: 'PATCH',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      attendDays,
+      startDate: toRequestDate(startDate),
+      endDate: toRequestDate(endDate),
+    }),
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG PATCH /enrollments/${enrollmentId} → ${res.status}`);
+  return json.data;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -150,13 +240,19 @@ export async function pgUpdateGroup(id, data) {
 
 // pgDeleteGroup: DELETE /api/groups/:id — الـ backend يرفض الحذف تلقائياً (409) لو
 // كانت هناك students تشير لهذه المجموعة (FK NO ACTION على students.group_id).
+// Phase 2.1: الخادم يرفض أيضاً (409، code=GROUP_HAS_HOMEWORK) لو كان لصفّ المجموعة واجبات
+// (backend/src/routes/groupDelete.js) — code يُمرَّر على الخطأ ليعرض GroupsPage رسالة الخادم.
 export async function pgDeleteGroup(id) {
   const res = await fetch(`${PG_API_BASE}/api/groups/${encodeURIComponent(id)}`, {
     method: 'DELETE',
     credentials: 'include',
   });
   const json = await res.json().catch(() => null);
-  if (!res.ok) throw new Error(json?.error || `PG DELETE /groups/${id} → ${res.status}`);
+  if (!res.ok) {
+    const err = new Error(json?.error || `PG DELETE /groups/${id} → ${res.status}`);
+    if (json?.code) err.code = json.code;
+    throw err;
+  }
   return true;
 }
 
@@ -245,9 +341,11 @@ function normalizeTreasuryTxnResponse(data) {
 // المتاح قبل الإرسال — لولا هذا الدمج، الـ CRUD العام (crud.js) كان سيُسقط description
 // بصمت (لا عمود مطابق له في المخطّط)، فيُفقَد النص الذي كتبه المستخدم فعلياً دون أي خطأ
 // ظاهر. اكتُشفت هذه الحالة عبر سكريبت التحقّق مضمون التراجع قبل أي كتابة حقيقية.
+// Production hardening pass: date عمود @db.Date — نفس مشكلة exams.date/enroll_date
+// بالضبط — يُحوَّل هنا قبل الإرسال (TreasuryPage.jsx يبني "YYYY-MM-DD" خاماً).
 export async function pgCreateTreasuryTxn(data) {
   const { description, notes, ...rest } = data;
-  const body = { ...rest, notes: notes ? `${description} — ${notes}` : description };
+  const body = { ...rest, date: toRequestDate(rest.date), notes: notes ? `${description} — ${notes}` : description };
   const res = await fetch(`${PG_API_BASE}/api/treasuryTxn`, {
     method: 'POST',
     credentials: 'include',
@@ -354,11 +452,90 @@ export async function pgRefundPayment(id, amount, reason) {
   };
 }
 
+// Scalability Architecture Phase 4 Cutover 1 — pgGetPayments/pgGetPaymentAggregates:
+// قراءة مُفلترة/مُجمَّعة من GET /api/payments و/api/payments/aggregate (backend/src/
+// routes/payments.js)، بدل الاعتماد على مصفوفة payments الكاملة من PG_COLLECTIONS.
+// كل معامِل اختياري — غيابه يُطابق سلوك عدم الإرسال تماماً (بلا فلترة لهذا البُعد)،
+// بنفس مبدأ الخادم نفسه. القيم الفارغة (undefined/null/'') لا تُرسَل كـ query param
+// إطلاقاً، تجنّباً لإرسال month=NaN أو year= فارغة.
+function buildQueryString(params = {}) {
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null && v !== '') qs.set(k, v);
+  }
+  const s = qs.toString();
+  return s ? `?${s}` : '';
+}
+
+// pgGetPayments: GET /api/payments?studentId=&groupId=&month=&year=&date=&limit=&orderBy=
+// نفس تطبيع normalizePaymentResponse أعلاه (amount Decimal→رقم، date→"YYYY-MM-DD") —
+// الصفوف المُعادة قابلة للتغذية المباشرة في أي دالة من paymentService.js/groupService.js
+// كانت تستقبل سابقاً payments الكاملة من الـ store (getUnpaidStudents/getPartialStudents/
+// getGroupStats/إلخ) بلا أي تعديل على تلك الدوال نفسها.
+export async function pgGetPayments(params = {}) {
+  const res = await fetch(`${PG_API_BASE}/api/payments${buildQueryString(params)}`, {
+    credentials: 'include',
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG GET /payments → ${res.status}`);
+  if (!Array.isArray(json?.data)) throw new Error('PG GET /payments → استجابة غير صالحة (data ليست مصفوفة)');
+  return json.data.map(normalizePaymentResponse);
+}
+
+// pgGetPaymentAggregates: GET /api/payments/aggregate?groupBy=&year=&month=&groupId=&studentId=
+// revenue/count يصلان كأرقام JS عادية بالفعل (الخادم يحسبهما بـ Number() قبل الإرسال،
+// لا Decimal خام) — لا تطبيع إضافي مطلوب هنا. groupBy=method/status: {key,count} فقط
+// (بلا revenue، بنفس منطق الخادم غير الصافي لهذين البُعدين تحديداً). groupBy=month/day/
+// group/student: {key,count,revenue}. الاستجابة جزئية دائماً (بُعد بلا أي دفعة لا يظهر
+// كصفّ) — انظر zeroFillMonthlyAggregate/zeroFillGroupAggregate في paymentService.js
+// للمستهلكين الذين يحتاجون بنية كثيفة (كل الشهور/كل المجموعات دائماً).
+export async function pgGetPaymentAggregates(params = {}) {
+  const res = await fetch(`${PG_API_BASE}/api/payments/aggregate${buildQueryString(params)}`, {
+    credentials: 'include',
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG GET /payments/aggregate → ${res.status}`);
+  if (!Array.isArray(json?.data)) throw new Error('PG GET /payments/aggregate → استجابة غير صالحة (data ليست مصفوفة)');
+  return json.data;
+}
+
+// pgGetPaymentsHistory: GET /api/payments/search?month=&groupId=&status=&search=&page=&limit=
+// Scalability Architecture Phase 4 (متابعة) — يخدم PaymentHistory.jsx حصراً: بديل خادم-
+// الحقيقة الكامل لمنطق .filter()/.sort()/paginate()/totalFiltered المحلي القديم فوق مصفوفة
+// payments الكاملة (انظر backend/src/routes/payments.js's searchPayments لنفس المنطق
+// بالضبط، سطراً بسطر). items تُطبَّع بنفس normalizePaymentResponse (amount رقم، date
+// نص)؛ page/totalPages/total/totalAmount/hasPrev/hasNext تصل كأرقام/منطقية جاهزة من الخادم.
+export async function pgGetPaymentsHistory(params = {}) {
+  const res = await fetch(`${PG_API_BASE}/api/payments/search${buildQueryString(params)}`, {
+    credentials: 'include',
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG GET /payments/search → ${res.status}`);
+  if (!json?.data || !Array.isArray(json.data.items)) {
+    throw new Error('PG GET /payments/search → استجابة غير صالحة (data.items ليست مصفوفة)');
+  }
+  return { ...json.data, items: json.data.items.map(normalizePaymentResponse) };
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Phase 3B-4 (تحضيري) — استبدال جلسة حضور كاملة عبر PostgreSQL بمعاملة ذرّية واحدة.
 // SessionMarking يستخدم هذه بدل الكتابة المباشرة لـ Zustand — الخادم هو مصدر
 // الحقيقة لكل سجلات الجلسة معاً (نفس مبدأ pgCreateStudent/pgCreateGroup).
 // ═══════════════════════════════════════════════════════════════════════════
+
+// pgGetEligibleStudentsForSession: GET /api/attendance-sessions/:groupId/:date/roster —
+// Group Closure (Attendance Integration) — قائمة id الطلاب المؤهَّلين لحضور هذه المجموعة
+// في هذا التاريخ تحديداً (enrollment/date/day، عبر attendanceEligibility.js في الخادم —
+// لا منطق أهلية مكرَّر هنا). يحل محل الفلترة القديمة students.groupId===selectedGroup
+// بلا أي وعي بالتاريخ/الأيام.
+export async function pgGetEligibleStudentsForSession(groupId, date) {
+  const res = await fetch(`${PG_API_BASE}/api/attendance-sessions/${encodeURIComponent(groupId)}/${encodeURIComponent(date)}/roster`, {
+    credentials: 'include',
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG GET /attendance-sessions/${groupId}/${date}/roster → ${res.status}`);
+  return json.data; // string[] of eligible studentId
+}
 
 // pgSaveAttendanceSession: PUT /api/attendance-sessions/:groupId/:date
 // records: [{ studentId, status }]. records=[] يعني "امسح كل سجلات هذه الجلسة".
@@ -372,6 +549,92 @@ export async function pgSaveAttendanceSession(groupId, date, sessionTime, record
   const json = await res.json().catch(() => null);
   if (!res.ok) throw new Error(json?.error || `PG PUT /attendance-sessions/${groupId}/${date} → ${res.status}`);
   return json.data; // { groupId, date, sessionTime, records: [...] }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Recitation Assessment Phase 3 — يُبنى على جلسة الحضور الموجودة بالفعل (attendance
+// session id) ولا يُنشئها إطلاقاً هنا؛ الخادم (recitations.js) هو المصدر الوحيد للحقيقة.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// pgListRecitationSessions: GET /api/recitation-sessions?limit=N — الجلسات المكتملة
+// الأحدث فقط (الخادم يفلتر status='completed'، لا فلترة هنا).
+export async function pgListRecitationSessions({ limit } = {}) {
+  const res = await fetch(`${PG_API_BASE}/api/recitation-sessions${buildQueryString({ limit })}`, {
+    credentials: 'include',
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG GET /recitation-sessions → ${res.status}`);
+  return json.data; // [{ id, groupId, groupName, date, sessionTime, recitationStatus, attendeeCount, evaluatedCount }]
+}
+
+// pgGetRecitationSession: GET /api/recitation-sessions/:groupId/:date — roster (حاضر/
+// متأخر فقط) + أي درجات محفوظة بالفعل لهذه الجلسة تحديداً.
+export async function pgGetRecitationSession(groupId, date) {
+  const res = await fetch(`${PG_API_BASE}/api/recitation-sessions/${encodeURIComponent(groupId)}/${encodeURIComponent(date)}`, {
+    credentials: 'include',
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG GET /recitation-sessions/${groupId}/${date} → ${res.status}`);
+  return json.data; // { session, group, roster }
+}
+
+// pgSaveRecitations: PUT /api/recitation-sessions/:groupId/:date — upsert جزئي (لا
+// delete-diff، انظر توضيح الخادم في recitations.js): records تحمل فقط الطلاب الذين
+// أُدخِلت لهم درجة في هذا الحفظ، لا الروستر كاملاً.
+export async function pgSaveRecitations(groupId, date, maxScore, records) {
+  const res = await fetch(`${PG_API_BASE}/api/recitation-sessions/${encodeURIComponent(groupId)}/${encodeURIComponent(date)}`, {
+    method: 'PUT',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ maxScore, records }),
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG PUT /recitation-sessions/${groupId}/${date} → ${res.status}`);
+  return json.data; // { session, records }
+}
+
+// pgCompleteRecitationSession: PUT /api/recitation-sessions/:groupId/:date/complete —
+// قفل نهائي، تغطية جزئية مسموحة.
+export async function pgCompleteRecitationSession(groupId, date) {
+  const res = await fetch(`${PG_API_BASE}/api/recitation-sessions/${encodeURIComponent(groupId)}/${encodeURIComponent(date)}/complete`, {
+    method: 'PUT',
+    credentials: 'include',
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG PUT /recitation-sessions/${groupId}/${date}/complete → ${res.status}`);
+  return json.data; // updated session
+}
+
+// C4 Attendance migration Phase 2 — pgGetAttendance: GET /api/attendance?studentId=&
+// groupId=&date=&status=&studentIds= (Phase 1's dedicated scoped route — see
+// backend/src/routes/attendance.js). Rows already come back server-normalized
+// (studentId/groupId/sessionTime/createdAt camelCase, date as plain "YYYY-MM-DD") — no
+// client-side fixup needed, unlike the old generic-route + db.middleware.js path this
+// replaces for each migrated consumer.
+export async function pgGetAttendance(params = {}) {
+  const res = await fetch(`${PG_API_BASE}/api/attendance${buildQueryString(params)}`, {
+    credentials: 'include',
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG GET /attendance → ${res.status}`);
+  if (!Array.isArray(json?.data)) throw new Error('PG GET /attendance → استجابة غير صالحة (data ليست مصفوفة)');
+  return json.data;
+}
+
+// pgGetAttendanceAggregate: GET /api/attendance/aggregate?groupBy=status|group|student|
+// weekday|date&groupId=&studentId=&studentIds=&date=&from=&to=&status=&threshold=
+// Response shape depends on groupBy — see attendance.js's own header for the exact per-
+// dimension shapes ({key,count} for status/weekday, {key,total,present,absent,late} for
+// group/student/date). No client-side reshaping here — callers read the shape their
+// specific groupBy dimension returns, same convention as pgGetPaymentAggregates.
+export async function pgGetAttendanceAggregate(params = {}) {
+  const res = await fetch(`${PG_API_BASE}/api/attendance/aggregate${buildQueryString(params)}`, {
+    credentials: 'include',
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG GET /attendance/aggregate → ${res.status}`);
+  if (!Array.isArray(json?.data)) throw new Error('PG GET /attendance/aggregate → استجابة غير صالحة (data ليست مصفوفة)');
+  return json.data;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -434,6 +697,31 @@ export async function pgUpdateExam(id, data) {
   return normalizeExamResponse(json.data);
 }
 
+// pgGetExam: GET /api/exams/:id — يُستخدَم فقط لإعادة مزامنة مؤقّت الامتحان الإداري
+// (ExamTimer.jsx) بعد بدء الامتحان (Exams Phase 3D) — نفس مسار الـ CRUD العام الموجود
+// أصلاً (backend/src/routes/crud.js's GET /:id)، لا نقطة نهاية جديدة.
+export async function pgGetExam(id) {
+  const res = await fetch(`${PG_API_BASE}/api/exams/${encodeURIComponent(id)}`, {
+    credentials: 'include',
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG GET /exams/${id} → ${res.status}`);
+  return normalizeExamResponse(json.data);
+}
+
+// pgStartExam: POST /api/exams/:id/start — Exams Phase 3D. يُسجَّل وقت البدء من ساعة
+// الخادم فقط (backend/src/routes/examStart.js) — idempotent: استدعاء ثانٍ لامتحان بدأ
+// بالفعل يُعيد نفس الوقت الأصلي دون تغييره.
+export async function pgStartExam(id) {
+  const res = await fetch(`${PG_API_BASE}/api/exams/${encodeURIComponent(id)}/start`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG POST /exams/${id}/start → ${res.status}`);
+  return json.data; // { examId, actualStartedAt, durationMinutes, remainingSeconds, phase }
+}
+
 // pgDeleteExam: DELETE /api/exams/:id — معاملة ذرّية على الخادم: تحذف كل درجات
 // الامتحان ثم الامتحان نفسه معاً، أو لا شيء عند أي فشل (backend/src/routes/examDelete.js).
 export async function pgDeleteExam(id) {
@@ -458,6 +746,45 @@ export async function pgSaveExamGrades(examId, records) {
   const json = await res.json().catch(() => null);
   if (!res.ok) throw new Error(json?.error || `PG PUT /exam-grades/${examId} → ${res.status}`);
   return json.data; // { examId, records: [...] }
+}
+
+// Grades + Homework Submissions Frontend Migration (Batch A, feature 004) — pgGetGrades:
+// GET /api/grades?studentId=&examId= (feature 003's scoped read route, unchanged). The raw
+// backend response matches the GENERIC route's shape on purpose (feature 003's own scope never
+// touched any frontend consumer) — score arrives as a Decimal-as-string, not a number. Every
+// consumer of this function already reads the boot-sync-normalized shape (numeric score) via
+// db.middleware.js's COLLECTION_FIXUPS.grades, so normalizeGradeResponse replicates that exact
+// transform here, mirroring the already-established pgGetPayments/pgGetCommunications
+// `.map(normalizeXResponse)` pattern — no consumer needs any change to its own numeric logic.
+function normalizeGradeResponse(r) {
+  return {
+    ...r,
+    score: r.score === null || r.score === undefined ? null : Number(r.score),
+  };
+}
+
+export async function pgGetGrades(params = {}) {
+  const res = await fetch(`${PG_API_BASE}/api/grades${buildQueryString(params)}`, {
+    credentials: 'include',
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG GET /grades → ${res.status}`);
+  if (!Array.isArray(json?.data)) throw new Error('PG GET /grades → استجابة غير صالحة (data ليست مصفوفة)');
+  return json.data.map(normalizeGradeResponse);
+}
+
+// Phase 1C (Grades global-read migration) — pgGetGradesAggregate: GET /api/grades/aggregate?
+// groupBy=none|student|exam&studentId=&examId=. Server-side aggregation (AVG/COUNT joined
+// against exams.total/pass) — no client-side reshaping needed (none of the three shapes carry
+// a score/Decimal-as-string field), same convention as pgGetHwSubmissionsAggregate.
+export async function pgGetGradesAggregate(params = {}) {
+  const res = await fetch(`${PG_API_BASE}/api/grades/aggregate${buildQueryString(params)}`, {
+    credentials: 'include',
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG GET /grades/aggregate → ${res.status}`);
+  if (!Array.isArray(json?.data)) throw new Error('PG GET /grades/aggregate → استجابة غير صالحة (data ليست مصفوفة)');
+  return json.data;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -519,6 +846,20 @@ export async function pgUpdateHomework(id, data) {
   return normalizeHomeworkResponse(json.data);
 }
 
+// Phase 2 (Homework global-read migration) — pgGetHomeworks: GET /api/homeworks?grade=
+// (homeworksScopedGet.js). Page-level read replacing the global s.homeworks bootstrap; rows get
+// the same normalizeHomeworkResponse shape as create/update above (and as boot-sync's
+// COLLECTION_FIXUPS.homeworks). Unordered, like the generic route (Phase 2.1) — callers sort.
+export async function pgGetHomeworks(params = {}) {
+  const res = await fetch(`${PG_API_BASE}/api/homeworks${buildQueryString(params)}`, {
+    credentials: 'include',
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG GET /homeworks → ${res.status}`);
+  if (!Array.isArray(json?.data)) throw new Error('PG GET /homeworks → استجابة غير صالحة (data ليست مصفوفة)');
+  return json.data.map(normalizeHomeworkResponse);
+}
+
 // pgDeleteHomework: DELETE /api/homeworks/:id — معاملة ذرّية على الخادم: تحذف كل
 // سجلات تسليم الواجب ثم الواجب نفسه معاً (backend/src/routes/homeworkDelete.js).
 export async function pgDeleteHomework(id) {
@@ -552,6 +893,50 @@ export async function pgSaveHwSubmissions(homeworkId, records) {
     ...data,
     records: (data.records || []).map(({ homeworkId: _drop, ...rest }) => ({ ...rest, hwId: homeworkId })),
   };
+}
+
+// Grades + Homework Submissions Frontend Migration (Batch A, feature 004) — pgGetHwSubmissions:
+// GET /api/hwSubmissions?studentId=&homeworkId= (feature 003's scoped read route, unchanged).
+// Same raw-generic-shape situation as pgGetGrades above, plus one more mismatch: the raw
+// response's assignment-reference field is "homeworkId" (snakeToCamel of homework_id), but
+// every consumer in this app (HomeworkTracking.jsx, HomeworkPage.jsx, buildHomeworkReport.js)
+// reads "hwId" exclusively — the exact rename db.middleware.js's COLLECTION_FIXUPS.hwSubmissions
+// already applies at boot-sync. normalizeHwSubmissionResponse replicates that rename plus the
+// same score/submittedAt normalization, so no consumer needs any change to its own field names.
+function normalizeHwSubmissionResponse(r) {
+  const { homeworkId, ...rest } = r;
+  return {
+    ...rest,
+    hwId:        homeworkId ?? r.hwId,
+    score:       r.score === null || r.score === undefined ? null : Number(r.score),
+    submittedAt: toResponseDateOrNull(r.submittedAt),
+  };
+}
+
+export async function pgGetHwSubmissions(params = {}) {
+  const res = await fetch(`${PG_API_BASE}/api/hwSubmissions${buildQueryString(params)}`, {
+    credentials: 'include',
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG GET /hwSubmissions → ${res.status}`);
+  if (!Array.isArray(json?.data)) throw new Error('PG GET /hwSubmissions → استجابة غير صالحة (data ليست مصفوفة)');
+  return json.data.map(normalizeHwSubmissionResponse);
+}
+
+// pgGetHwSubmissionsAggregate: GET /api/hwSubmissions/aggregate?groupBy=status|homework&
+// studentId=&homeworkId= (feature 003). Response shape depends on groupBy — {key,count} for
+// status, {key,total,submitted,late,missing} for homework (see feature 003's hwSubmissionsScopedGet.js
+// header for the exact per-dimension shapes). No client-side reshaping here — neither shape
+// contains a score/submittedAt/homeworkId-named field, so no normalization is needed (unlike
+// pgGetGrades/pgGetHwSubmissions above), same convention as pgGetAttendanceAggregate.
+export async function pgGetHwSubmissionsAggregate(params = {}) {
+  const res = await fetch(`${PG_API_BASE}/api/hwSubmissions/aggregate${buildQueryString(params)}`, {
+    credentials: 'include',
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG GET /hwSubmissions/aggregate → ${res.status}`);
+  if (!Array.isArray(json?.data)) throw new Error('PG GET /hwSubmissions/aggregate → استجابة غير صالحة (data ليست مصفوفة)');
+  return json.data;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -643,6 +1028,22 @@ export async function pgCreateCommunication(data, { computeNextNumber } = {}) {
 
   if (!res.ok) throw new Error(json?.error || `PG POST /communications → ${res.status}`);
   return normalizeCommunicationResponse(json.data);
+}
+
+// pgGetCommunications: GET /api/communications?studentId=&groupId= — Pre-Installer Audit
+// C4: نفس مسار Phase 4 المُفلتَر الموجود بالفعل في communications.js (backend)، الآن له
+// مستهلك حقيقي أخيراً — StudentsPage.jsx/GroupsPage.jsx (فحص عدد سجلات التواصل قبل حذف
+// طالب/مجموعة) بدل الاعتماد على المصفوفة الكاملة المحمَّلة إقلاعياً (أُزيلت من
+// PG_COLLECTIONS في db.middleware.js). بلا أي معامل، تُعيد كل السجلات (نفس شكل/سلوك
+// المسار العام تماماً) — لا مستهلك حالي يستخدمها هكذا، لكن نفس اتفاقية pgGetPayments.
+export async function pgGetCommunications(params = {}) {
+  const res = await fetch(`${PG_API_BASE}/api/communications${buildQueryString(params)}`, {
+    credentials: 'include',
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG GET /communications → ${res.status}`);
+  if (!Array.isArray(json?.data)) throw new Error('PG GET /communications → استجابة غير صالحة (data ليست مصفوفة)');
+  return json.data.map(normalizeCommunicationResponse);
 }
 
 // pgUpdateCommunication: PUT /api/communications/:id — نفس منطق pgCreateCommunication
@@ -920,7 +1321,9 @@ function buildMaterialRequestBody(data) {
   if (data.code !== undefined)        body.code        = data.code;
   if (data.teacher !== undefined)     body.teacher     = data.teacher;
   if (data.description !== undefined) body.description = data.description;
-  if (data.addedAt !== undefined)     body.addedAt     = data.addedAt;
+  // Production hardening pass: addedAt عمود @db.Date — نفس مشكلة exams.date بالضبط،
+  // يُحوَّل هنا قبل الإرسال بدل البقاء "YYYY-MM-DD" خاماً.
+  if (data.addedAt !== undefined)     body.addedAt     = toRequestDate(data.addedAt);
   return body;
 }
 
@@ -999,6 +1402,37 @@ export async function pgDeleteMaterial(id) {
   return true;
 }
 
+// نفس تطبيع COLLECTION_FIXUPS.inventoryTxn في db.middleware.js بالضبط (مسار الإقلاع/
+// المزامنة) — quantity/unitCost أعمدة Decimal تصل كنص عبر Prisma.Decimal.toJSON، لا
+// رقماً. لازم هنا أيضاً على مسار الإنشاء المباشر حتى لا يختلف شكل السجل حسب مصدره.
+function normalizeInventoryTxnResponse(data) {
+  return {
+    ...data,
+    quantity: data.quantity !== undefined && data.quantity !== null ? Number(data.quantity) : data.quantity,
+    unitCost: data.unitCost !== undefined && data.unitCost !== null ? Number(data.unitCost) : data.unitCost,
+  };
+}
+
+// pgCreateInventoryTxn: POST /api/inventoryTxn — State Synchronization Audit fix.
+// InventoryPage.jsx's handleSaveTxn/handleSaveCount كانتا تُدرِجان صفاً محلياً فقط
+// (buildInventoryTxn/buildCountAdjustment، id ورقم مولَّدين محلياً) بلا أي نداء خادم
+// إطلاقاً — تُفقَد صامتاً عند إعادة التحميل. مسار مخصّص لا الـ CRUD العام لأن number
+// فريد ويتطلّب تسلسلاً محسوباً بقفل استشاري (backend/src/routes/inventoryTxn.js —
+// يُعيد استخدام نفس computeNextSeq/القفل المُستخدَمين فعلاً في materialDistribution.js).
+// data هنا هو نفس الكائن الذي يبنيه buildInventoryTxn/buildCountAdjustment محلياً بالضبط
+// (id/number/status المحليين يتجاهلهما الخادم — يولّد نسخته الخاصة دائماً).
+export async function pgCreateInventoryTxn(data) {
+  const res = await fetch(`${PG_API_BASE}/api/inventoryTxn`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG POST /inventoryTxn → ${res.status}`);
+  return normalizeInventoryTxnResponse(json.data);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Phase 3B-12 — تسوية توزيع مذكرة (roster كامل) عبر نقطة نهاية مخصّصة واحدة (معاملة
 // ذرّية على الخادم) — لا نداءات CRUD منفصلة لكل طالب. انظر backend/src/routes/
@@ -1019,6 +1453,30 @@ export async function pgSaveMaterialDistribution(materialId, records) {
   const json = await res.json().catch(() => null);
   if (!res.ok) throw new Error(json?.error || `PG PUT /material-distributions/${materialId} → ${res.status}`);
   return json.data; // { materialId, records: [...] }
+}
+
+// pgConfirmMaterialPayment: POST /api/material-distributions/:materialId/students/:studentId/payment
+// تأكيد دفعة مذكرة (كاملة/جزئية) لطالب واحد من شاشة تتبّع التسليم — إنشاء ذرّي (دفعة +
+// حركة خزنة + تسوية inventory_txn معاً على الخادم). نفس مبدأ pgCreatePayment: cashboxId
+// مطلوب دائماً، والمبلغ النهائي/الحالة يُحسبان من جهة الخادم. الاستجابة لا تُعتمَد محلياً
+// لحالة العرض — الطرف المستدعي يُعيد جلب inventoryTxn طازجاً بعدها (نفس نمط
+// pgSaveMaterialDistribution)؛ نُطبّع هنا فقط payment/treasuryTxn لعرض فوري اختياري.
+export async function pgConfirmMaterialPayment(materialId, studentId, data) {
+  const res = await fetch(
+    `${PG_API_BASE}/api/material-distributions/${encodeURIComponent(materialId)}/students/${encodeURIComponent(studentId)}/payment`,
+    {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }
+  );
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG POST /material-distributions/${materialId}/students/${studentId}/payment → ${res.status}`);
+  return {
+    payment:     normalizePaymentResponse(json.data.payment),
+    treasuryTxn: normalizeTreasuryTxnResponse(json.data.treasuryTxn),
+  };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1288,6 +1746,24 @@ export async function pgCancelAdmissionWithRefund(admissionId, reason) {
   };
 }
 
+// pgGetAdmissionPayments: GET /api/admissionPayments?admissionId= — Scalability
+// Architecture Phase 4 (admissionPayments) — يخدم AdmissionsPage.jsx (بلا admissionId:
+// جلب واحد فقط عند تحميل الصفحة، بدل مصفوفة admissionPayments الكاملة من PG_COLLECTIONS
+// — لا فلترة لكل سجل قبول على حدة). نفس تطبيع normalizeAdmissionPaymentResponse أعلاه
+// (amount Decimal→رقم، date→"YYYY-MM-DD") — مطابق تماماً لِـ COLLECTION_FIXUPS.
+// admissionPayments (db.middleware.js) الذي كان يُطبِّق نفس التطبيع على مسار المزامنة
+// القديم، فالصفوف المُعادة قابلة للتغذية المباشرة في composeAdmission/setAdmissionPayments
+// بلا أي تعديل إضافي.
+export async function pgGetAdmissionPayments(params = {}) {
+  const res = await fetch(`${PG_API_BASE}/api/admissionPayments${buildQueryString(params)}`, {
+    credentials: 'include',
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG GET /admissionPayments → ${res.status}`);
+  if (!Array.isArray(json?.data)) throw new Error('PG GET /admissionPayments → استجابة غير صالحة (data ليست مصفوفة)');
+  return json.data.map(normalizeAdmissionPaymentResponse);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Phase 3B-15 — activity_logs عبر PostgreSQL (المصدر الوحيد للحقيقة الآن). لا
 // pgUpdateActivityLog/pgDeleteActivityLog عمداً — كلاهما محظور صراحةً بالخادم (405)،
@@ -1319,6 +1795,25 @@ export async function pgCreateActivityLog(entry) {
   const json = await res.json().catch(() => null);
   if (!res.ok) throw new Error(json?.error || `PG POST /activityLogs → ${res.status}`);
   return normalizeActivityLogResponse(json.data);
+}
+
+// pgGetActivityLogs: GET /api/activityLogs?limit=&offset= — Scalability Architecture
+// Phase 4 (activityLogs) — يخدم ActivityLogPage.jsx (limit=200) وDashboard.jsx (limit=5)
+// معاً، بدل قراءة مصفوفة activityLogs الكاملة من الـ store (لم تعد تُزامَن عند الإقلاع).
+// الخادم يُرتِّب حتمياً (timestamp DESC, id DESC) ويُطبِّق نفس تطبيع ts/user/description
+// (COLLECTION_FIXUPS.activityLogs/normalizeActivityLogResponse) على كل عنصر بنفسه — لا
+// تطبيع إضافي مطلوب هنا، بعكس pgGetPayments (الخادم هناك لا يُطبِّع Decimal/date إطلاقاً).
+// total عدد حقيقي لكامل الجدول المطابق، لا طول الصفحة الحالية فقط.
+export async function pgGetActivityLogs(params = {}) {
+  const res = await fetch(`${PG_API_BASE}/api/activityLogs${buildQueryString(params)}`, {
+    credentials: 'include',
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG GET /activityLogs → ${res.status}`);
+  if (!json?.data || !Array.isArray(json.data.items)) {
+    throw new Error('PG GET /activityLogs → استجابة غير صالحة (data.items ليست مصفوفة)');
+  }
+  return json.data;
 }
 
 // pgLogout: يمسح كوكي الجلسة على الـ backend — best-effort، لا يُوقِف تسجيل الخروج المحلي لو فشل

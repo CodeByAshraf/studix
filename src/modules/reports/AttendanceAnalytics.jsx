@@ -1,8 +1,11 @@
 // src/modules/reports/AttendanceAnalytics.jsx
-import { useMemo } from 'react';
+import { useEffect, useMemo } from 'react';
 import { useAppStore } from '../../store/app.store';
 import { MetricCard, BarChart, DonutChart, AnalyticsCard, SparkLine } from './components/ChartComponents';
-import { getFrequentAbsentees } from '../../services/attendanceService';
+import { getFrequentAbsentees, statsByStudentFromRecords } from '../../services/attendanceService';
+import { pgGetAttendanceAggregate } from '../../services/api';
+import { useAsyncData } from '../../hooks/useAsyncData';
+import { useToast } from '../../components/Toast';
 import { formatDate } from '../../utils/helpers';
 
 const PALETTE = [
@@ -12,57 +15,80 @@ const PALETTE = [
 ];
 const avStyle = n => PALETTE[((n.charCodeAt(0)||0)+(n.charCodeAt(1)||0))%PALETTE.length];
 
+// C4 Attendance Batch A: 90 calendar days back is a deliberately generous lookback window for
+// the daily-trend aggregate call (see research.md §2/spec.md clarification) — safely covers
+// weekly/biweekly session cadences while staying far short of "the whole history"; the client
+// still takes only the last 14 dates that actually have data from whatever this window returns,
+// identical to today's "last 14 session-dates," not "last 14 calendar days," semantics.
+function isoDate(d) { return d.toISOString().slice(0, 10); }
+function ninetyDaysAgoIso() {
+  const d = new Date();
+  d.setDate(d.getDate() - 90);
+  return isoDate(d);
+}
+
 export default function AttendanceAnalytics() {
+  // C4 Attendance Batch A: `attendance` (full store array) stays selected here for exactly two
+  // remaining computations this batch does not migrate — `sessions` (distinct group+date pairs;
+  // no aggregate dimension reproduces this without double-counting groups that share a session
+  // date, same reasoning as AttendancePage.jsx's identical gap — see research.md §4) and
+  // `absentees` (already migrated in feature 001 via statsByStudentFromRecords, which itself
+  // still takes the raw array). Every other figure below now comes from the aggregate endpoint.
   const attendance           = useAppStore((s) => s.attendance);
   const groups               = useAppStore((s) => s.groups);
   const students             = useAppStore((s) => s.students);
+  const toast = useToast();
+
+  const { data: statusAgg = [], error: statusErr } = useAsyncData(
+    () => pgGetAttendanceAggregate({ groupBy: 'status' }), [], []);
+  const { data: groupAgg = [], error: groupErr } = useAsyncData(
+    () => pgGetAttendanceAggregate({ groupBy: 'group' }), [], []);
+  const { data: dateAgg = [], error: dateErr } = useAsyncData(
+    () => pgGetAttendanceAggregate({ groupBy: 'date', from: ninetyDaysAgoIso(), to: isoDate(new Date()) }),
+    [], []);
+  const { data: weekdayAgg = [], error: weekdayErr } = useAsyncData(
+    () => pgGetAttendanceAggregate({ groupBy: 'weekday', status: 'absent' }), [], []);
+
+  useEffect(() => {
+    const err = statusErr || groupErr || dateErr || weekdayErr;
+    if (err) toast.error(err.message || 'فشل تحميل تحليلات الحضور');
+  }, [statusErr, groupErr, dateErr, weekdayErr]);
 
   const stats = useMemo(() => {
-    const total    = attendance.length;
-    const present  = attendance.filter(r => r.status==='present').length;
-    const absent   = attendance.filter(r => r.status==='absent').length;
-    const late     = attendance.filter(r => r.status==='late').length;
+    const byStatus = new Map(statusAgg.map(r => [r.key, r.count]));
+    const present  = byStatus.get('present') ?? 0;
+    const absent   = byStatus.get('absent')  ?? 0;
+    const late     = byStatus.get('late')    ?? 0;
+    const total    = present + absent + late;
     const pct      = total ? Math.round(present/total*100) : null;
     const sessions = [...new Set(attendance.map(r => `${r.groupId}-${r.date}`))].length;
 
     // By group
+    const byGroupAggMap = new Map(groupAgg.map(r => [r.key, r]));
     const byGroup = groups.map(g => {
-      const recs    = attendance.filter(r => r.groupId===g.id);
-      const gPres   = recs.filter(r => r.status==='present').length;
-      const gPct    = recs.length ? Math.round(gPres/recs.length*100) : 0;
-      return { label:g.name.split('—')[0].trim().substring(0,14), value:gPct, suffix:'%', color: g.color||'#3b82f6', raw:recs.length };
+      const recs  = byGroupAggMap.get(g.id);
+      const gPres = recs?.present ?? 0;
+      const gTotal = recs?.total ?? 0;
+      const gPct  = gTotal ? Math.round(gPres/gTotal*100) : 0;
+      return { label:g.name.split('—')[0].trim().substring(0,14), value:gPct, suffix:'%', color: g.color||'#3b82f6', raw:gTotal };
     }).sort((a,b) => b.value-a.value);
 
-    // Daily trend (last 14 session dates)
-    const byDate = {};
-    attendance.forEach(r => {
-      if (!byDate[r.date]) byDate[r.date] = { present:0, total:0 };
-      byDate[r.date].total++;
-      if (r.status==='present') byDate[r.date].present++;
-    });
-    const dailyTrend = Object.entries(byDate)
-      .sort(([a],[b]) => a.localeCompare(b))
+    // Daily trend (last 14 session dates within the fetched 90-day window)
+    const dailyTrend = dateAgg
       .slice(-14)
-      .map(([date,d]) => ({ date, pct:Math.round(d.present/d.total*100), total:d.total }));
+      .map(d => ({ date: d.key, pct: d.total ? Math.round(d.present/d.total*100) : 0, total: d.total }));
 
     // Absent count per weekday
-    const dayAbsence = { sat:0, sun:0, mon:0, tue:0, wed:0, thu:0, fri:0 };
-    attendance.filter(r => r.status==='absent').forEach(r => {
-      const day = ['sun','mon','tue','wed','thu','fri','sat'][new Date(r.date).getDay()];
-      dayAbsence[day]++;
-    });
-
     const DAYS_AR = { sat:'السبت',sun:'الأحد',mon:'الاثنين',tue:'الثلاثاء',wed:'الأربعاء',thu:'الخميس',fri:'الجمعة' };
-    const dayData = Object.entries(dayAbsence)
-      .map(([k,v]) => ({ label:DAYS_AR[k], value:v, color:'#ef4444' }))
-      .filter(d => d.value > 0)
+    const dayData = weekdayAgg
+      .map(r => ({ label:DAYS_AR[r.key], value:r.count, color:'#ef4444' }))
       .sort((a,b) => b.value-a.value);
 
-    // Frequent absentees
-    const absentees = getFrequentAbsentees(students, attendance, 2).slice(0,8);
+    // Frequent absentees (already migrated, feature 001 — still reads the raw array via the adapter)
+    const absentees = getFrequentAbsentees(students, statsByStudentFromRecords(students, attendance), 2).slice(0,8);
 
     return { total, present, absent, late, pct, sessions, byGroup, dailyTrend, dayData, absentees };
-  }, [attendance, students, groups]);
+  }, [attendance, students, groups, statusAgg, groupAgg, dateAgg, weekdayAgg]);
 
   const pctColor = stats.pct===null?'var(--text)':stats.pct>=80?'#10b981':stats.pct>=60?'#f59e0b':'#ef4444';
 

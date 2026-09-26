@@ -2,13 +2,14 @@
 // Panel showing students in a group + transfer modal
 import { useAppStore } from '../../store/app.store';
 import { useAuth }     from '../../store/auth.context';
-import { useState, useMemo, useCallback, useRef } from 'react';
+import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { useToast }  from '../../components/Toast';
 import { useErrorHandler } from '../../hooks/useErrorHandler';
 import Button        from '../../components/ui/Button';
 import { formatDate } from '../../utils/helpers';
 import { updateStudent } from '../../services/studentService';
-import { pgUpdateStudent } from '../../services/api';
+import { pgUpdateStudent, pgGetPayments } from '../../services/api';
+import { useAsyncData } from '../../hooks/useAsyncData';
 import { useAvatarStyle } from '../students/components/StudentAvatar';
 import StatusBadge   from '../students/components/StatusBadge';
 import { formatCurrency } from '../../utils/helpers';
@@ -87,6 +88,17 @@ function StudentRow({ student, onSelect, selected, payments }) {
 }
 
 // ── Transfer modal ───────────────────────────────────────────
+// Phase 3C — this modal has always changed only students.groupId (the Primary Group
+// mirror, unchanged since Phase 1), never anything about a student's Additional Groups
+// (student_group_enrollments rows with role='additional' — managed from StudentProfile's
+// Groups tab instead). The wording below makes that explicit so "transfer" cannot be read
+// as touching Additional Group membership. Every student selectable here already has this
+// exact group as their Primary (see groupStudents below) — there is no "assign a Primary
+// Group to a student who has none" path reachable through this modal: this file's own
+// roster is Primary-only by construction (Phase 3B audit decision, unchanged here), so a
+// primary-less student never appears in it to select. That case is out of this file's reach
+// without adding a new "enroll an existing student into this group" capability, which would
+// be redesigning this screen — explicitly out of scope for this phase.
 function TransferModal({ group, onClose }) {
   const groups               = useAppStore((s) => s.groups);
   const payments             = useAppStore((s) => s.payments);
@@ -118,7 +130,7 @@ function TransferModal({ group, onClose }) {
   // على من نجح فعلاً، ويبقى الفاشلون محدَّدين لإعادة المحاولة والنافذة مفتوحة.
   const handleTransfer = async () => {
     if (!selected.length) { toast.warning('اختر طالباً واحداً على الأقل'); return; }
-    if (!targetGroup)     { toast.warning('اختر المجموعة المستهدفة');      return; }
+    if (!targetGroup)     { toast.warning('اختر المجموعة الرئيسية الجديدة'); return; }
 
     const targetName = groups.find(g => g.id === targetGroup)?.name;
     const targets     = students.filter(s => selected.includes(s.id));
@@ -141,7 +153,7 @@ function TransferModal({ group, onClose }) {
       if (succeeded.length) {
         setStudents(prev => prev.map(s => succeeded.find(x => x.id === s.id) || s));
         succeeded.forEach((saved) => {
-          addLog({ action:'update', module:'groups', entityType:'student', entityId:saved.id, description:`نقل: ${saved.name} إلى "${targetName}"` })
+          addLog({ action:'update', module:'groups', entityType:'student', entityId:saved.id, description:`نقل المجموعة الرئيسية: ${saved.name} إلى "${targetName}"` })
             .catch((e) => toast.error(e.message || 'تعذّر تسجيل الحدث في سجل النشاط'));
         });
       }
@@ -153,12 +165,12 @@ function TransferModal({ group, onClose }) {
 
       if (failed.length) {
         setSelected(failed.map(f => f.student.id));
-        toast.error(`تم نقل ${succeeded.length} وفشل نقل ${failed.length} — حاول مجدداً للطلاب المتبقين`);
+        toast.error(`تم نقل المجموعة الرئيسية لـ ${succeeded.length} وفشل لـ ${failed.length} — حاول مجدداً للطلاب المتبقين`);
       } else {
-        toast.success(`تم نقل ${succeeded.length} طالب إلى "${targetName}" ✓`);
+        toast.success(`تم نقل المجموعة الرئيسية لـ ${succeeded.length} طالب إلى "${targetName}" ✓`);
         onClose();
       }
-    }, { errorMsg: 'فشل نقل الطلاب' });
+    }, { errorMsg: 'فشل نقل المجموعة الرئيسية' });
   };
 
   return (
@@ -182,14 +194,19 @@ function TransferModal({ group, onClose }) {
 
         {/* Header */}
         <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', padding:'16px 20px', borderBottom:'1px solid var(--border)' }}>
-          <div style={{ fontSize:'1rem', fontWeight:800 }}>⇄ نقل طلاب</div>
+          <div style={{ fontSize:'1rem', fontWeight:800 }}>⇄ نقل المجموعة الرئيسية</div>
           <button onClick={onClose} style={{ width:28, height:28, borderRadius:7, display:'flex', alignItems:'center', justifyContent:'center', background:'var(--surface2)', color:'var(--text3)', fontSize:'1.1rem', border:'none', cursor:'pointer' }}>×</button>
+        </div>
+
+        {/* توضيح صريح — لا لبس بين نقل المجموعة الرئيسية وانتساب أي مجموعة إضافية */}
+        <div style={{ padding:'10px 20px', fontSize:'0.74rem', color:'var(--text3)', background:'var(--surface2)', borderBottom:'1px solid var(--border)', lineHeight:1.6 }}>
+          هذا الإجراء يغيّر <strong style={{ color:'var(--text2)' }}>المجموعة الرئيسية</strong> فقط لكل طالب محدَّد — أي مجموعات إضافية له تبقى كما هي بلا أي تغيير.
         </div>
 
         {/* Target group selector */}
         <div style={{ padding:'14px 20px', borderBottom:'1px solid var(--border)', background:'var(--surface2)' }}>
           <div style={{ fontSize:'0.72rem', fontWeight:700, color:'var(--text3)', textTransform:'uppercase', letterSpacing:'0.06em', marginBottom:7 }}>
-            نقل إلى المجموعة
+            المجموعة الرئيسية الجديدة
           </div>
           <select value={targetGroup} onChange={e => setTargetGroup(e.target.value)}
             style={{ width:'100%', background:'var(--surface)', border:'1px solid var(--border)', borderRadius:9, padding:'9px 12px', color:'var(--text)', fontFamily:'Cairo,sans-serif', fontSize:'0.875rem', outline:'none', direction:'rtl', cursor:'pointer' }}
@@ -241,7 +258,7 @@ function TransferModal({ group, onClose }) {
             <Button variant="primary" size="sm" loading={loading} onClick={handleTransfer}
               disabled={!selected.length || !targetGroup}
             >
-              ⇄ نقل {selected.length > 0 ? `(${selected.length})` : ''}
+              ⇄ نقل المجموعة الرئيسية {selected.length > 0 ? `(${selected.length})` : ''}
             </Button>
           </div>
         </div>
@@ -253,10 +270,21 @@ function TransferModal({ group, onClose }) {
 // ── Main component ───────────────────────────────────────────
 export default function GroupStudents({ group, onClose, onTransferOpen }) {
   const groups               = useAppStore((s) => s.groups);
-  const payments             = useAppStore((s) => s.payments);
   const setStudents          = useAppStore((s) => s.setStudents);
   const students             = useAppStore((s) => s.students);
+  const toast = useToast();
   const [search, setSearch] = useState('');
+
+  // Scalability Architecture Phase 4 Cutover 2: بدل مصفوفة payments الكاملة من الـ
+  // store، يُجلَب تاريخ هذه المجموعة فقط عبر GET /api/payments?groupId= (نفس النطاق
+  // الذي كانت StudentRow تُصفّيه بـ studentId محلياً من المصفوفة الكاملة، فقط مُضيَّق
+  // بالمجموعة أولاً من جهة الخادم) — StudentRow نفسها غير مُعدَّلة إطلاقاً.
+  const { data: groupPayments = [], error: paymentsError } = useAsyncData(
+    () => pgGetPayments({ groupId: group.id }), [group.id], []);
+
+  useEffect(() => {
+    if (paymentsError) toast.error(paymentsError.message || 'فشل تحميل مدفوعات طلاب المجموعة');
+  }, [paymentsError]);
 
   const groupStudents = useMemo(() => {
     const q = search.toLowerCase();
@@ -277,7 +305,7 @@ export default function GroupStudents({ group, onClose, onTransferOpen }) {
           <input value={search} onChange={e => setSearch(e.target.value)} placeholder="بحث في طلاب المجموعة..."
             style={{ flex:1, background:'none', border:'none', outline:'none', color:'var(--text)', fontFamily:'Cairo,sans-serif', fontSize:'0.82rem', padding:'8px 0', direction:'rtl' }}/>
         </div>
-        <Button variant="primary" size="sm" onClick={onTransferOpen}>⇄ نقل طلاب</Button>
+        <Button variant="primary" size="sm" onClick={onTransferOpen}>⇄ نقل المجموعة الرئيسية</Button>
       </div>
 
       {/* List */}
@@ -294,7 +322,7 @@ export default function GroupStudents({ group, onClose, onTransferOpen }) {
           </div>
         ) : (
           groupStudents.map(s => (
-            <StudentRow key={s.id} student={s} payments={payments}/>
+            <StudentRow key={s.id} student={s} payments={groupPayments}/>
           ))
         )}
       </div>

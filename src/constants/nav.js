@@ -20,6 +20,7 @@ export const NAV_ITEMS = [
   { id: ROUTES.HOMEWORK,       label: 'الواجبات',                section: 'الأكاديمي',     icon: 'homework',       badge: null },
   { id: ROUTES.MATERIALS,      label: 'المذكرات',                section: 'الأكاديمي',     icon: 'materials',      badge: null },
   { id: ROUTES.INVENTORY,      label: 'مخزون المواد',           section: 'الأكاديمي',     icon: 'inventory',      badge: null },
+  { id: ROUTES.RECITATION,     label: 'التسميع',                 section: 'الأكاديمي',     icon: 'recitation',     badge: null },
 
   // ── المالية ───────────────────────────────────────────
   { id: ROUTES.PAYMENTS,       label: 'المدفوعات',               section: 'المالية',       icon: 'payments',       badge: null },

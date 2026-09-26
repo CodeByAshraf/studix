@@ -3,6 +3,15 @@
 // written by the Phase 3B-12 settlement endpoint (real student_id FK, recipient always
 // null), while still matching legacy pre-migration rows (free-text recipient, no
 // studentId). Pure-function test of gatherStudentData — no React, no network.
+//
+// Booklet-payment integration follow-up: gatherStudentData now enriches every matched row
+// with material name/price and real paid/remaining figures (materialDistribution.js writes
+// legacyMetadata.paidAmount from actual payments now — see materialDistributionPayment.
+// integration.test.js). These tests seed no invMaterials/legacyMetadata, so the enrichment
+// always resolves to the same neutral defaults (materialName: null, price/paidAmount/
+// remaining: 0, payStatus: 'unpaid') — assertions below use objectContaining so they keep
+// verifying row *identity/matching* (the actual point of this file) without re-asserting
+// those unrelated default fields.
 import { describe, it, expect } from 'vitest';
 import { gatherStudentData } from './reportData';
 
@@ -20,13 +29,13 @@ describe('gatherStudentData — bookletDeliveries (Phase 3B-12 Finding #3)', () 
   it('recognizes a migrated delivery matched by studentId (real FK), even with no recipient', () => {
     const txn = { id: 't1', type: 'studentDelivery', studentId: STUDENT_ID, recipient: null };
     const data = gatherStudentData(STUDENT_ID, storeWith([txn]));
-    expect(data.bookletDeliveries).toEqual([txn]);
+    expect(data.bookletDeliveries).toEqual([expect.objectContaining(txn)]);
   });
 
   it('still recognizes a legacy delivery matched only by recipient name (no studentId)', () => {
     const txn = { id: 't2', type: 'studentDelivery', studentId: null, recipient: 'استلم أحمد علي مذكرة الرياضيات' };
     const data = gatherStudentData(STUDENT_ID, storeWith([txn]));
-    expect(data.bookletDeliveries).toEqual([txn]);
+    expect(data.bookletDeliveries).toEqual([expect.objectContaining(txn)]);
   });
 
   it('does not lose a migrated delivery just because recipient is absent (the exact regression)', () => {
@@ -50,7 +59,7 @@ describe('gatherStudentData — bookletDeliveries (Phase 3B-12 Finding #3)', () 
   it('a transaction matched by both studentId and recipient is not double-counted', () => {
     const txn = { id: 't6', type: 'studentDelivery', studentId: STUDENT_ID, recipient: 'أحمد علي' };
     const data = gatherStudentData(STUDENT_ID, storeWith([txn]));
-    expect(data.bookletDeliveries).toEqual([txn]);
+    expect(data.bookletDeliveries).toEqual([expect.objectContaining(txn)]);
   });
 
   it('mixed history: one legacy delivery + one migrated delivery for the same student are both included', () => {
@@ -58,7 +67,9 @@ describe('gatherStudentData — bookletDeliveries (Phase 3B-12 Finding #3)', () 
     const migrated = { id: 't8', type: 'studentDelivery', studentId: STUDENT_ID, recipient: null };
     const data = gatherStudentData(STUDENT_ID, storeWith([legacy, migrated]));
     expect(data.bookletDeliveries).toHaveLength(2);
-    expect(data.bookletDeliveries).toEqual(expect.arrayContaining([legacy, migrated]));
+    expect(data.bookletDeliveries).toEqual(expect.arrayContaining([
+      expect.objectContaining(legacy), expect.objectContaining(migrated),
+    ]));
   });
 
   it('existing behavior intact: no inventoryTxn at all yields an empty, non-throwing result', () => {

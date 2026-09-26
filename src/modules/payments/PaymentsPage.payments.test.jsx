@@ -63,6 +63,78 @@ beforeEach(() => {
       const id = decodeURIComponent(u.split('/api/payments/')[1].replace('/refund', ''));
       return Promise.resolve(refundResponder(id, body));
     }
+    // Phase 4 Cutover 1/2: PaymentForm.jsx's duplicate-subscription/material guards and
+    // PaymentsPage.jsx's own KPI bar/RefundView now fetch GET /api/payments?studentId=&
+    // month=&year=&date= and GET /api/payments/aggregate?groupBy=none instead of reading
+    // the store's payments array directly — served here from the same seeded `payments`
+    // state (filtered exactly like the real server route), so one seedStore() call keeps
+    // feeding both the payments list table and every new fetch.
+    if (u.includes('/api/payments/aggregate') && method === 'GET') {
+      const qp = new URL(u).searchParams;
+      const month = qp.get('month');
+      const year = qp.get('year');
+      let rows = useAppStore.getState().payments;
+      if (month !== null) rows = rows.filter((p) => p.month === Number(month));
+      if (year !== null) rows = rows.filter((p) => p.year === Number(year));
+      const txns = useAppStore.getState().treasuryTxn || [];
+      const refunded = rows.reduce((s, p) => s + txns
+        .filter((t) => t.paymentId === p.id && t.refType === 'refund' && t.status === 'active')
+        .reduce((rs, t) => rs + Number(t.amount), 0), 0);
+      const revenue = rows.reduce((s, p) => s + Number(p.amount), 0) - refunded;
+      return Promise.resolve(okJson([{ key: null, count: rows.length, revenue }]));
+    }
+    if (u.includes('/api/payments?') && method === 'GET') {
+      const qp = new URL(u).searchParams;
+      const studentId = qp.get('studentId');
+      const month = qp.get('month');
+      const year = qp.get('year');
+      const date = qp.get('date');
+      let rows = useAppStore.getState().payments;
+      if (studentId) rows = rows.filter((p) => p.studentId === studentId);
+      if (month !== null) rows = rows.filter((p) => p.month === Number(month));
+      if (year !== null) rows = rows.filter((p) => p.year === Number(year));
+      if (date) rows = rows.filter((p) => p.date === date);
+      return Promise.resolve(okJson(rows));
+    }
+    // Phase 4 (متابعة) — PaymentHistory.jsx's "سجل المدفوعات" tab now fetches
+    // GET /api/payments/search?month=&groupId=&status=&search=&page=&limit= instead of
+    // reading the store's payments array directly. Reconstructed here from the same
+    // seeded `payments`/`students` state, mirroring backend/src/routes/payments.js's
+    // searchPayments exactly (month/groupId/status equality, name-or-id substring search,
+    // newest-first, whole-filtered-set total/totalAmount) — not exercised by these tests'
+    // assertions themselves, just needed so the tab actually renders its rows.
+    if (u.includes('/api/payments/search') && method === 'GET') {
+      const qp = new URL(u).searchParams;
+      const month = qp.get('month');
+      const groupId = qp.get('groupId');
+      const status = qp.get('status');
+      const search = qp.get('search');
+      const page = Number(qp.get('page') || 1);
+      const limit = Number(qp.get('limit') || 12);
+      const students = useAppStore.getState().students;
+      let rows = useAppStore.getState().payments;
+      if (month) rows = rows.filter((p) => p.month === Number(month));
+      if (groupId) rows = rows.filter((p) => p.groupId === groupId);
+      if (status) rows = rows.filter((p) => p.status === status);
+      if (search) {
+        const q = search.toLowerCase();
+        rows = rows.filter((p) => {
+          const student = students.find((s) => s.id === p.studentId);
+          return student?.name.toLowerCase().includes(q) || p.id.toLowerCase().includes(q);
+        });
+      }
+      rows = [...rows].sort((a, b) => b.date.localeCompare(a.date));
+      const total = rows.length;
+      const totalAmount = rows.reduce((s, p) => s + p.amount, 0);
+      const totalPages = Math.ceil(total / limit) || 1;
+      const effectivePage = Math.max(1, Math.min(page, totalPages));
+      const start = (effectivePage - 1) * limit;
+      return Promise.resolve(okJson({
+        items: rows.slice(start, start + limit),
+        page: effectivePage, totalPages, total, totalAmount,
+        hasPrev: effectivePage > 1, hasNext: effectivePage < totalPages,
+      }));
+    }
     // Phase 3B-15: addLog يستدعي هذا فعلياً الآن — best-effort، لا نختبره هنا تحديداً.
     if (u.endsWith('/api/activityLogs') && method === 'POST') {
       return Promise.resolve(okJson({ id: 'al-1', timestamp: '2026-01-10T00:00:00.000Z', ...body }, 201));
@@ -95,15 +167,26 @@ const postPaymentCalls = () => callsTo((u, o) => u.endsWith('/api/payments') && 
 const refundCalls       = () => callsTo((u, o) => u.includes('/api/payments/') && u.endsWith('/refund') && o?.method === 'POST');
 const anyDeleteCalls    = () => callsTo((u, o) => o?.method === 'DELETE');
 
-function fillAddForm({ cashboxId = 'cb1', amount = '300' } = {}) {
+// StudentSearchSelect (يحلّ محلّ <select name="studentId"> القديم): يكتب استعلاماً ثم
+// ينقر النتيجة المطابقة — لا "value" مباشرة، بنفس تفاعل مستخدم حقيقي مع الحقل الجديد.
+function selectStudent(query, optionNamePattern) {
+  const input = screen.getAllByRole('combobox').find(sel => sel.name === 'studentId');
+  fireEvent.change(input, { target: { value: query } });
+  fireEvent.click(screen.getByRole('option', { name: optionNamePattern }));
+}
+
+async function fillAddForm({ cashboxId = 'cb1', amount = '300' } = {}) {
   fireEvent.click(screen.getByText('+ تسجيل دفعة'));
-  const selects = screen.getAllByRole('combobox');
-  fireEvent.change(selects.find(sel => sel.name === 'studentId'), { target: { value: 's1' } });
+  selectStudent('أحمد', /أحمد/);
   // placeholder المبلغ ديناميكي (رسوم الطالب/المجموعة) — GROUP1.price=300 هنا
   fireEvent.change(screen.getByPlaceholderText('300'), { target: { value: amount } });
   if (cashboxId) {
     fireEvent.change(screen.getAllByRole('combobox').find(sel => sel.name === 'cashboxId'), { target: { value: cashboxId } });
   }
+  // Phase 4 Cutover 1: زر التسجيل معطَّل حتى يكتمل جلب سجل مدفوعات الطالب (GET
+  // /api/payments?studentId=، يستبدل مصفوفة payments المحلية الآن) — ننتظر اكتماله
+  // هنا مرة واحدة بدل تكراره في كل اختبار يستدعي هذه الدالة.
+  await waitFor(() => expect(screen.getByText('💰 تسجيل الدفعة').closest('button')).not.toBeDisabled());
 }
 
 describe('PaymentsPage — payments write flows (Phase 3B-14C)', () => {
@@ -113,7 +196,7 @@ describe('PaymentsPage — payments write flows (Phase 3B-14C)', () => {
 
     seedStore();
     renderPage();
-    fillAddForm();
+    await fillAddForm();
     fireEvent.click(screen.getByText('💰 تسجيل الدفعة'));
 
     await waitFor(() => expect(postPaymentCalls()).toHaveLength(1));
@@ -152,7 +235,7 @@ describe('PaymentsPage — payments write flows (Phase 3B-14C)', () => {
 
     seedStore();
     renderPage();
-    fillAddForm();
+    await fillAddForm();
     fireEvent.click(screen.getByText('💰 تسجيل الدفعة'));
 
     await waitFor(() => expect(postPaymentCalls()).toHaveLength(1));
@@ -252,8 +335,7 @@ describe('PaymentsPage — payments write flows (Phase 3B-14C)', () => {
       seedStore({ payments: [SAME_YEAR_PAYMENT] });
       renderPage();
       fireEvent.click(screen.getByText('+ تسجيل دفعة'));
-      const selects = screen.getAllByRole('combobox');
-      fireEvent.change(selects.find(sel => sel.name === 'studentId'), { target: { value: 's1' } });
+      selectStudent('أحمد', /أحمد/);
 
       expect(await screen.findByText(/دفع اشتراك.*من قبل/)).toBeInTheDocument();
       expect(postPaymentCalls()).toHaveLength(0);
@@ -270,7 +352,7 @@ describe('PaymentsPage — payments write flows (Phase 3B-14C)', () => {
       };
       seedStore({ payments: [OLD_YEAR_PAYMENT] });
       renderPage();
-      fillAddForm();
+      await fillAddForm();
 
       expect(screen.queryByText(/دفع اشتراك.*من قبل/)).not.toBeInTheDocument();
       fireEvent.click(screen.getByText('💰 تسجيل الدفعة'));

@@ -52,6 +52,9 @@ beforeEach(() => {
   fetchMock = vi.fn((url, opts = {}) => {
     const u = String(url);
     const method = opts.method || 'GET';
+    // AdmissionsPage.jsx's single page-mount fetch of admissionPayments (Phase 4) — no
+    // payments needed for these activation tests, so an empty array is sufficient.
+    if (u.includes('/api/admissionPayments') && method === 'GET') return Promise.resolve(okJson([]));
     if (u.includes('/api/admissions/') && u.endsWith('/activate') && method === 'PUT') {
       return Promise.resolve(putActivateResponder(opts.body ? JSON.parse(opts.body) : {}));
     }
@@ -151,8 +154,9 @@ describe('AdmissionsPage — attendFirstLesson activation (Phase 3B-13B Stage ii
     expect(useAppStore.getState().admissions[0].linkedStudentId).toBe(SAVED_STUDENT.id);
     expect(useAppStore.getState().admissionSystemLog).toEqual(NORMALIZED_SYSTEM_LOG_ENTRIES);
 
-    // نداءا شبكة فقط: ربط ولي الأمر (Issue 3) ثم التفعيل الذرّي — لا 4 نداءات منفصلة كما في Stage (i)
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // 3 نداءات شبكة فقط: الجلب المفرد لدفعات القبول عند تحميل الصفحة (Phase 4)، ربط ولي
+    // الأمر (Issue 3)، ثم التفعيل الذرّي — لا 4 نداءات منفصلة كما في Stage (i)
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it('activation failure: leaves students, admissions, and admissionSystemLog completely untouched, and shows the real server error', async () => {

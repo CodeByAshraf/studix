@@ -20,9 +20,35 @@ import { DEFAULT_REPORT_CONFIG } from '../../reportEngine/reportMeta';
 
 const STORAGE_KEY = 'tc_report_config';
 
+// Student Report Sections rework — showFinancials/showPayments were renamed to
+// showFinancialSummary/showPaymentHistory (clearer, non-overlapping meaning — see
+// reportMeta.js's DEFAULT_REPORT_CONFIG comment for the full reasoning). Renaming a
+// persisted key outright would silently reset any existing user's explicit choice back to
+// the new key's default (true) the moment they load the app, since their old key would sit
+// unread while the new key merges in as "missing -> default". This map preserves that
+// choice by carrying the old value onto the new key name, once, at load time — the
+// smallest safe migration: no schema change, no versioning, self-cleaning (every
+// setReportConfig() call afterwards persists the already-migrated shape, so the old key
+// name never reappears in storage).
+const LEGACY_KEY_MAP = {
+  showFinancials: 'showFinancialSummary',
+  showPayments:   'showPaymentHistory',
+};
+
+function migrateLegacyKeys(stored) {
+  const migrated = { ...stored };
+  for (const [oldKey, newKey] of Object.entries(LEGACY_KEY_MAP)) {
+    if (oldKey in migrated && !(newKey in migrated)) {
+      migrated[newKey] = migrated[oldKey];
+    }
+    delete migrated[oldKey];
+  }
+  return migrated;
+}
+
 function loadInitialReportConfig() {
   const stored = storage.get(STORAGE_KEY, {});
-  return { ...DEFAULT_REPORT_CONFIG, ...stored };
+  return { ...DEFAULT_REPORT_CONFIG, ...migrateLegacyKeys(stored) };
 }
 
 export const createReportSettingsSlice = (set) => ({

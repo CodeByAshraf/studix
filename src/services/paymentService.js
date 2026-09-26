@@ -111,6 +111,31 @@ export function getMonthlyBreakdown(payments, year = new Date().getFullYear(), t
   });
 }
 
+// ── Scalability Architecture Phase 4 Cutover 1 — /api/payments/aggregate adapters ──
+// الخادم (getPaymentAggregates بالضبط نفس صيغة "SUM(amount) - SUM(استرداد فعّال)"
+// المُستخدَمة محلياً هنا) يُعيد صفوفاً جزئية فقط — بُعد بلا أي دفعة لا يظهر كصفّ إطلاقاً
+// (بخلاف getMonthlyBreakdown/getRevenueByGroup المحليتين أعلاه اللتين تبنيان دائماً
+// بنية كثيفة: 12 شهراً/كل المجموعات، حتى لو كانت القيمة صفراً). هاتان الدالتان تُعيدان
+// بناء نفس البنية الكثيفة من استجابة الخادم الجزئية — بلا أي تغيير على الترتيب/التسميات/
+// منطق "أفضل شهر"/المتوسط/الفرز التي تعتمد عليها FinancialAnalytics.jsx/PaymentReports.jsx.
+export function zeroFillMonthlyAggregate(aggregateRows = []) {
+  const byMonth = new Map(aggregateRows.map((r) => [Number(r.key), Number(r.revenue) || 0]));
+  return Array.from({ length: 12 }, (_, i) => {
+    const month = i + 1;
+    return { month, label: MONTHS_AR[month], revenue: byMonth.get(month) ?? 0 };
+  });
+}
+
+// groups: مصفوفة groups الكاملة من الـ store (غير متأثرة بهذا التفويض — collection
+// أساسية غير مُزالة من PG_COLLECTIONS) — تضمن ظهور كل مجموعة حتى بلا أي دفعة (revenue:0)،
+// بنفس سلوك getRevenueByGroup(payments, groups, ...) بالضبط.
+export function zeroFillGroupAggregate(aggregateRows = [], groups = []) {
+  const byGroup = new Map(aggregateRows.map((r) => [r.key, Number(r.revenue) || 0]));
+  return groups.map((g) => ({
+    id: g.id, name: g.name, color: g.color, revenue: byGroup.get(g.id) ?? 0,
+  }));
+}
+
 // getNetRevenue: نفس منطق الخصم المُستخدَم داخل الدوال الأربع أعلاه بالضبط (مبلغ الدفعة -
 // getRefundedAmount)، لكن كبنية لبنة عامة تقبل أي مجموعة دفعات مُفلترَة مسبقاً من جهة
 // الاستدعاء (يوم واحد، شهر، مجموعة، إلخ) — مصدر الحقيقة الوحيد لأي مجموع إيراد جديد في

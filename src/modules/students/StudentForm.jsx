@@ -36,7 +36,7 @@ function Field({ label, required, error, children }) {
 function Inp({ name, value, onChange, onBlur, placeholder, type='text', invalid, disabled }) {
   const style = { ...BASE_INP, borderColor: invalid ? 'var(--red)' : 'var(--border)', background: invalid ? 'rgba(239,68,68,0.05)' : 'var(--surface2)', opacity: disabled ? 0.6 : 1 };
   return (
-    <input name={name} type={type} value={value||''} onChange={onChange} onBlur={onBlur}
+    <input name={name} type={type} value={value||''} onChange={onChange}
       placeholder={placeholder} disabled={disabled} style={style}
       onFocus={e  => { e.target.style.borderColor='var(--accent)'; e.target.style.boxShadow='0 0 0 3px rgba(13,148,136,0.12)'; e.target.style.background='var(--surface3)'; }}
       onBlur={e   => { e.target.style.borderColor=invalid?'var(--red)':'var(--border)'; e.target.style.boxShadow='none'; e.target.style.background=invalid?'rgba(239,68,68,0.05)':'var(--surface2)'; onBlur?.(e); }}
@@ -133,15 +133,16 @@ export default function StudentForm({ initialValues, editId, onSubmit, onCancel,
             {GRADES.map(g => <option key={g} value={g}>{g}</option>)}
           </Sel>
         </Field>
-        {/* المجموعة — تُعرض مجموعات الصف المختار فقط */}
-        <Field label="المجموعة" required error={err('groupId')}>
+        {/* المجموعة الرئيسية — تُعرض مجموعات الصف المختار فقط. Phase 3B: اختيارية — يمكن
+            تسجيل/تعديل طالب بلا مجموعة رئيسية (المجموعات الإضافية تُدار من ملف الطالب). */}
+        <Field label="المجموعة الرئيسية" error={err('groupId')}>
           <Sel name="groupId" value={values.groupId} onChange={handleChange} invalid={isEr('groupId')}>
             <option value="">
               {!values.grade
                 ? 'اختر السنة الدراسية أولاً...'
                 : gradeGroups.length === 0
-                  ? 'لا توجد مجموعات لهذا الصف'
-                  : 'اختر المجموعة...'}
+                  ? 'لا توجد مجموعات لهذا الصف — بدون مجموعة رئيسية'
+                  : 'بدون مجموعة رئيسية (اختياري)'}
             </option>
             {visibleGroups.map(g => <option key={g.id} value={g.id}>{g.name} — {g.subject}</option>)}
           </Sel>

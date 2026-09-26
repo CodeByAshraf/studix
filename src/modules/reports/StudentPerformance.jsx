@@ -1,10 +1,13 @@
 // src/modules/reports/StudentPerformance.jsx
-import { useState, useMemo } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { useAppStore } from '../../store/app.store';
 import { formatCurrency, formatDate } from '../../utils/helpers';
 import { MetricCard, BarChart, DonutChart, AnalyticsCard, StatRow, HeatRow, ProgressRing } from './components/ChartComponents';
+import StudentSearchSelect from '../../components/ui/StudentSearchSelect';
 import { scoreColor } from '../../services/examService';
-import { getNetRevenue } from '../../services/paymentService';
+import { pgGetPaymentAggregates, pgGetAttendance, pgGetGrades } from '../../services/api';
+import { useAsyncData } from '../../hooks/useAsyncData';
+import { useToast } from '../../components/Toast';
 
 const PALETTE = [
   {bg:'rgba(59,130,246,.18)',color:'#3b82f6'},{bg:'rgba(16,185,129,.18)',color:'#10b981'},
@@ -14,14 +17,53 @@ const PALETTE = [
 const avStyle = n => PALETTE[((n.charCodeAt(0)||0)+(n.charCodeAt(1)||0))%PALETTE.length];
 
 export default function StudentPerformance() {
-  const attendance           = useAppStore((s) => s.attendance);
   const exams                = useAppStore((s) => s.exams);
-  const grades               = useAppStore((s) => s.grades);
   const groups               = useAppStore((s) => s.groups);
-  const payments             = useAppStore((s) => s.payments);
   const students             = useAppStore((s) => s.students);
-  const treasuryTxn          = useAppStore((s) => s.treasuryTxn);
+  const toast = useToast();
   const [selectedStudentId, setSelectedStudentId] = useState('');
+
+  // Scalability Architecture Phase 4 Cutover 1: "إجمالي المدفوع" لطالب واحد مختار يصل
+  // الآن جاهزاً (صافياً بعد الاسترداد) من GET /api/payments/aggregate?groupBy=none&
+  // studentId= (نفس getNetRevenue(دفعات الطالب) بالضبط، مُتحقَّق تكافؤه في تدقيق Phase 4
+  // Step 3) — بدل جلب كل تاريخ الدفعات وطرح الاسترداد محلياً؛ لا مستهلك آخر هنا يحتاج
+  // الصفوف الخام نفسها (payRecs لم تكن تُستخدَم في العرض إطلاقاً، فقط totalPaid المُشتقّة).
+  const { data: paymentAgg = [], error: paymentAggError } = useAsyncData(
+    () => (selectedStudentId ? pgGetPaymentAggregates({ groupBy: 'none', studentId: selectedStudentId }) : Promise.resolve([])),
+    [selectedStudentId],
+    [],
+  );
+  const totalPaid = paymentAgg[0]?.revenue ?? 0;
+
+  useEffect(() => {
+    if (paymentAggError) toast.error(paymentAggError.message || 'فشل تحميل إجمالي مدفوعات الطالب');
+  }, [paymentAggError]);
+
+  // C4 Attendance migration Phase 2: same scoped-fetch pattern as paymentAgg above — one
+  // request per selected student (GET /api/attendance?studentId=) instead of filtering the
+  // full global attendance array.
+  const { data: studentAttendance = [], error: attendanceError } = useAsyncData(
+    () => (selectedStudentId ? pgGetAttendance({ studentId: selectedStudentId }) : Promise.resolve([])),
+    [selectedStudentId],
+    [],
+  );
+
+  useEffect(() => {
+    if (attendanceError) toast.error(attendanceError.message || 'فشل تحميل حضور الطالب');
+  }, [attendanceError]);
+
+  // Phase 1A (Grades global-read migration): same scoped-fetch pattern as studentAttendance
+  // above — one request per selected student (GET /api/grades?studentId=) instead of
+  // filtering the full global grades array.
+  const { data: studentGradeRecords = [], error: gradesError } = useAsyncData(
+    () => (selectedStudentId ? pgGetGrades({ studentId: selectedStudentId }) : Promise.resolve([])),
+    [selectedStudentId],
+    [],
+  );
+
+  useEffect(() => {
+    if (gradesError) toast.error(gradesError.message || 'فشل تحميل درجات الطالب');
+  }, [gradesError]);
 
   const activeStudents = students.filter(s => s.status === 'active');
 
@@ -65,30 +107,24 @@ export default function StudentPerformance() {
     if (!s) return null;
     const group = groups.find(g => g.id === s.groupId);
 
-    // Attendance
-    const attRecs    = attendance.filter(r => r.studentId === s.id).sort((a,b) => a.date.localeCompare(b.date));
+    // Attendance — studentAttendance is already scoped to this student.
+    const attRecs    = [...studentAttendance].sort((a,b) => a.date.localeCompare(b.date));
     const attPresent = attRecs.filter(r => r.status==='present').length;
     const attAbsent  = attRecs.filter(r => r.status==='absent').length;
     const attLate    = attRecs.filter(r => r.status==='late').length;
     const attPct     = attRecs.length ? Math.round(attPresent/attRecs.length*100) : null;
     const heatCells  = attRecs.slice(-24).map(r => ({ date:r.date, status:r.status }));
 
-    // Exams
-    const studentGrades = grades.filter(g => g.studentId===s.id && !g.absent && g.score!==null);
+    // Exams — studentGradeRecords is already scoped to this student.
+    const studentGrades = studentGradeRecords.filter(g => !g.absent && g.score!==null);
     const examResults = studentGrades.map(g => {
       const exam = exams.find(e => e.id===g.examId);
       return exam ? { name:exam.name.substring(0,20), score:g.score, total:exam.total, pct:Math.round(g.score/exam.total*100) } : null;
     }).filter(Boolean).sort((a,b) => b.pct-a.pct);
     const avgExamPct = examResults.length ? Math.round(examResults.reduce((s,g)=>s+g.pct,0)/examResults.length) : null;
 
-    // Payments
-    // BUG-02: صافي بعد طرح أي استرداد فعّال (getNetRevenue) — لا يظهر ملف الطالب هنا
-    // أي جدول خام مجاور، فلا خطر مطابقة يمنع عرض الرقم الصافي مباشرة.
-    const payRecs = payments.filter(p => p.studentId===s.id);
-    const totalPaid = getNetRevenue(payRecs, treasuryTxn);
-
-    return { s, group, attRecs, attPresent, attAbsent, attLate, attPct, heatCells, examResults, avgExamPct, payRecs, totalPaid };
-  }, [selectedStudentId, students, groups, attendance, grades, exams, payments, treasuryTxn]);
+    return { s, group, attRecs, attPresent, attAbsent, attLate, attPct, heatCells, examResults, avgExamPct };
+  }, [selectedStudentId, students, groups, studentAttendance, studentGradeRecords, exams]);
 
   const MONTHS_SHORT = ['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
 
@@ -125,17 +161,19 @@ export default function StudentPerformance() {
       {/* Student deep-dive */}
       <AnalyticsCard title="تحليل طالب بعينه" subtitle="اختر طالباً لعرض ملفه التحليلي"
         actions={
-          <select value={selectedStudentId} onChange={e => setSelectedStudentId(e.target.value)}
-            style={{ background:'var(--surface2)', border:'1px solid var(--border)', borderRadius:9, padding:'6px 11px', color:'var(--text)', fontFamily:'Cairo,sans-serif', fontSize:'0.82rem', outline:'none', cursor:'pointer', direction:'rtl', minWidth:200 }}>
-            <option value="">اختر طالباً...</option>
-            {activeStudents.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
+          <div style={{ minWidth:200 }}>
+            <StudentSearchSelect
+              students={activeStudents}
+              value={selectedStudentId}
+              onChange={(id) => setSelectedStudentId(id)}
+            />
+          </div>
         }
       >
         {!studentProfile ? (
           <div style={{ textAlign:'center', padding:'32px', color:'var(--text3)', fontSize:'0.85rem' }}>اختر طالباً من القائمة أعلاه</div>
         ) : (() => {
-          const { s, group, attPresent, attAbsent, attLate, attPct, heatCells, examResults, avgExamPct, totalPaid } = studentProfile;
+          const { s, group, attPresent, attAbsent, attLate, attPct, heatCells, examResults, avgExamPct } = studentProfile;
           const { bg, color } = avStyle(s.name);
           const letters = s.name.split(' ').map(w=>w[0]).slice(0,2).join('');
           return (

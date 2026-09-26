@@ -1,9 +1,12 @@
 // src/modules/payments/PaymentHistory.jsx
 import { useAppStore } from '../../store/app.store';
-import { useState, useMemo } from 'react';
-import { MONTHS_AR, PAYMENT_METHODS, PAYMENT_STATUS } from '../../services/paymentService';
+import { useState, useEffect } from 'react';
+import { MONTHS_AR, PAYMENT_STATUS } from '../../services/paymentService';
 import { StatusBadge, MethodBadge } from './components/PaymentBadge';
-import { formatDate, formatCurrency, paginate } from '../../utils/helpers';
+import { formatDate, formatCurrency } from '../../utils/helpers';
+import { pgGetPaymentsHistory } from '../../services/api';
+import { useAsyncData } from '../../hooks/useAsyncData';
+import { useToast } from '../../components/Toast';
 
 const PALETTE = [
   {bg:'rgba(59,130,246,.18)',color:'#3b82f6'},{bg:'rgba(16,185,129,.18)',color:'#10b981'},
@@ -14,39 +17,52 @@ const av = (name='') => PALETTE[((name.charCodeAt(0)||0)+(name.charCodeAt(1)||0)
 
 const SEL = { background:'var(--surface2)', border:'1px solid var(--border)', borderRadius:9, padding:'7px 11px', color:'var(--text)', fontFamily:'Cairo,sans-serif', fontSize:'0.82rem', outline:'none', cursor:'pointer', direction:'rtl' };
 
+const PAGE_SIZE = 12;
+const EMPTY_PAGE = { items:[], page:1, totalPages:1, total:0, totalAmount:0, hasPrev:false, hasNext:false };
+
 export default function PaymentHistory({ onAddPayment, onDeletePayment }) {
-  const groups               = useAppStore((s) => s.groups);
-  const payments             = useAppStore((s) => s.payments);
-  const students             = useAppStore((s) => s.students);
+  const groups   = useAppStore((s) => s.groups);
+  const students = useAppStore((s) => s.students);
+  const toast = useToast();
+
   const [filterMonth,  setFilterMonth]  = useState('');
   const [filterGroup,  setFilterGroup]  = useState('');
   const [filterStatus, setFilterStatus] = useState('');
-  const [search,       setSearch]       = useState('');
+  const [searchInput,  setSearchInput]  = useState(''); // القيمة الفورية في الحقل
+  const [search,       setSearch]       = useState(''); // القيمة المُهذَّبة زمنياً (debounced) المُرسَلة للخادم
   const [page,         setPage]         = useState(1);
-  const PAGE_SIZE = 12;
 
-  const filtered = useMemo(() => {
-    const q = search.toLowerCase();
-    return payments
-      .filter(p => {
-        if (filterMonth  && p.month  !== Number(filterMonth))  return false;
-        if (filterGroup  && p.groupId !== filterGroup)          return false;
-        if (filterStatus && p.status  !== filterStatus)         return false;
-        if (q) {
-          const student = students.find(s => s.id === p.studentId);
-          if (!student?.name.toLowerCase().includes(q) && !p.id.toLowerCase().includes(q)) return false;
-        }
-        return true;
-      })
-      .sort((a, b) => b.date.localeCompare(a.date));
-  }, [payments, students, filterMonth, filterGroup, filterStatus, search]);
+  // Scalability Architecture Phase 4 (متابعة): بحث الخادم يُرسِل استعلاماً حقيقياً لكل
+  // تغيير — تهذيب زمني (300ms، نفس افتراضي utils/helpers.js's debounce) يمنع استعلاماً لكل
+  // ضغطة زر أثناء الكتابة، بلا أي تغيير على النتيجة النهائية بعد استقرار الكتابة.
+  useEffect(() => {
+    const t = setTimeout(() => { setSearch(searchInput); setPage(1); }, 300);
+    return () => clearTimeout(t);
+  }, [searchInput]);
 
-  const pg = useMemo(() => paginate(filtered, page, PAGE_SIZE), [filtered, page]);
+  // Scalability Architecture Phase 4 (متابعة) — بدل مصفوفة payments الكاملة من الـ store،
+  // كل صفحة/فلتر تُجلَب عبر GET /api/payments/search (backend/src/routes/payments.js's
+  // searchPayments) — نفس منطق .filter()/.sort()/paginate()/totalFiltered القديم بالضبط،
+  // محسوباً على الخادم بدل المتصفح (انظر تدقيق/تصميم المرحلة 4 لهذه الشاشة تحديداً).
+  const { data, loading, error } = useAsyncData(
+    () => pgGetPaymentsHistory({ month: filterMonth, groupId: filterGroup, status: filterStatus, search, page, limit: PAGE_SIZE }),
+    [filterMonth, filterGroup, filterStatus, search, page],
+    null,
+  );
 
-  const totalFiltered = filtered.reduce((s, p) => s + p.amount, 0);
-  const hasFilters = !!(filterMonth || filterGroup || filterStatus || search);
+  useEffect(() => {
+    if (error) toast.error(error.message || 'فشل تحميل سجل المدفوعات');
+  }, [error]);
 
-  const clearAll = () => { setFilterMonth(''); setFilterGroup(''); setFilterStatus(''); setSearch(''); setPage(1); };
+  const pg = data || EMPTY_PAGE;
+  const hasFilters = !!(filterMonth || filterGroup || filterStatus || searchInput);
+  const rangeStart = pg.total === 0 ? 0 : (pg.page - 1) * PAGE_SIZE + 1;
+  const rangeEnd   = Math.min(pg.page * PAGE_SIZE, pg.total);
+
+  const clearAll = () => {
+    setFilterMonth(''); setFilterGroup(''); setFilterStatus('');
+    setSearchInput(''); setSearch(''); setPage(1);
+  };
 
   return (
     <div>
@@ -57,9 +73,9 @@ export default function PaymentHistory({ onAddPayment, onDeletePayment }) {
           onBlurCapture={e  => e.currentTarget.style.borderColor='var(--border)'}
         >
           <span style={{ color:'var(--text3)' }}>🔍</span>
-          <input value={search} onChange={e=>{setSearch(e.target.value);setPage(1);}} placeholder="بحث بالاسم..."
+          <input value={searchInput} onChange={e=>setSearchInput(e.target.value)} placeholder="بحث بالاسم..."
             style={{ flex:1, background:'none', border:'none', outline:'none', color:'var(--text)', fontFamily:'Cairo,sans-serif', fontSize:'0.82rem', padding:'8px 0', direction:'rtl' }}/>
-          {search && <button onClick={()=>setSearch('')} style={{ color:'var(--text3)', cursor:'pointer' }}>×</button>}
+          {searchInput && <button onClick={()=>{setSearchInput('');setSearch('');setPage(1);}} style={{ color:'var(--text3)', cursor:'pointer' }}>×</button>}
         </div>
 
         <select style={SEL} value={filterMonth} onChange={e=>{setFilterMonth(e.target.value);setPage(1);}}>
@@ -81,16 +97,23 @@ export default function PaymentHistory({ onAddPayment, onDeletePayment }) {
           <button onClick={clearAll} style={{ ...SEL, color:'var(--text3)', cursor:'pointer' }}>× مسح</button>
         )}
 
-        {hasFilters && (
+        {hasFilters && !loading && !error && (
           <div style={{ display:'flex', alignItems:'center', gap:6, padding:'0 12px', background:'rgba(16,185,129,.1)', border:'1px solid rgba(16,185,129,.2)', borderRadius:9, fontSize:'0.78rem', color:'var(--green)', fontWeight:700, fontFamily:'Cairo,sans-serif' }}>
-            {formatCurrency(totalFiltered)}
+            {formatCurrency(pg.totalAmount)}
           </div>
         )}
       </div>
 
       {/* Table */}
       <div style={{ background:'var(--surface)', border:'1px solid var(--border)', borderRadius:14, overflow:'hidden' }}>
-        {pg.total === 0 ? (
+        {loading ? (
+          <div style={{ textAlign:'center', padding:'48px', color:'var(--text3)' }}>...جارِ التحميل</div>
+        ) : error ? (
+          <div style={{ textAlign:'center', padding:'48px', color:'var(--red)' }}>
+            <div style={{ fontSize:40, opacity:.4, marginBottom:10 }}>⚠</div>
+            <div style={{ fontSize:'0.88rem', fontWeight:600 }}>تعذّر تحميل سجل المدفوعات</div>
+          </div>
+        ) : pg.total === 0 ? (
           <div style={{ textAlign:'center', padding:'48px', color:'var(--text3)' }}>
             <div style={{ fontSize:40, opacity:.4, marginBottom:10 }}>💰</div>
             <div style={{ fontSize:'0.88rem', fontWeight:600 }}>{hasFilters ? 'لا توجد نتائج' : 'لا توجد مدفوعات بعد'}</div>
@@ -149,16 +172,16 @@ export default function PaymentHistory({ onAddPayment, onDeletePayment }) {
             {/* Pagination */}
             {pg.totalPages > 1 && (
               <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', padding:'11px 18px', borderTop:'1px solid var(--border)', fontSize:'0.78rem', flexWrap:'wrap', gap:8 }}>
-                <span style={{ color:'var(--text3)' }}>عرض {pg.start}–{pg.end} من {pg.total} دفعة</span>
+                <span style={{ color:'var(--text3)' }}>عرض {rangeStart}–{rangeEnd} من {pg.total} دفعة</span>
                 <div style={{ display:'flex', gap:4 }}>
-                  <button disabled={!pg.hasPrev} onClick={()=>setPage(p=>p-1)} style={{ minWidth:30, height:30, borderRadius:7, border:'1px solid var(--border)', background:'var(--surface2)', fontSize:'0.78rem', cursor:'pointer', color:'var(--text2)' }}>›</button>
-                  {Array.from({length:pg.totalPages},(_,i)=>i+1).filter(p=>Math.abs(p-page)<=2||p===1||p===pg.totalPages).map((p,i,arr)=>(
+                  <button disabled={!pg.hasPrev} onClick={()=>setPage(pg.page-1)} style={{ minWidth:30, height:30, borderRadius:7, border:'1px solid var(--border)', background:'var(--surface2)', fontSize:'0.78rem', cursor:'pointer', color:'var(--text2)' }}>›</button>
+                  {Array.from({length:pg.totalPages},(_,i)=>i+1).filter(p=>Math.abs(p-pg.page)<=2||p===1||p===pg.totalPages).map((p,i,arr)=>(
                     <span key={p}>
                       {i>0&&arr[i-1]!==p-1&&<span style={{padding:'0 4px',color:'var(--text3)'}}>…</span>}
-                      <button onClick={()=>setPage(p)} style={{ minWidth:30,height:30,borderRadius:7,border:'1px solid',fontSize:'0.78rem',cursor:'pointer',fontFamily:'Cairo,sans-serif', borderColor:p===page?'var(--accent)':'var(--border)',background:p===page?'var(--accent)':'var(--surface2)',color:p===page?'var(--surface)':'var(--text2)' }}>{p}</button>
+                      <button onClick={()=>setPage(p)} style={{ minWidth:30,height:30,borderRadius:7,border:'1px solid',fontSize:'0.78rem',cursor:'pointer',fontFamily:'Cairo,sans-serif', borderColor:p===pg.page?'var(--accent)':'var(--border)',background:p===pg.page?'var(--accent)':'var(--surface2)',color:p===pg.page?'var(--surface)':'var(--text2)' }}>{p}</button>
                     </span>
                   ))}
-                  <button disabled={!pg.hasNext} onClick={()=>setPage(p=>p+1)} style={{ minWidth:30, height:30, borderRadius:7, border:'1px solid var(--border)', background:'var(--surface2)', fontSize:'0.78rem', cursor:'pointer', color:'var(--text2)' }}>‹</button>
+                  <button disabled={!pg.hasNext} onClick={()=>setPage(pg.page+1)} style={{ minWidth:30, height:30, borderRadius:7, border:'1px solid var(--border)', background:'var(--surface2)', fontSize:'0.78rem', cursor:'pointer', color:'var(--text2)' }}>‹</button>
                 </div>
               </div>
             )}

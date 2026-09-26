@@ -10,6 +10,7 @@ import {
   buildSessionRecords,
   getAttendanceStats,
   getFrequentAbsentees,
+  statsByStudentFromRecords,
 } from '../services/attendanceService';
 
 export default function useAttendance() {
@@ -53,7 +54,7 @@ export default function useAttendance() {
   );
 
   const getAbsentees = useCallback(
-    (threshold) => getFrequentAbsentees(students, attendance, threshold),
+    (threshold) => getFrequentAbsentees(students, statsByStudentFromRecords(students, attendance), threshold),
     [students, attendance],
   );
 

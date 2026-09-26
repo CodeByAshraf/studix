@@ -1,5 +1,5 @@
 // src/modules/exams/ExamsPage.jsx
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo, useCallback, useEffect } from 'react';
 import { useAppStore } from '../../store/app.store';
 import { useAuth }     from '../../store/auth.context';
 import { SectionBoundary } from '../../components/ErrorBoundary';
@@ -7,8 +7,9 @@ import { Modal, ConfirmModal } from '../../components/ui/Modal';
 import Button        from '../../components/ui/Button';
 import { useToast }  from '../../components/Toast';
 import { useErrorHandler } from '../../hooks/useErrorHandler';
-import { createExam, updateExam, getExamStatsWithPass, EXAM_TYPES, EXAM_STATUS } from '../../services/examService';
-import { pgCreateExam, pgUpdateExam, pgDeleteExam } from '../../services/api';
+import { createExam, updateExam, EXAM_TYPES, EXAM_STATUS } from '../../services/examService';
+import { pgCreateExam, pgUpdateExam, pgDeleteExam, pgGetGradesAggregate } from '../../services/api';
+import { useAsyncData } from '../../hooks/useAsyncData';
 import { formatDate } from '../../utils/helpers';
 import ExamForm      from './ExamForm';
 import GradeEntry    from './GradeEntry';
@@ -97,7 +98,7 @@ function ExamCard({ exam, group, stats, onEdit, onDelete, onGrades, onResults })
           { icon:'🗑',  label:'حذف',    action:onDelete, danger:true },
         ].map((btn, i) => (
           <button key={i} onClick={btn.action}
-            style={{ flex:1, padding:'9px 4px', fontSize:'0.7rem', fontWeight:600, cursor:'pointer', fontFamily:'Cairo,sans-serif', transition:'all .12s', background:'transparent', borderRight: i<3 ? '1px solid var(--border)' : 'none', display:'flex', flexDirection:'column', alignItems:'center', gap:2, color: btn.danger ? 'var(--red)' : 'var(--text2)', border:'none', borderRight: i<3 ? '1px solid var(--border)' : 'none' }}
+            style={{ flex:1, padding:'9px 4px', fontSize:'0.7rem', fontWeight:600, cursor:'pointer', fontFamily:'Cairo,sans-serif', transition:'all .12s', background:'transparent', borderRight: i<3 ? '1px solid var(--border)' : 'none', display:'flex', flexDirection:'column', alignItems:'center', gap:2, color: btn.danger ? 'var(--red)' : 'var(--text2)', border:'none' }}
             onMouseOver={e => { e.currentTarget.style.background = btn.danger ? 'rgba(239,68,68,.08)' : 'var(--surface2)'; e.currentTarget.style.color = btn.danger ? '#ef4444' : 'var(--text)'; }}
             onMouseOut={e  => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = btn.danger ? 'var(--red)' : 'var(--text2)'; }}
           >
@@ -109,6 +110,11 @@ function ExamCard({ exam, group, stats, onEdit, onDelete, onGrades, onResults })
     </div>
   );
 }
+
+// Phase 1D (Grades global-read migration) — same "no grades entered yet" default shape
+// getExamStatsWithPass's own no-grades branch returns, for an exam absent from the
+// groupBy=exam aggregate response.
+const NO_STATS = { count: 0, avg: null, highest: null, lowest: null, passed: 0, failed: 0, passRate: null, absent: 0 };
 
 function KPI({ icon, label, value, color = 'var(--text)', sub }) {
   return (
@@ -124,14 +130,31 @@ function KPI({ icon, label, value, color = 'var(--text)', sub }) {
 export default function ExamsPage() {
   const addLog               = useAppStore((s) => s.addLog);
   const exams                = useAppStore((s) => s.exams);
-  const grades               = useAppStore((s) => s.grades);
-  const groups               = useAppStore((s) => s.groups);
+  const groups                = useAppStore((s) => s.groups);
   const setExams             = useAppStore((s) => s.setExams);
   const setGrades            = useAppStore((s) => s.setGrades);
   const students             = useAppStore((s) => s.students);
   const { currentUser } = useAuth();
   const toast = useToast();
   const { loading, run } = useErrorHandler(toast);
+
+  // Phase 1D (Grades global-read migration) — KPI average and every exam card's stats now
+  // come from GET /api/grades/aggregate (groupBy=none / groupBy=exam, one request each,
+  // covering every currently-listed exam at once) instead of filtering the store's global
+  // grades array with getExamStatsWithPass per card.
+  const { data: gradesOverall = [], error: gradesOverallError } = useAsyncData(
+    () => pgGetGradesAggregate({ groupBy: 'none' }), [], []);
+  const { data: examStatsRows = [], error: examStatsError } = useAsyncData(
+    () => pgGetGradesAggregate({ groupBy: 'exam' }), [], []);
+  const examStatsByExamId = useMemo(
+    () => new Map(examStatsRows.map((r) => [r.key, r])),
+    [examStatsRows],
+  );
+
+  useEffect(() => {
+    const err = gradesOverallError || examStatsError;
+    if (err) toast.error(err.message || 'فشل تحميل إحصاءات الدرجات');
+  }, [gradesOverallError, examStatsError]);
 
   const [view,   setView]   = useState('list');
   const [modal,  setModal]  = useState({ type:null, exam:null });
@@ -149,23 +172,24 @@ export default function ExamsPage() {
     const done     = exams.filter(e => e.status === 'done').length;
     const grading  = exams.filter(e => e.status === 'grading').length;
     const upcoming = exams.filter(e => e.status === 'upcoming').length;
-    const allGrades = grades.filter(g => !g.absent && g.score !== null);
-    const avgPct = allGrades.length ? Math.round(allGrades.reduce((sum, g) => {
-      const exam = exams.find(e => e.id === g.examId);
-      return sum + (exam ? (g.score/exam.total)*100 : 0);
-    }, 0) / allGrades.length) : null;
+    const avgPct = gradesOverall[0]?.avgPct ?? null;
     return { total:exams.length, done, grading, upcoming, avgPct };
-  }, [exams, grades]);
+  }, [exams, gradesOverall]);
 
   // Filtered exams
+  // C2 fix (Pre-Installer Audit): new exams no longer carry a groupId (Exams Phase 2 —
+  // targeted by grade, not group), so `e.groupId === filter.groupId` was always empty for
+  // any current exam. Resolve the selected group to its grade instead — migration 007
+  // backfilled `grade` on every historical exam row too, so this covers both.
   const filtered = useMemo(() => {
     const q = filter.search.toLowerCase();
+    const filterGroup = filter.groupId ? groups.find(g => g.id === filter.groupId) : null;
     return exams.filter(e =>
-      (!filter.status  || e.status  === filter.status)  &&
-      (!filter.groupId || e.groupId === filter.groupId) &&
+      (!filter.status   || e.status === filter.status)          &&
+      (!filterGroup     || e.grade  === filterGroup.grade)       &&
       (!q || e.name.toLowerCase().includes(q) || e.subject.toLowerCase().includes(q))
     ).sort((a,b) => b.date.localeCompare(a.date));
-  }, [exams, filter]);
+  }, [exams, filter, groups]);
 
   // CRUD
   // Phase 3B-5: PostgreSQL هو مصدر الحقيقة الآن — الحفظ/الحذف يذهب للـ backend أولاً،
@@ -284,7 +308,7 @@ export default function ExamsPage() {
                 <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(280px,1fr))', gap:16 }}>
                   {filtered.map(exam => {
                     const group = groups.find(g => g.id === exam.groupId);
-                    const stats = getExamStatsWithPass(exam.id, grades, exam);
+                    const stats = examStatsByExamId.get(exam.id) ?? NO_STATS;
                     return (
                       <SectionBoundary key={exam.id} label={`ExamCard:${exam.id}`}>
                         <ExamCard exam={exam} group={group} stats={stats}

@@ -15,6 +15,7 @@ import { ToastProvider } from '../../components/Toast';
 let fetchMock;
 let postPaymentResponder;   // POST /api/admissionPayments
 let cancelRefundResponder;  // PUT /api/admissions/:id/cancel-with-refund
+let getAdmissionPaymentsResponse; // GET /api/admissionPayments — page-mount fetch (Phase 4)
 
 function okJson(data, status = 200) {
   return { ok: true, status, json: async () => ({ ok: true, data }) };
@@ -47,6 +48,7 @@ const EXISTING_TXN = {
 };
 
 beforeEach(() => {
+  getAdmissionPaymentsResponse = [];
   postPaymentResponder = (body) => okJson({
     payment: { id: 'srv-ap-1', admissionId: body.admissionId, type: body.type, amount: Number(body.amount), date: body.date, method: body.method, notes: body.notes ?? null, materialId: body.materialId ?? null, treasuryTxnId: 'srv-tx-1', createdAt: '2026-01-10T00:00:00.000Z' },
     treasuryTxn: { id: 'srv-tx-1', cashboxId: body.cashboxId, date: body.date, type: 'income', category: 'revisions', notes: 'دفعة حجز — أحمد علي (قبول)', amount: Number(body.amount), method: body.method, party: 'أحمد علي', refType: 'admissionPayment', refId: 'srv-ap-1', admissionId: body.admissionId, status: 'active', createdBy: 'u1', createdAt: '2026-01-10T00:00:00.000Z' },
@@ -66,6 +68,7 @@ beforeEach(() => {
     const u = String(url);
     const method = opts.method || 'GET';
     const body = opts.body ? JSON.parse(opts.body) : {};
+    if (u.includes('/api/admissionPayments') && method === 'GET') return Promise.resolve(okJson(getAdmissionPaymentsResponse));
     if (u.endsWith('/api/admissionPayments') && method === 'POST') return Promise.resolve(postPaymentResponder(body));
     if (u.includes('/api/admissions/') && u.endsWith('/cancel-with-refund') && method === 'PUT') {
       return Promise.resolve(cancelRefundResponder(body));
@@ -86,6 +89,9 @@ function renderPage() {
   );
 }
 function seedStore(extra = {}) {
+  // GET /api/admissionPayments (page-mount fetch) يجب أن يعيد نفس المجموعة المزروعة هنا —
+  // AdmissionsPage.jsx يستبدل admissionPayments في الـ store بنتيجة هذا الجلب فور نجاحه.
+  if (extra.admissionPayments) getAdmissionPaymentsResponse = extra.admissionPayments;
   useAppStore.setState({
     admissions: [ADMISSION], admissionFollowups: [], admissionSystemLog: [], admissionPayments: [],
     groups: [GROUP], students: [], invMaterials: [], treasuryTxn: [], cashboxes: [CB1],
@@ -139,7 +145,8 @@ describe('AdmissionsPage — admission payment creation (Phase 3B-14D)', () => {
     expect(useAppStore.getState().treasuryTxn[0].refType).toBe('admissionPayment');
     expect(useAppStore.getState().admissionSystemLog).toHaveLength(1);
     expect(useAppStore.getState().admissionSystemLog[0].type).toBe('paymentReceived');
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // نداءا شبكة فقط: الجلب المفرد لدفعات القبول عند تحميل الصفحة (Phase 4) + إنشاء الدفعة
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it('creation failure: leaves admissionPayments and treasuryTxn completely untouched', async () => {
@@ -165,6 +172,53 @@ describe('AdmissionsPage — admission payment creation (Phase 3B-14D)', () => {
 
     expect(screen.getByText('حفظ الدفعة').closest('button')).toBeDisabled();
     expect(postPaymentCalls()).toHaveLength(0);
+  });
+
+  // Financial Integrity Fix — real defect found by the audit: this button previously closed
+  // the modal instantly without awaiting the request and was never disabled while a request
+  // was in flight, so a rapid double-click could fire two independent POSTs (two real
+  // admission_payments + two treasury_txn rows for one intended payment). Fixed with a
+  // synchronous ref guard + disabled-while-submitting state on the frontend, and a
+  // clientRequestId idempotency key sent to the backend as defense-in-depth.
+  it('double-click protection: a rapid second click while the first request is still in flight sends exactly one POST, button disabled meanwhile, clientRequestId included and stable', async () => {
+    let resolvePost;
+    postPaymentResponder = () => new Promise((resolve) => { resolvePost = resolve; });
+
+    seedStore();
+    renderPage();
+    openPaymentModal();
+    const selects = screen.getAllByRole('combobox');
+    fireEvent.change(selects[selects.length - 1], { target: { value: 'cb1' } });
+    fireEvent.change(screen.getByPlaceholderText('200'), { target: { value: '200' } });
+
+    const saveBtn = screen.getByText('حفظ الدفعة').closest('button');
+    fireEvent.click(saveBtn);
+    // نقرة ثانية فورية بينما الطلب الأول ما زال معلَّقاً — لا await بينهما، تحاكي نقرة
+    // مزدوجة حقيقية قبل حتى إعادة رندر React لتعطيل الزر.
+    fireEvent.click(saveBtn);
+    fireEvent.click(saveBtn);
+
+    await waitFor(() => expect(postPaymentCalls().length).toBeGreaterThan(0));
+    // نداءان فقط: الجلب المفرد عند تحميل الصفحة + طلب إنشاء دفعة واحد — لا نداء ثانٍ
+    // رغم ثلاث نقرات.
+    expect(postPaymentCalls()).toHaveLength(1);
+    expect(screen.getByText('جارٍ الحفظ...')).toBeInTheDocument();
+    expect(screen.getByText('جارٍ الحفظ...').closest('button')).toBeDisabled();
+
+    const [, sentOpts] = postPaymentCalls()[0];
+    const sentBody = JSON.parse(sentOpts.body);
+    expect(typeof sentBody.clientRequestId).toBe('string');
+    expect(sentBody.clientRequestId.length).toBeGreaterThan(0);
+
+    resolvePost(okJson({
+      payment: { id: 'srv-ap-1', admissionId: 'adm_1', type: 'deposit', amount: 200, date: sentBody.date, method: 'cash', notes: null, materialId: null, treasuryTxnId: 'srv-tx-1', createdAt: '2026-01-10T00:00:00.000Z' },
+      treasuryTxn: { id: 'srv-tx-1', cashboxId: 'cb1', date: sentBody.date, type: 'income', category: 'revisions', notes: null, amount: 200, method: 'cash', party: 'أحمد علي', refType: 'admissionPayment', refId: 'srv-ap-1', admissionId: 'adm_1', status: 'active', createdBy: 'u1', createdAt: '2026-01-10T00:00:00.000Z' },
+      logs: [],
+    }, 201));
+
+    await waitFor(() => expect(useAppStore.getState().admissionPayments).toHaveLength(1));
+    // لا نداء إضافي وصل لاحقاً من النقرات المكرَّرة — يبقى واحداً بعد اكتمال الطلب أيضاً.
+    expect(postPaymentCalls()).toHaveLength(1);
   });
 });
 
@@ -204,7 +258,8 @@ describe('AdmissionsPage — cancel-with-refund (Phase 3B-14D, ONE atomic transa
     expect(useAppStore.getState().admissionSystemLog).toHaveLength(2);
     // الدفعة الأصلية لا تتغيّر أبداً (immutable)
     expect(useAppStore.getState().admissionPayments).toEqual([EXISTING_PAYMENT]);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // نداءا شبكة فقط: الجلب المفرد لدفعات القبول عند تحميل الصفحة (Phase 4) + إلغاء الحجز
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it('cancel-with-refund failure (e.g. already cancelled): leaves admission, payments, and treasuryTxn completely untouched', async () => {

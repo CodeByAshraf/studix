@@ -1,17 +1,19 @@
 // src/modules/payments/PaymentsPage.jsx
-import { useState, useMemo, useCallback } from 'react';
+import { useEffect, useState, useMemo, useCallback } from 'react';
 import { useAppStore } from '../../store/app.store';
 import { useAuth }     from '../../store/auth.context';
 import { SectionBoundary } from '../../components/ErrorBoundary';
 import { Modal } from '../../components/ui/Modal';
 import Button        from '../../components/ui/Button';
+import StudentSearchSelect from '../../components/ui/StudentSearchSelect';
 import { useToast }  from '../../components/Toast';
 import { useErrorHandler } from '../../hooks/useErrorHandler';
 import {
-  MONTHS_AR, getMonthlyRevenue, getUnpaidStudents,
+  MONTHS_AR, getUnpaidStudents,
   getRefundedAmount, getRemainingRefundable, getNetRevenue,
 } from '../../services/paymentService';
-import { pgCreatePayment, pgRefundPayment } from '../../services/api';
+import { pgCreatePayment, pgRefundPayment, pgGetPayments, pgGetPaymentAggregates } from '../../services/api';
+import { useAsyncData } from '../../hooks/useAsyncData';
 import { formatCurrency }  from '../../utils/helpers';
 import PaymentForm    from './PaymentForm';
 import PaymentHistory from './PaymentHistory';
@@ -50,7 +52,6 @@ function KPI({ icon, label, value, color = 'var(--text)', sub, alert, onClick })
 // ────────────────────────────────────────────────────────────
 export default function PaymentsPage() {
   // Zustand selectors
-  const payments           = useAppStore((s) => s.payments);
   const setPayments        = useAppStore((s) => s.setPayments);
   const students           = useAppStore((s) => s.students);
   const groups             = useAppStore((s) => s.groups);
@@ -75,17 +76,34 @@ export default function PaymentsPage() {
 
   const currentMonth = new Date().getMonth() + 1;
   const currentYear  = new Date().getFullYear();
+  const todayStr = new Date().toISOString().split('T')[0];
+
+  // Scalability Architecture Phase 4 Cutover 2: بدل مصفوفة payments الكاملة من الـ
+  // store، كل رقم في شريط الـ KPI يُجلَب الآن عبر أضيق استعلام يخدمه فقط — بلا أي تغيير
+  // على صيغة أي حساب (نفس getUnpaidStudents/getNetRevenue بالضبط)، بنفس النمط المُتحقَّق
+  // بالفعل في Cutover 1 (Dashboard.jsx/FinancialAnalytics.jsx). currentMonthPayments
+  // (صفوف خام) تُغذّي monthRevenue وunpaidCount وthisMonthCount معاً من جلب واحد.
+  const { data: currentMonthPayments = [], error: currentMonthErr } = useAsyncData(
+    () => pgGetPayments({ month: currentMonth, year: currentYear }), [currentMonth, currentYear], []);
+  const { data: totalAgg = [], error: totalErr } = useAsyncData(
+    () => pgGetPaymentAggregates({ groupBy: 'none' }), [], []);
+  const { data: todayPayments = [], error: todayErr } = useAsyncData(
+    () => pgGetPayments({ date: todayStr }), [todayStr], []);
+
+  useEffect(() => {
+    const err = currentMonthErr || totalErr || todayErr;
+    if (err) toast.error(err.message || 'فشل تحميل مؤشرات المدفوعات');
+  }, [currentMonthErr, totalErr, todayErr]);
 
   // ── KPI data ──────────────────────────────────────────────
   const kpi = useMemo(() => {
-    const monthRevenue = getMonthlyRevenue(payments, currentMonth, currentYear, treasuryTxn);
-    const totalRevenue = getNetRevenue(payments, treasuryTxn);
-    const unpaidCount  = getUnpaidStudents(students, payments, currentMonth, currentYear).length;
-    const todayStr     = new Date().toISOString().split('T')[0];
-    const todayRevenue = getNetRevenue(payments.filter(p => p.date === todayStr), treasuryTxn);
-    const thisMonthCount = payments.filter(p => p.month === currentMonth && p.year === currentYear).length;
+    const monthRevenue = getNetRevenue(currentMonthPayments, treasuryTxn);
+    const totalRevenue = totalAgg[0]?.revenue ?? 0;
+    const unpaidCount  = getUnpaidStudents(students, currentMonthPayments, currentMonth, currentYear).length;
+    const todayRevenue = getNetRevenue(todayPayments, treasuryTxn);
+    const thisMonthCount = currentMonthPayments.length;
     return { monthRevenue, totalRevenue, unpaidCount, todayRevenue, thisMonthCount };
-  }, [payments, students, currentMonth, currentYear, treasuryTxn]);
+  }, [currentMonthPayments, totalAgg, todayPayments, students, currentMonth, currentYear, treasuryTxn]);
 
   // ── Add payment ───────────────────────────────────────────
   const openAdd = useCallback((studentId = '') => {
@@ -213,7 +231,7 @@ export default function PaymentsPage() {
             />
           )}
           {view === 'unpaid'  && <UnpaidStudents onQuickPay={(id) => openAdd(id)}/>}
-          {view === 'refund'  && <RefundView students={students} payments={payments} treasuryTxn={treasuryTxn} setTreasuryTxn={setTreasuryTxn} addLog={addLog} currentUser={currentUser} toast={toast}/>}
+          {view === 'refund'  && <RefundView students={students} treasuryTxn={treasuryTxn} setTreasuryTxn={setTreasuryTxn} addLog={addLog} currentUser={currentUser} toast={toast}/>}
           {view === 'reports' && <PaymentReports/>}
         </SectionBoundary>
       </div>
@@ -304,7 +322,7 @@ export default function PaymentsPage() {
 // ═══════════════════════════════════════════════════════════════════════════
 // شاشة الاسترداد — رد فلوس لطالب (مثل إلغاء حجز)
 // ═══════════════════════════════════════════════════════════════════════════
-function RefundView({ students, payments, treasuryTxn, setTreasuryTxn, addLog, currentUser, toast }) {
+function RefundView({ students, treasuryTxn, setTreasuryTxn, addLog, currentUser, toast }) {
   const [studentId, setStudentId] = useState('');
   const [refundTarget, setRefundTarget] = useState(null); // الدفعة المراد ردّها
   const [refundAmount, setRefundAmount] = useState('');
@@ -313,15 +331,29 @@ function RefundView({ students, payments, treasuryTxn, setTreasuryTxn, addLog, c
 
   const student = students.find(s => s.id === studentId);
 
+  // Scalability Architecture Phase 4 Cutover 2: بدل مصفوفة payments الكاملة من الـ
+  // store، يُجلَب تاريخ هذا الطالب فقط عند اختياره عبر GET /api/payments?studentId=
+  // (نفس النطاق الذي كان .filter(p=>p.studentId===studentId) يُطبّقه محلياً بالضبط).
+  const { data: rawPayments = [], loading: paymentsLoading, error: paymentsError } = useAsyncData(
+    () => (studentId ? pgGetPayments({ studentId }) : Promise.resolve([])),
+    [studentId],
+    [],
+  );
+
+  useEffect(() => {
+    if (paymentsError) toast.error(paymentsError.message || 'فشل تحميل مدفوعات الطالب');
+  }, [paymentsError]);
+
   // دفعات الطالب التي لا يزال لها مبلغ متبقٍ قابل للاسترداد (مُشتَقّ من treasury_txn
   // المرتبط — الدفعة نفسها ثابتة، لا حقل refunded عليها إطلاقاً — Phase 3B-14C).
+  // studentId===... لم تعد مطلوبة هنا — rawPayments مُفلترة بالفعل من جهة الخادم.
   const studentPayments = useMemo(() => {
     if (!studentId) return [];
-    return payments
-      .filter(p => p.studentId === studentId && (p.amount || 0) > 0)
+    return rawPayments
+      .filter(p => (p.amount || 0) > 0)
       .map(p => ({ ...p, remaining: getRemainingRefundable(p, treasuryTxn) }))
       .filter(p => p.remaining > 0);
-  }, [payments, treasuryTxn, studentId]);
+  }, [rawPayments, treasuryTxn, studentId]);
 
   const totalPaid = studentPayments.reduce((s, p) => s + p.remaining, 0);
 
@@ -361,11 +393,11 @@ function RefundView({ students, payments, treasuryTxn, setTreasuryTxn, addLog, c
           </div>
 
           <label style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--text3)', display: 'block', marginBottom: 6 }}>الطالب</label>
-          <select value={studentId} onChange={e => setStudentId(e.target.value)}
-            style={{ width: '100%', background: 'var(--surface2)', border: '1px solid var(--border)', borderRadius: 9, padding: '10px 12px', color: 'var(--text)', fontFamily: 'Cairo,sans-serif', fontSize: '0.88rem', cursor: 'pointer', direction: 'rtl' }}>
-            <option value="">اختر الطالب...</option>
-            {students.filter(s => s.status === 'active').map(s => <option key={s.id} value={s.id}>{s.name} — {s.code}</option>)}
-          </select>
+          <StudentSearchSelect
+            students={students.filter(s => s.status === 'active')}
+            value={studentId}
+            onChange={(id) => setStudentId(id)}
+          />
         </div>
 
         {studentId && (
@@ -375,7 +407,9 @@ function RefundView({ students, payments, treasuryTxn, setTreasuryTxn, addLog, c
               <div style={{ fontSize: '0.85rem', color: 'var(--text3)' }}>الإجمالي المتاح: <strong style={{ color: 'var(--green)' }}>{formatCurrency(totalPaid)}</strong></div>
             </div>
 
-            {studentPayments.length === 0 ? (
+            {paymentsLoading ? (
+              <div style={{ textAlign: 'center', padding: 24, color: 'var(--text3)' }}>...جارِ التحميل</div>
+            ) : studentPayments.length === 0 ? (
               <div style={{ textAlign: 'center', padding: 24, color: 'var(--text3)' }}>لا توجد دفعات قابلة للاسترداد</div>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>

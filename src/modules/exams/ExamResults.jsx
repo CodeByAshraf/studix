@@ -1,8 +1,11 @@
 // src/modules/exams/ExamResults.jsx
-import { useMemo } from 'react';
+import { useEffect, useMemo } from 'react';
 import { useAppStore } from '../../store/app.store';
 import { scorePercent, scoreColor, scoreGrade, getExamStatsWithPass, getExamEligibleStudents, EXAM_TYPES } from '../../services/examService';
 import { formatDate } from '../../utils/helpers';
+import { pgGetGrades } from '../../services/api';
+import { useAsyncData } from '../../hooks/useAsyncData';
+import { useToast } from '../../components/Toast';
 // avatar helper (no hook — safe inside .map())
 const AV_PAL = [
   {bg:'rgba(59,130,246,.18)',color:'#3b82f6'},{bg:'rgba(16,185,129,.18)',color:'#10b981'},
@@ -24,8 +27,18 @@ function StatBox({ label, value, color = 'var(--text)', sub }) {
 }
 
 export default function ExamResults({ exam }) {
-  const grades               = useAppStore((s) => s.grades);
   const students             = useAppStore((s) => s.students);
+  const toast = useToast();
+
+  // C4 Grades/hwSubmissions Frontend Migration (Batch A, feature 004): scoped fetch
+  // (GET /api/grades?examId=) replaces the global grades store selector. getExamStatsWithPass
+  // below already internally re-filters by examId, so an exam-scoped array is fully compatible.
+  const { data: grades = [], loading: gradesLoading, error: gradesError } = useAsyncData(
+    () => pgGetGrades({ examId: exam.id }), [exam.id], []);
+
+  useEffect(() => {
+    if (gradesError) toast.error(gradesError.message || 'فشل تحميل درجات الامتحان');
+  }, [gradesError]);
 
   // Exams Phase 2: eligibility is grade-based (getExamEligibleStudents), never
   // Group-based. This also fixes a pre-existing bug where this roster (unlike
@@ -75,7 +88,7 @@ export default function ExamResults({ exam }) {
   ];
   const maxDist = Math.max(...dist.map(d => d.count), 1);
 
-  if (examGrades.length === 0) {
+  if (!gradesLoading && examGrades.length === 0) {
     return (
       <div style={{ textAlign:'center', padding:'48px 20px', color:'var(--text3)' }}>
         <div style={{ fontSize:44, marginBottom:12, opacity:.4 }}>📊</div>

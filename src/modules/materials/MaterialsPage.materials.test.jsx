@@ -127,7 +127,7 @@ describe('MaterialsPage — inv_materials write path (unified with InventoryPage
 
     expect(sentBody).toEqual({
       code: 'MAT-000001', name: 'مذكرة تجريبية', subject: 'رياضيات', grade: 'الصف الأول الثانوي',
-      price: 80, teacher: 'أ. أحمد', description: 'وصف تجريبي', addedAt: '2026-01-15',
+      price: 80, teacher: 'أ. أحمد', description: 'وصف تجريبي', addedAt: '2026-01-15T00:00:00.000Z',
     });
     expect(sentBody.id).toBeUndefined();
     expect(sentBody.createdAt).toBeUndefined();
@@ -218,7 +218,7 @@ describe('MaterialsPage — inv_materials write path (unified with InventoryPage
     expect(decodeURIComponent(sentId)).toBe('1');
     expect(sentBody).toEqual({
       name: 'اسم محدَّث', subject: 'رياضيات', grade: 'الصف الأول الثانوي', price: 100,
-      teacher: 'أ. محمد', description: 'وصف قديم', addedAt: '2026-01-01',
+      teacher: 'أ. محمد', description: 'وصف قديم', addedAt: '2026-01-01T00:00:00.000Z',
     });
     expect(sentBody.code).toBeUndefined();
     expect(sentBody.id).toBeUndefined();

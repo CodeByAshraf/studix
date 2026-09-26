@@ -1,5 +1,5 @@
 // src/modules/students/StudentsPage.jsx
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo, useCallback, useEffect } from 'react';
 import { useAppStore } from '../../store/app.store';
 import { useAuth }     from '../../store/auth.context';
 import { SectionBoundary } from '../../components/ErrorBoundary';
@@ -8,7 +8,8 @@ import Button              from '../../components/ui/Button';
 import { useToast }        from '../../components/Toast';
 import { useErrorHandler } from '../../hooks/useErrorHandler';
 import { createStudent, updateStudent, filterStudents } from '../../services/studentService';
-import { pgCreateStudent, pgUpdateStudent, pgDeleteStudent, pgCreateParent, pgGetCollection } from '../../services/api';
+import { pgCreateStudent, pgUpdateStudent, pgDeleteStudent, pgCreateParent, pgGetCollection, pgGetPayments, pgGetCommunications, pgGetAttendance, pgGetGrades, pgGetHwSubmissions } from '../../services/api';
+import { useAsyncData } from '../../hooks/useAsyncData';
 import { normalizeParentPhone } from '../communication/parentService';
 import { paginate, formatDate } from '../../utils/helpers';
 import StudentForm         from './StudentForm';
@@ -47,13 +48,8 @@ async function findOrCreateParentId(phone) {
 export default function StudentsPage() {
   const addLog               = useAppStore((s) => s.addLog);
   const admissions           = useAppStore((s) => s.admissions);
-  const attendance           = useAppStore((s) => s.attendance);
-  const communications       = useAppStore((s) => s.communications);
-  const grades               = useAppStore((s) => s.grades);
   const groups               = useAppStore((s) => s.groups);
-  const hwSubmissions        = useAppStore((s) => s.hwSubmissions);
   const inventoryTxn         = useAppStore((s) => s.inventoryTxn);
-  const payments             = useAppStore((s) => s.payments);
   const setStudents          = useAppStore((s) => s.setStudents);
   const students             = useAppStore((s) => s.students);
   const waReportLog          = useAppStore((s) => s.waReportLog);
@@ -83,6 +79,30 @@ export default function StudentsPage() {
 
   const pg = useMemo(() => paginate(filtered, page, PAGE_SIZE), [filtered, page]);
   const hasFilters = !!(search || filterGrade || filterGroup || filterStatus);
+
+  // C4 Attendance migration Phase 2: one batched GET /api/attendance?studentIds= for every
+  // student on the CURRENT page (not N requests, one per row) — feeds both the per-row
+  // AttendanceHeatMap (needs real records, not just a count, for its cell-by-cell tooltips)
+  // and, since the student being deleted is always one of the currently-visible rows, the
+  // delete-guard's count too (no separate fetch needed there — see handleDelete below).
+  const visibleStudentIds = useMemo(() => pg.items.map((s) => s.id), [pg.items]);
+  const visibleStudentIdsKey = visibleStudentIds.join(',');
+  const { data: visibleAttendance = [], error: attendanceErr } = useAsyncData(
+    () => (visibleStudentIds.length ? pgGetAttendance({ studentIds: visibleStudentIdsKey }) : Promise.resolve([])),
+    [visibleStudentIdsKey], []);
+
+  useEffect(() => {
+    if (attendanceErr) toast.error(attendanceErr.message || 'فشل تحميل حضور الطلاب');
+  }, [attendanceErr]);
+
+  const attendanceByStudent = useMemo(() => {
+    const map = new Map();
+    for (const r of visibleAttendance) {
+      if (!map.has(r.studentId)) map.set(r.studentId, []);
+      map.get(r.studentId).push(r);
+    }
+    return map;
+  }, [visibleAttendance]);
 
   const clearFilters = useCallback(() => { setSearch(''); setFilterGrade(''); setFilterGroup(''); setFilterStatus(''); setPage(1); }, []);
 
@@ -117,15 +137,28 @@ export default function StudentsPage() {
   // ترك الخطأ العام "فشل حذف الطالب" يظهر بلا سبب واضح.
   const handleDelete = useCallback(async () => {
     const s = modal.student;
-    const attendanceCount = attendance.filter(a => a.studentId === s.id).length;
+    // C4 Attendance migration Phase 2: reuses the same batched fetch that already feeds
+    // this row's AttendanceHeatMap (see visibleAttendance/attendanceByStudent above) — the
+    // student being deleted is always one of the currently-visible/-fetched rows (delete is
+    // only ever triggered from a rendered row), so no separate network request is needed
+    // for this guard.
+    const attendanceCount = (attendanceByStudent.get(s.id) ?? []).length;
     if (attendanceCount > 0) {
       toast.error(`لا يمكن حذف ${s.name} — له ${attendanceCount} سجل حضور. أوقفه بدلاً من حذفه (الحالة: موقوف).`);
       closeModal();
       return;
     }
-    // Phase 3B-5: grades الآن قيد التفعيل عبر PostgreSQL بقيد مفتاح خارجي NO ACTION
-    // على student_id — نفس فحص attendance أعلاه.
-    const gradesCount = grades.filter(g => g.studentId === s.id).length;
+    // C4 Grades/hwSubmissions Frontend Migration (Batch A, feature 004): بدل مصفوفة grades
+    // الكاملة من الـ store، يُجلَب عدد درجات هذا الطالب تحديداً فقط عبر GET /api/grades?studentId=
+    // (نفس نمط pgGetCommunications/pgGetPayments أدناه بالضبط).
+    let gradesCount;
+    try {
+      gradesCount = (await pgGetGrades({ studentId: s.id })).length;
+    } catch (e) {
+      toast.error(e.message || 'فشل التحقّق من درجات الطالب');
+      closeModal();
+      return;
+    }
     if (gradesCount > 0) {
       toast.error(`لا يمكن حذف ${s.name} — له ${gradesCount} درجة مسجّلة. أوقفه بدلاً من حذفه (الحالة: موقوف).`);
       closeModal();
@@ -141,13 +174,32 @@ export default function StudentsPage() {
       closeModal();
       return;
     }
-    const communicationsCount = communications.filter(c => c.studentId === s.id).length;
+    // Pre-Installer Audit C4: بدل مصفوفة communications الكاملة من الـ store (لم تعد
+    // تُحمَّل إقلاعياً — انظر db.middleware.js)، يُجلَب عدد سجلات تواصل هذا الطالب تحديداً
+    // فقط عبر GET /api/communications?studentId= (نفس نمط pgGetPayments أدناه بالضبط).
+    let communicationsCount;
+    try {
+      communicationsCount = (await pgGetCommunications({ studentId: s.id })).length;
+    } catch (e) {
+      toast.error(e.message || 'فشل التحقّق من سجلات تواصل الطالب');
+      closeModal();
+      return;
+    }
     if (communicationsCount > 0) {
       toast.error(`لا يمكن حذف ${s.name} — له ${communicationsCount} سجل تواصل. أوقفه بدلاً من حذفه (الحالة: موقوف).`);
       closeModal();
       return;
     }
-    const hwSubmissionsCount = hwSubmissions.filter(h => h.studentId === s.id).length;
+    // C4 Grades/hwSubmissions Frontend Migration (Batch A, feature 004): نفس مبدأ فحص grades
+    // أعلاه — عدد تسليمات هذا الطالب فقط عبر GET /api/hwSubmissions?studentId=.
+    let hwSubmissionsCount;
+    try {
+      hwSubmissionsCount = (await pgGetHwSubmissions({ studentId: s.id })).length;
+    } catch (e) {
+      toast.error(e.message || 'فشل التحقّق من تسليمات واجبات الطالب');
+      closeModal();
+      return;
+    }
     if (hwSubmissionsCount > 0) {
       toast.error(`لا يمكن حذف ${s.name} — له ${hwSubmissionsCount} تسليم واجب. أوقفه بدلاً من حذفه (الحالة: موقوف).`);
       closeModal();
@@ -159,7 +211,19 @@ export default function StudentsPage() {
       closeModal();
       return;
     }
-    const paymentsCount = payments.filter(p => p.studentId === s.id).length;
+    // Scalability Architecture Phase 4 Cutover 1: بدل مصفوفة payments الكاملة من الـ
+    // store، يُجلَب عدد مدفوعات هذا الطالب تحديداً فقط عبر GET /api/payments?studentId=
+    // (نفس نطاق .filter(p=>p.studentId===s.id) السابق بالضبط، مُتحقَّق تكافؤه في تدقيق
+    // Phase 4 Step 3). فشل الجلب نفسه يُعامَل كفشل التحقّق — لا نسمح بمتابعة الحذف بلا
+    // التأكّد فعلاً من عدم وجود مدفوعات مرتبطة (نفس مبدأ "فشل واضح لا افتراض صامت").
+    let paymentsCount;
+    try {
+      paymentsCount = (await pgGetPayments({ studentId: s.id })).length;
+    } catch (e) {
+      toast.error(e.message || 'فشل التحقّق من مدفوعات الطالب');
+      closeModal();
+      return;
+    }
     if (paymentsCount > 0) {
       toast.error(`لا يمكن حذف ${s.name} — له ${paymentsCount} دفعة مسجّلة. أوقفه بدلاً من حذفه (الحالة: موقوف).`);
       closeModal();
@@ -179,7 +243,7 @@ export default function StudentsPage() {
       toast.info(`تم حذف ${s.name}`);
       closeModal();
     }, { errorMsg: 'فشل حذف الطالب' });
-  }, [modal.student, attendance, grades, admissions, communications, hwSubmissions, inventoryTxn, payments, waReportLog, setStudents, run, toast, addLog, currentUser, closeModal]);
+  }, [modal.student, attendanceByStudent, admissions, inventoryTxn, waReportLog, setStudents, run, toast, addLog, currentUser, closeModal]);
 
   const selStyle = { background:'var(--surface2)', border:'1px solid var(--border)', borderRadius:9, padding:'8px 12px', color:'var(--text)', fontFamily:'Cairo,sans-serif', fontSize:'0.82rem', outline:'none', cursor:'pointer', direction:'rtl' };
   const btnStyle = (hover) => ({ padding:'4px 9px', borderRadius:6, border:'1px solid var(--border)', background:'var(--surface2)', fontSize:'0.72rem', cursor:'pointer', color:'var(--text2)', transition:'all 0.12s', fontFamily:'Cairo,sans-serif' });
@@ -266,7 +330,7 @@ export default function StudentsPage() {
                     <tbody>
                       {pg.items.map(student => {
                         const grp    = groups.find(g => g.id === student.groupId);
-                        const attRec = attendance.filter(a => a.studentId === student.id);
+                        const attRec = attendanceByStudent.get(student.id) ?? [];
                         return (
                           <tr key={student.id} style={{ cursor:'pointer', transition:'background 0.12s' }}
                             onMouseOver={e  => Array.from(e.currentTarget.cells).forEach(td => td.style.background='var(--surface2)')}

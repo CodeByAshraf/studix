@@ -85,14 +85,77 @@ export function getGroupSessions(groupId, records) {
     }));
 }
 
-export function getFrequentAbsentees(students, records, threshold = 3) {
+// Adapter for the two remaining callers of getFrequentAbsentees that still hold a raw,
+// already-loaded records array (AttendancePage.jsx's KPI tile, AttendanceAnalytics.jsx's
+// widget — neither is in scope for the C4 Attendance Phase 2 migration, which only covers
+// AttendanceReports.jsx's "frequent absentees" tab). Reuses getAttendanceStats per student so
+// this never disagrees with that function's own present/absent/late/pct computation.
+export function statsByStudentFromRecords(students, records) {
+  return new Map(students.map(s => [s.id, getAttendanceStats(s.id, records)]));
+}
+
+// C4 Attendance migration Phase 2 — statsByStudentId is a Map (or plain object) keyed by
+// studentId, each value shaped { total, present, absent, late } — the exact row shape
+// GET /api/attendance/aggregate?groupBy=student returns, same convention as GroupCard's
+// attendanceStats prop (see GroupCard.jsx/GroupsPage.jsx). Replaces the old raw-records
+// param; a student with no entry (no attendance history, or excluded from the request's
+// studentIds scope) is treated as zero attendance, not an error — see research.md §5.
+export function getFrequentAbsentees(students, statsByStudentId, threshold = 3) {
+  const getStats = (id) => (statsByStudentId instanceof Map ? statsByStudentId.get(id) : statsByStudentId[id]);
   return students
     .filter(s => s.status === 'active')
-    .map(s => ({ ...s, ...getAttendanceStats(s.id, records) }))
+    .map(s => {
+      const { total = 0, present = 0, absent = 0, late = 0 } = getStats(s.id) || {};
+      const pct = total > 0 ? Math.round(present / total * 100) : null;
+      return { ...s, total, present, absent, late, pct };
+    })
     .filter(s => s.absent >= threshold)
     .sort((a, b) => b.absent - a.absent);
 }
 
 export function getGroupAttendanceForDate(groupId, date, records) {
   return records.filter(r => r.groupId === groupId && r.date === date);
+}
+
+// ── Absence follow-up classification ───────────────────────────────────────────
+// نفس مبدأ reminderService.generateReminders بالضبط: مقارنة تقويمية (يوم كامل)، لا 24
+// ساعة — غياب يوم السبت يصبح "متأخر" يوم الأحد، لا بعد 24 ساعة بالضبط. لا مكتبة تاريخ/
+// منطقة زمنية جديدة، نفس أسلوب todayStr() في reminderService.js حرفياً.
+function todayDateStr() {
+  return new Date().toISOString().split('T')[0];
+}
+
+// followup غائب أو followStatus==='pending' = لم تتم المتابعة بعد (نفس المنطق المستخدَم
+// بالفعل في AbsenceFollowup.jsx: followup?.followStatus || 'pending'). أي حالة أخرى
+// (contacted/excused/unexcused) = متابعة مكتملة فعلياً → سجل.
+export function classifyAbsenceFollowups(attendance = [], absenceFollowup = [], students = []) {
+  const today = todayDateStr();
+  const studentIds = new Set(students.map(s => s.id));
+  const followupByAttendanceId = new Map(absenceFollowup.map(f => [f.attendanceId, f]));
+
+  const active = [];
+  const overdue = [];
+  const history = [];
+
+  for (const record of attendance) {
+    if (record.status !== 'absent') continue;
+    const student = students.find(s => s.id === record.studentId);
+    if (!student || !studentIds.has(student.id)) continue; // طالب محذوف — نفس فلتر AbsenceFollowup.jsx الحالي
+
+    const followup = followupByAttendanceId.get(record.id) || null;
+    const isCompleted = !!followup && followup.followStatus !== 'pending';
+    const item = { attendance: record, student, followup };
+
+    if (isCompleted) {
+      history.push(item);
+    } else if (record.date < today) {
+      overdue.push(item);
+    } else {
+      // record.date === today، أو تاريخ مستقبلي (نادر/غير متوقَّع عملياً) — يبقى ضمن
+      // القائمة النشطة بدل أن يختفي بصمت من الأقسام الثلاثة كلها.
+      active.push(item);
+    }
+  }
+
+  return { active, overdue, history };
 }

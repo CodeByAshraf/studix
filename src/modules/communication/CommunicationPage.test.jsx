@@ -20,7 +20,7 @@ vi.mock('../../services/api', async () => {
     pgUpdateCommunication: vi.fn(), pgUpdateCommTask: vi.fn(),
   };
 });
-import { pgCreateCommunication, pgCreateCommTask, pgUpdateCommunication, pgUpdateCommTask } from '../../services/api';
+import { pgCreateCommunication, pgCreateCommTask, pgUpdateCommunication, pgUpdateCommTask, pgGetCollection } from '../../services/api';
 
 function renderPage() {
   return render(
@@ -32,14 +32,62 @@ function renderPage() {
   );
 }
 
+// Pre-Installer Audit C4: communications/commTasks are no longer boot-loaded — the page
+// now fetches both itself on mount (pgGetCollection) and seeds the store with whatever
+// resolves. seedStore keeps that mount-time fetch in sync with what each test seeds
+// directly into the store, so it doesn't get silently overwritten by an empty-array
+// resolution the instant the component mounts.
 function seedStore(extra = {}) {
-  useAppStore.setState({ communications: [], commTasks: [], parents: [], students: [], admissions: [], ...extra });
+  const state = { communications: [], commTasks: [], parents: [], students: [], admissions: [], ...extra };
+  useAppStore.setState(state);
+  pgGetCollection.mockImplementation((name) => {
+    if (name === 'communications') return Promise.resolve(state.communications);
+    if (name === 'commTasks') return Promise.resolve(state.commTasks);
+    return Promise.resolve([]);
+  });
 }
 
 async function openFormAndSave() {
   fireEvent.click(screen.getByRole('button', { name: '+ تسجيل تواصل' }));
   fireEvent.click(await screen.findByRole('button', { name: 'حفظ' }));
 }
+
+describe('CommunicationPage — fetches its own data on mount (Pre-Installer Audit C4)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('fetches both communications and commTasks via pgGetCollection on mount and seeds the store with the result', async () => {
+    useAppStore.setState({ communications: [], commTasks: [], parents: [], students: [], admissions: [] });
+    const serverRecord = { id: 'c1', number: 'COM-000001', type: 'phoneCall', result: 'answered', status: 'open', phone: '', parentName: '', studentName: '', employee: '', notes: '', priority: 'normal', createdAt: '2026-01-01T00:00:00.000Z' };
+    const serverTask = { id: 't1', commId: null, title: 'متابعة', dueDate: '2026-01-01', dueTime: null, priority: 'normal', employee: '', status: 'pending' };
+    pgGetCollection.mockImplementation((name) => {
+      if (name === 'communications') return Promise.resolve([serverRecord]);
+      if (name === 'commTasks') return Promise.resolve([serverTask]);
+      return Promise.resolve([]);
+    });
+
+    renderPage();
+
+    await waitFor(() => expect(pgGetCollection).toHaveBeenCalledWith('communications'));
+    expect(pgGetCollection).toHaveBeenCalledWith('commTasks');
+    await waitFor(() => {
+      expect(useAppStore.getState().communications).toEqual([serverRecord]);
+      expect(useAppStore.getState().commTasks).toEqual([serverTask]);
+    });
+  });
+
+  it('surfaces a toast and does not crash when the fetch fails', async () => {
+    useAppStore.setState({ communications: [], commTasks: [], parents: [], students: [], admissions: [] });
+    pgGetCollection.mockImplementation((name) =>
+      name === 'communications' ? Promise.reject(new Error('PG GET /communications → 500')) : Promise.resolve([])
+    );
+
+    renderPage();
+
+    expect(await screen.findByText(/PG GET \/communications/)).toBeInTheDocument();
+    // page still renders normally, no crash
+    expect(screen.getByRole('button', { name: '+ تسجيل تواصل' })).toBeInTheDocument();
+  });
+});
 
 describe('CommunicationPage — server-truth write path (create only)', () => {
   beforeEach(() => {
@@ -151,7 +199,7 @@ describe('CommunicationPage — mark-complete (Product Completion Phase 2, Findi
 
   it('task completion — success: calls pgUpdateCommTask, merges the server response, task drops out of the priority list', async () => {
     const task = { id: 't1', commId: null, title: 'متابعة هامة', dueDate: '2026-01-01', dueTime: null, priority: 'high', employee: 'موظف', status: 'pending' };
-    useAppStore.setState({ communications: [], commTasks: [task], parents: [] });
+    seedStore({ commTasks: [task] });
     const saved = { ...task, status: 'completed' };
     pgUpdateCommTask.mockResolvedValue(saved);
 
@@ -169,7 +217,7 @@ describe('CommunicationPage — mark-complete (Product Completion Phase 2, Findi
 
   it('task completion — failure: leaves commTasks unchanged and shows the real error', async () => {
     const task = { id: 't1', commId: null, title: 'متابعة هامة', dueDate: '2026-01-01', dueTime: null, priority: 'high', employee: 'موظف', status: 'pending' };
-    useAppStore.setState({ communications: [], commTasks: [task], parents: [] });
+    seedStore({ commTasks: [task] });
     pgUpdateCommTask.mockRejectedValue(new Error('PG PUT /commTasks/t1 → 500'));
 
     renderPage();
@@ -182,7 +230,7 @@ describe('CommunicationPage — mark-complete (Product Completion Phase 2, Findi
 
   it('communication completion — success: calls pgUpdateCommunication, merges the server response', async () => {
     const record = { id: 'c1', number: 'COM-000001', type: 'phoneCall', result: 'answered', status: 'open', phone: '01000000001', parentName: '', studentName: '', employee: 'موظف', notes: '', priority: 'normal', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' };
-    useAppStore.setState({ communications: [record], commTasks: [], parents: [] });
+    seedStore({ communications: [record] });
     const saved = { ...record, status: 'completed', updatedAt: '2026-01-02T00:00:00.000Z' };
     pgUpdateCommunication.mockResolvedValue(saved);
 
@@ -200,7 +248,7 @@ describe('CommunicationPage — mark-complete (Product Completion Phase 2, Findi
 
   it('communication completion — failure: leaves communications unchanged and shows the real error', async () => {
     const record = { id: 'c1', number: 'COM-000001', type: 'phoneCall', result: 'answered', status: 'open', phone: '01000000001', parentName: '', studentName: '', employee: 'موظف', notes: '', priority: 'normal', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' };
-    useAppStore.setState({ communications: [record], commTasks: [], parents: [] });
+    seedStore({ communications: [record] });
     pgUpdateCommunication.mockRejectedValue(new Error('PG PUT /communications/c1 → 500'));
 
     renderPage();

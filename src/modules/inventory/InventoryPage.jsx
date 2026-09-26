@@ -10,13 +10,14 @@ import { useAppStore } from '../../store/app.store';
 import { useAuth } from '../../store/auth.context';
 import { SectionBoundary } from '../../components/ErrorBoundary';
 import { useToast } from '../../components/Toast';
+import { ConfirmModal } from '../../components/ui/Modal';
 import { MaterialStatus } from './constants';
 import {
   buildInventoryTxn, getMaterialStats,
   getInventoryKpis, buildCountAdjustment, nextMaterialCode,
 } from './inventoryService';
 import { validateMaterial, validateTxn, canDeleteMaterial, hasErrors } from './validators';
-import { pgCreateMaterial, pgUpdateMaterial, pgDeleteMaterial, pgGetCollection } from '../../services/api';
+import { pgCreateMaterial, pgUpdateMaterial, pgDeleteMaterial, pgGetCollection, pgCreateInventoryTxn } from '../../services/api';
 import { TXN_TYPE_META, STOCK_LEVEL_META } from './displayMeta';
 import MaterialFormModal from './components/MaterialFormModal';
 import TxnFormModal from './components/TxnFormModal';
@@ -43,6 +44,8 @@ export default function InventoryPage() {
   const [editingMat, setEditingMat] = useState(null);
   const [showTxnForm, setShowTxnForm] = useState(false);
   const [showCountForm, setShowCountForm] = useState(false);
+  const [confirmDeleteMat, setConfirmDeleteMat] = useState(null);
+  const [deleting, setDeleting] = useState(false);
 
   // ── مواد مفلترة بالبحث ──
   const filteredMaterials = useMemo(() => {
@@ -103,45 +106,74 @@ export default function InventoryPage() {
   // ── حذف مادة (ممنوع لو لها حركات) ──
   // الفحص المحلي (canDeleteMaterial) أولاً كتحقق سريع؛ رفض الخادم (409، FK على
   // inventory_txn) هو الحارس الفعلي — نفس نمط MaterialsPage.jsx's pgDeleteMaterial.
-  const handleDeleteMaterial = async (mat) => {
+  // Pre-installer review fix (F-Inv1): كان الحذف يُنفَّذ فوراً بلا أي تأكيد عندما تمر
+  // canDeleteMaterial محلياً (أي مادة بلا حركات مخزون) — نقرة واحدة تحذف بلا رجعة. الآن
+  // يُطلَب تأكيد عبر ConfirmModal أولاً، بنفس النمط المستخدَم بالفعل لحذف الطالب في
+  // StudentsPage.jsx.
+  const requestDeleteMaterial = (mat) => {
     if (!canDeleteMaterial(mat.id, txns)) {
       toast.error('لا يمكن حذف مادة لها حركات مخزون');
       return;
     }
+    setConfirmDeleteMat(mat);
+  };
+
+  const handleDeleteMaterial = async () => {
+    const mat = confirmDeleteMat;
+    if (!mat) return;
+    setDeleting(true);
     try {
       await pgDeleteMaterial(mat.id);
       setMaterials((prev) => prev.filter((m) => m.id !== mat.id));
       if (selectedId === mat.id) setSelectedId(null);
       toast.info('تم حذف المادة');
+      setConfirmDeleteMat(null);
     } catch (err) {
       toast.error(err.message || 'فشل حذف المادة');
+    } finally {
+      setDeleting(false);
     }
   };
 
   // ── تسجيل حركة ──
-  const handleSaveTxn = (data) => {
+  // State Synchronization Audit fix — كانت buildInventoryTxn/addTxn تُدرِجان صفاً محلياً
+  // فقط (id/number يولّدهما العميل) بلا أي نداء خادم إطلاقاً، فتُفقَد الحركة صامتاً عند
+  // إعادة التحميل. الحساب/التحقق المحليان (validateTxn/buildInventoryTxn) لم يتغيّرا —
+  // فقط id/number المحليان الآن يُستبدَلان بنسخة الخادم الحقيقية (تُنشئ number فريداً
+  // بقفل استشاري على الخادم) قبل تبنّيها في الحالة المحلية.
+  const handleSaveTxn = async (data) => {
     const errors = validateTxn(
       { ...data, materialId: selected.id },
       txns,
       { allowNegative: settings.allowNegativeStock }
     );
     if (hasErrors(errors)) { toast.error(Object.values(errors)[0]); return; }
-    const txn = buildInventoryTxn({ ...data, materialId: selected.id, employee }, txns, employee);
-    addTxn(txn);
-    toast.success(`تم تسجيل الحركة (${txn.number})`);
-    setShowTxnForm(false);
+    const localTxn = buildInventoryTxn({ ...data, materialId: selected.id, employee }, txns, employee);
+    try {
+      const saved = await pgCreateInventoryTxn(localTxn);
+      addTxn(saved);
+      toast.success(`تم تسجيل الحركة (${saved.number})`);
+      setShowTxnForm(false);
+    } catch (err) {
+      toast.error(err.message || 'فشل تسجيل الحركة');
+    }
   };
 
   // ── جرد فعلي → تسوية تلقائية بالفرق ──
-  const handleSaveCount = (countedQty) => {
+  const handleSaveCount = async (countedQty) => {
     const counted = Number(countedQty);
     if (counted < 0 || Number.isNaN(counted)) { toast.error('أدخل كمية صحيحة'); return; }
-    const txn = buildCountAdjustment(selected.id, counted, txns, employee);
-    if (!txn) { toast.info('الكمية المعدودة مطابقة للمحسوبة — لا حاجة لتسوية'); setShowCountForm(false); return; }
-    addTxn(txn);
-    const diff = txn.quantity;
-    toast.success(`تم تسجيل الجرد — ${diff > 0 ? 'زيادة' : 'عجز'} ${Math.abs(diff)} نسخة`);
-    setShowCountForm(false);
+    const localTxn = buildCountAdjustment(selected.id, counted, txns, employee);
+    if (!localTxn) { toast.info('الكمية المعدودة مطابقة للمحسوبة — لا حاجة لتسوية'); setShowCountForm(false); return; }
+    try {
+      const saved = await pgCreateInventoryTxn(localTxn);
+      addTxn(saved);
+      const diff = saved.quantity;
+      toast.success(`تم تسجيل الجرد — ${diff > 0 ? 'زيادة' : 'عجز'} ${Math.abs(diff)} نسخة`);
+      setShowCountForm(false);
+    } catch (err) {
+      toast.error(err.message || 'فشل تسجيل الجرد');
+    }
   };
 
   return (
@@ -263,7 +295,7 @@ export default function InventoryPage() {
                 <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
                   <button onClick={() => setShowCountForm(true)} style={{ ...addBtn, flex: 1 }}>📋 جرد فعلي</button>
                   <button onClick={() => { setEditingMat(selected); setShowMatForm(true); }} style={{ ...addBtn, flex: 1, background: 'transparent', color: 'var(--accent)', border: '1px solid var(--accent)' }}>تعديل</button>
-                  <button onClick={() => handleDeleteMaterial(selected)} style={{ ...addBtn, background: 'transparent', color: 'var(--red)', border: '1px solid var(--red)' }}>حذف</button>
+                  <button onClick={() => requestDeleteMaterial(selected)} style={{ ...addBtn, background: 'transparent', color: 'var(--red)', border: '1px solid var(--red)' }}>حذف</button>
                 </div>
               </>
             )}
@@ -297,6 +329,10 @@ export default function InventoryPage() {
           onSave={handleSaveCount}
         />
       )}
+      <ConfirmModal isOpen={!!confirmDeleteMat} onClose={() => setConfirmDeleteMat(null)} onConfirm={handleDeleteMaterial}
+        loading={deleting} title="تأكيد الحذف"
+        message={`هل أنت متأكد من حذف "${confirmDeleteMat?.name}"؟ لا يمكن التراجع.`}
+        confirmLabel="نعم، احذف"/>
     </SectionBoundary>
   );
 }

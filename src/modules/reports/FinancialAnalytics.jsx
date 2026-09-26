@@ -1,71 +1,113 @@
 // src/modules/reports/FinancialAnalytics.jsx
-import { useMemo } from 'react';
+import { useEffect, useMemo } from 'react';
 import { useAppStore } from '../../store/app.store';
 import { formatCurrency, formatDate } from '../../utils/helpers';
 import { MetricCard, BarChart, DonutChart, AnalyticsCard, SparkLine, StatRow } from './components/ChartComponents';
-import { MONTHS_AR, PAYMENT_METHODS, PAYMENT_STATUS, getNetRevenue } from '../../services/paymentService';
+import {
+  MONTHS_AR, PAYMENT_METHODS, PAYMENT_STATUS, getNetRevenue,
+  zeroFillMonthlyAggregate, zeroFillGroupAggregate,
+} from '../../services/paymentService';
+import { pgGetPayments, pgGetPaymentAggregates } from '../../services/api';
+import { useAsyncData } from '../../hooks/useAsyncData';
+import { useToast } from '../../components/Toast';
 
 export default function FinancialAnalytics() {
   const groups               = useAppStore((s) => s.groups);
-  const payments             = useAppStore((s) => s.payments);
   const students             = useAppStore((s) => s.students);
   const treasuryTxn          = useAppStore((s) => s.treasuryTxn);
+  const toast = useToast();
+
+  const currentMonth = new Date().getMonth() + 1;
+  const currentYear  = new Date().getFullYear();
+  // MEDIUM-A Finding 1: نفس شهر ديسمبر/يناير عبر تغيير السنة — الشهر السابق قد يقع في
+  // سنة مختلفة (لو currentMonth === يناير، الشهر السابق هو ديسمبر السنة الماضية).
+  const lastMonthNum  = currentMonth - 1 || 12;
+  const lastMonthYear = currentMonth === 1 ? currentYear - 1 : currentYear;
+  const todayStr = new Date().toISOString().split('T')[0];
+
+  // Scalability Architecture Phase 4 Cutover 1: بدل مصفوفة payments الكاملة من الـ
+  // store، كل رقم/رسم هنا يُجلَب الآن عبر أضيق استعلام يخدمه فقط (GET /api/payments أو
+  // /api/payments/aggregate) — بلا أي تغيير على صيغة أي حساب (نفس getNetRevenue/فلاتر
+  // PAYMENT_METHODS/PAYMENT_STATUS بالضبط)، مُتحقَّق تكافؤها جميعاً في تدقيق Phase 4
+  // Step 3. currentMonthPayments (صفوف خام) يُعاد استخدامها لكل من monthRev وunpaidCount/
+  // collectRate معاً — نفس نمط Dashboard.jsx تماماً.
+  const { data: currentMonthPayments = [], error: currentMonthErr } = useAsyncData(
+    () => pgGetPayments({ month: currentMonth, year: currentYear }), [currentMonth, currentYear], []);
+  const { data: lastMonthAgg = [], error: lastMonthErr } = useAsyncData(
+    () => pgGetPaymentAggregates({ groupBy: 'none', month: lastMonthNum, year: lastMonthYear }), [lastMonthNum, lastMonthYear], []);
+  const { data: totalAgg = [], error: totalErr } = useAsyncData(
+    () => pgGetPaymentAggregates({ groupBy: 'none' }), [], []);
+  const { data: monthlyAggRows = [], error: monthlyErr } = useAsyncData(
+    () => pgGetPaymentAggregates({ groupBy: 'month', year: currentYear }), [currentYear], []);
+  const { data: methodAggRows = [], error: methodErr } = useAsyncData(
+    () => pgGetPaymentAggregates({ groupBy: 'method' }), [], []);
+  const { data: statusAggRows = [], error: statusErr } = useAsyncData(
+    () => pgGetPaymentAggregates({ groupBy: 'status' }), [], []);
+  const { data: groupAggRows = [], error: groupErr } = useAsyncData(
+    () => pgGetPaymentAggregates({ groupBy: 'group' }), [], []);
+  const { data: todayPayments = [], error: todayErr } = useAsyncData(
+    () => pgGetPayments({ date: todayStr }), [todayStr], []);
+  const { data: recentPayments = [], error: recentErr } = useAsyncData(
+    () => pgGetPayments({ orderBy: 'date_desc', limit: 8 }), [], []);
+
+  useEffect(() => {
+    const err = currentMonthErr || lastMonthErr || totalErr || monthlyErr || methodErr || statusErr || groupErr || todayErr || recentErr;
+    if (err) toast.error(err.message || 'فشل تحميل بيانات التحليل المالي');
+  }, [currentMonthErr, lastMonthErr, totalErr, monthlyErr, methodErr, statusErr, groupErr, todayErr, recentErr]);
 
   const stats = useMemo(() => {
-    const total       = getNetRevenue(payments, treasuryTxn);
-    const currentMonth= new Date().getMonth()+1;
-    const currentYear = new Date().getFullYear();
-    const monthRev    = getNetRevenue(payments.filter(p=>p.month===currentMonth&&(!p.year||p.year===currentYear)), treasuryTxn);
-    // MEDIUM-A Finding 1: نفس شهر ديسمبر/يناير عبر تغيير السنة — الشهر السابق قد يقع في
-    // سنة مختلفة (لو currentMonth === يناير، الشهر السابق هو ديسمبر السنة الماضية).
-    const lastMonthNum = currentMonth-1||12;
-    const lastMonthYear= currentMonth===1 ? currentYear-1 : currentYear;
-    const lastMonthRev= getNetRevenue(payments.filter(p=>p.month===lastMonthNum&&(!p.year||p.year===lastMonthYear)), treasuryTxn);
-    const growth      = lastMonthRev>0 ? Math.round(((monthRev-lastMonthRev)/lastMonthRev)*100) : null;
+    const total      = totalAgg[0]?.revenue ?? 0;
+    const totalCount = totalAgg[0]?.count ?? 0;
+    const monthRev  = getNetRevenue(currentMonthPayments, treasuryTxn);
+    const lastMonthRev = lastMonthAgg[0]?.revenue ?? 0;
+    const growth    = lastMonthRev>0 ? Math.round(((monthRev-lastMonthRev)/lastMonthRev)*100) : null;
 
-    // Monthly breakdown (12 months)
-    const monthly = Array.from({length:12},(_,i) => {
-      const m = i+1;
-      const rev = getNetRevenue(payments.filter(p=>p.month===m&&(!p.year||p.year===currentYear)), treasuryTxn);
-      return { label:MONTHS_AR[m].substring(0,5), value:rev, color: m===currentMonth?'var(--accent)':'#3b82f6' };
-    });
+    // Monthly breakdown (12 months) — zeroFillMonthlyAggregate يملأ الشهور الغائبة بصفر.
+    const monthly = zeroFillMonthlyAggregate(monthlyAggRows).map(({ month, revenue }) => ({
+      label: MONTHS_AR[month].substring(0,5), value: revenue, color: month===currentMonth?'var(--accent)':'#3b82f6',
+    }));
 
     // By payment method
+    const methodCounts = new Map(methodAggRows.map(r => [r.key, r.count]));
     const byMethod = Object.entries(PAYMENT_METHODS).map(([k,v]) => ({
       label: v.label,
-      value: payments.filter(p=>p.method===k).length,
+      value: methodCounts.get(k) ?? 0,
       icon:  v.icon,
     })).filter(d=>d.value>0).sort((a,b)=>b.value-a.value);
 
     // By status
+    const statusCounts = new Map(statusAggRows.map(r => [r.key, r.count]));
     const byStatus = Object.entries(PAYMENT_STATUS).map(([k,v]) => ({
       label: v.label,
-      value: payments.filter(p=>p.status===k).length,
+      value: statusCounts.get(k) ?? 0,
       color: v.color,
     })).filter(d=>d.value>0);
 
-    // By group
-    const byGroup = groups.map(g => ({
-      label:   g.name.split('—')[0].trim().substring(0,14),
-      value:   getNetRevenue(payments.filter(p=>p.groupId===g.id), treasuryTxn),
-      color:   g.color||'#3b82f6',
+    // By group — zeroFillGroupAggregate يضمن ظهور كل مجموعة (بصفر لو بلا دفعات) قبل
+    // فلترة القيم>0، تماماً كسلوك groups.map(...) المحلي السابق.
+    const byGroup = zeroFillGroupAggregate(groupAggRows, groups).map(g => ({
+      label: g.name.split('—')[0].trim().substring(0,14),
+      value: g.revenue,
+      color: g.color||'#3b82f6',
     })).sort((a,b)=>b.value-a.value).filter(d=>d.value>0);
 
     // Daily this month
-    const todayStr = new Date().toISOString().split('T')[0];
-    const todayRev = getNetRevenue(payments.filter(p=>p.date===todayStr), treasuryTxn);
+    const todayRev = getNetRevenue(todayPayments, treasuryTxn);
 
     // Recent payments
-    const recent = [...payments].sort((a,b)=>b.date.localeCompare(a.date)).slice(0,8);
+    const recent = recentPayments;
 
     // Unpaid count
     const activeStudents = students.filter(s=>s.status==='active');
-    const paidThisMonth  = new Set(payments.filter(p=>p.month===currentMonth&&(!p.year||p.year===currentYear)&&p.status==='paid').map(p=>p.studentId));
+    const paidThisMonth  = new Set(currentMonthPayments.filter(p=>p.status==='paid').map(p=>p.studentId));
     const unpaidCount    = activeStudents.filter(s=>!paidThisMonth.has(s.id)).length;
     const collectRate    = activeStudents.length ? Math.round((activeStudents.length-unpaidCount)/activeStudents.length*100) : null;
 
-    return { total, monthRev, lastMonthRev, growth, monthly, byMethod, byStatus, byGroup, todayRev, recent, unpaidCount, collectRate };
-  }, [payments, students, groups, treasuryTxn]);
+    return { total, totalCount, monthRev, lastMonthRev, growth, monthly, byMethod, byStatus, byGroup, todayRev, recent, unpaidCount, collectRate };
+  }, [
+    totalAgg, currentMonthPayments, lastMonthAgg, monthlyAggRows, methodAggRows, statusAggRows,
+    groupAggRows, groups, todayPayments, recentPayments, students, treasuryTxn, currentMonth,
+  ]);
 
   const PALETTE = [
     {bg:'rgba(59,130,246,.18)',color:'#3b82f6'},{bg:'rgba(16,185,129,.18)',color:'#10b981'},
@@ -144,7 +186,7 @@ export default function FinancialAnalytics() {
       </div>
 
       {/* Recent payments */}
-      <AnalyticsCard title="آخر المدفوعات" subtitle={`${payments.length} دفعة إجمالاً`}>
+      <AnalyticsCard title="آخر المدفوعات" subtitle={`${stats.totalCount} دفعة إجمالاً`}>
         <div style={{ overflowX:'auto' }}>
           <table style={{ width:'100%', borderCollapse:'collapse', fontSize:'0.82rem' }}>
             <thead>

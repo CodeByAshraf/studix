@@ -6,6 +6,13 @@
 // Exams Phase 2: الروستر أصبح grade-based (getExamEligibleStudents) — EXAM/S1/S2 لهما
 // نفس GRADE صراحةً هنا (لا صدفة قيمتين undefined متطابقتين)، وS3 له صف مختلف ليثبت
 // الاستبعاد فعلياً، لا مجرد المجموعة (groupId مُبقًى على EXAM فقط كمرجع تاريخي، غير مقروء).
+//
+// C4 Grades/hwSubmissions Frontend Migration (Batch A, feature 004): GradeEntry now fetches
+// its grades scoped to this exam (GET /api/grades?examId=) instead of reading the store's
+// grades array, and gates the editable table's mount behind that fetch's loading flag
+// (research.md §5 of feature 004's spec — the table's local state is a one-time useState lazy
+// initializer, so it must never mount against unresolved data). Every test below now mocks
+// pgGetGrades and awaits the form's first interactive element before interacting with it.
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom';
@@ -16,9 +23,9 @@ import { ToastProvider } from '../../components/Toast';
 
 vi.mock('../../services/api', async () => {
   const actual = await vi.importActual('../../services/api');
-  return { ...actual, pgSaveExamGrades: vi.fn() };
+  return { ...actual, pgSaveExamGrades: vi.fn(), pgGetGrades: vi.fn() };
 });
-import { pgSaveExamGrades } from '../../services/api';
+import { pgSaveExamGrades, pgGetGrades } from '../../services/api';
 
 const GROUP_ID = 'g1';
 const GRADE_6 = 'الصف السادس الابتدائي';
@@ -53,6 +60,7 @@ describe('GradeEntry — server-truth write path', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     seedStore();
+    pgGetGrades.mockResolvedValue([]);
   });
 
   it('does NOT touch local grades before the backend call resolves, and reconciles with the server response on success', async () => {
@@ -64,7 +72,7 @@ describe('GradeEntry — server-truth write path', () => {
     pgSaveExamGrades.mockImplementation(() => new Promise((resolve) => { resolveCall = resolve; }));
 
     renderPage();
-    fireEvent.click(screen.getByRole('button', { name: /حفظ الدرجات/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /حفظ الدرجات/ }));
 
     expect(useAppStore.getState().grades).toEqual([]);
 
@@ -79,7 +87,7 @@ describe('GradeEntry — server-truth write path', () => {
     pgSaveExamGrades.mockRejectedValue(new Error('PG PUT /exam-grades/e1 → 500'));
 
     renderPage();
-    fireEvent.click(screen.getByRole('button', { name: /حفظ الدرجات/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /حفظ الدرجات/ }));
 
     await waitFor(() => expect(pgSaveExamGrades).toHaveBeenCalledTimes(1));
 
@@ -91,7 +99,7 @@ describe('GradeEntry — server-truth write path', () => {
     pgSaveExamGrades.mockResolvedValue({ examId: EXAM.id, records: [] });
 
     renderPage();
-    fireEvent.click(screen.getByRole('button', { name: /حفظ الدرجات/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /حفظ الدرجات/ }));
 
     await waitFor(() => expect(pgSaveExamGrades).toHaveBeenCalledTimes(1));
     const [examId, records] = pgSaveExamGrades.mock.calls[0];
@@ -103,9 +111,9 @@ describe('GradeEntry — server-truth write path', () => {
     expect(records.some(r => r.studentId === S3)).toBe(false); // grade 7 — excluded
   });
 
-  it('Exams Phase 2: only matching-grade students are rendered in the roster — a different-grade student never appears', () => {
+  it('Exams Phase 2: only matching-grade students are rendered in the roster — a different-grade student never appears', async () => {
     renderPage();
-    expect(screen.getByText('Student One')).toBeInTheDocument();
+    expect(await screen.findByText('Student One')).toBeInTheDocument();
     expect(screen.getByText('Student Two')).toBeInTheDocument();
     expect(screen.queryByText('Student Three')).not.toBeInTheDocument();
   });
@@ -118,7 +126,7 @@ describe('GradeEntry — server-truth write path', () => {
     pgSaveExamGrades.mockResolvedValue({ examId: EXAM.id, records: serverRecords });
 
     renderPage();
-    fireEvent.click(screen.getByRole('button', { name: /حفظ الدرجات/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /حفظ الدرجات/ }));
 
     await waitFor(() => {
       const grades = useAppStore.getState().grades;
@@ -126,5 +134,42 @@ describe('GradeEntry — server-truth write path', () => {
       expect(grades.find(g => g.id === 'unrelated-1')).toBeTruthy();
       expect(grades.find(g => g.id === 'srv-1')).toBeTruthy();
     });
+  });
+
+  // feature 004 — scoped grades fetch (GET /api/grades?examId=) replaces the global store read.
+  it('fetches GET /api/grades scoped to this exam, and pre-fills each student\'s previously-saved score/absence exactly', async () => {
+    pgGetGrades.mockResolvedValue([
+      { id: 'g1', examId: EXAM.id, studentId: S1, score: 77, absent: false },
+      { id: 'g2', examId: EXAM.id, studentId: S2, score: null, absent: true },
+    ]);
+
+    renderPage();
+    await screen.findByRole('button', { name: /حفظ الدرجات/ });
+
+    expect(pgGetGrades).toHaveBeenCalledWith({ examId: EXAM.id });
+    expect(screen.getByDisplayValue('77')).toBeInTheDocument();
+    // S2 is marked absent — its "✓ حاضر" toggle button (shown only while absent) confirms
+    // the pre-filled absence state, not just a visual default.
+    expect(screen.getAllByText('✓ حاضر')).toHaveLength(1);
+  });
+
+  it('does not mount the editable table until the scoped grades fetch resolves (research.md §5)', async () => {
+    let resolveFetch;
+    pgGetGrades.mockImplementation(() => new Promise((resolve) => { resolveFetch = resolve; }));
+
+    renderPage();
+    expect(screen.queryByRole('button', { name: /حفظ الدرجات/ })).not.toBeInTheDocument();
+
+    resolveFetch([]);
+    expect(await screen.findByRole('button', { name: /حفظ الدرجات/ })).toBeInTheDocument();
+  });
+
+  // Closes analyze finding U1 (FR-011): a failed scoped fetch must surface a visible error.
+  it('surfaces a visible error when the grades fetch fails, using the existing toast convention', async () => {
+    pgGetGrades.mockRejectedValue(new Error('PG GET /grades → 500'));
+
+    renderPage();
+
+    expect(await screen.findByText(/PG GET \/grades/)).toBeInTheDocument();
   });
 });

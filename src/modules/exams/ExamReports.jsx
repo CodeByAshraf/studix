@@ -1,10 +1,26 @@
 // src/modules/exams/ExamReports.jsx
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useAppStore } from '../../store/app.store';
-import { getTopStudents, getWeakStudents, scoreColor } from '../../services/examService';
+import { scoreColor } from '../../services/examService';
 import { PrintHeader } from '../../components/shared';
 import { openStudentExamReport, openGroupExamReport } from './buildExamReport';
 import Button from '../../components/ui/Button';
+import StudentSearchSelect from '../../components/ui/StudentSearchSelect';
+import { pgGetGradesAggregate, pgGetGrades } from '../../services/api';
+import { useAsyncData } from '../../hooks/useAsyncData';
+import { useToast } from '../../components/Toast';
+
+// Phase 1D (Grades global-read migration) — joins the students already held in the store with
+// a groupBy=student aggregate row {key,avgPct,examCount,failCount}; a student absent from the
+// aggregate (no grades yet) maps to null/0, same default getTopStudents/getWeakStudents/
+// RankingTable produced when filtering an empty sg array locally.
+function joinStudentAggregate(students, aggRows) {
+  const byId = new Map(aggRows.map((r) => [r.key, r]));
+  return students.filter((s) => s.status === 'active').map((s) => {
+    const agg = byId.get(s.id);
+    return { ...s, avgPct: agg?.avgPct ?? null, examCount: agg?.examCount ?? 0, failCount: agg?.failCount ?? 0 };
+  });
+}
 // avatar helper (no hook — safe inside .map())
 const AV_PAL = [
   {bg:'rgba(59,130,246,.18)',color:'#3b82f6'},{bg:'rgba(16,185,129,.18)',color:'#10b981'},
@@ -112,30 +128,33 @@ function TopStudentsPodium({ topStudents }) {
 }
 
 // ── Full ranking table ───────────────────────────────────────
-function RankingTable({ students, grades, exams }) {
+// Phase 1D: studentAgg is the unfiltered groupBy=student aggregate shared with the Top/Weak
+// tabs; when filterExam is set, this table fetches its OWN examId-scoped aggregate instead
+// (both the average and examCount then reflect only that one exam) — same behavior the old
+// client-side `grades.filter(g => g.examId === filterExam)` produced, now computed server-side.
+function RankingTable({ students, exams, studentAgg }) {
   const [filterExam, setFilterExam] = useState('');
+  const toast = useToast();
+
+  const { data: filteredAgg, error: filteredAggError } = useAsyncData(
+    () => (filterExam ? pgGetGradesAggregate({ groupBy: 'student', examId: filterExam }) : Promise.resolve(null)),
+    [filterExam], null,
+  );
+
+  useEffect(() => {
+    if (filteredAggError) toast.error(filteredAggError.message || 'فشل تحميل ترتيب الطلاب');
+  }, [filteredAggError]);
+
+  const activeAgg = filterExam ? (filteredAgg ?? []) : studentAgg;
 
   const ranking = useMemo(() => {
-    const filteredGrades = filterExam ? grades.filter(g => g.examId === filterExam) : grades;
-    const filteredExams  = filterExam ? exams.filter(e => e.id === filterExam)     : exams;
-
-    return students
-      .filter(s => s.status === 'active')
-      .map(s => {
-        const sg = filteredGrades.filter(g => g.studentId === s.id && !g.absent && g.score !== null);
-        if (!sg.length) return { ...s, avgPct:null, examCount:0 };
-        const avg = sg.reduce((sum, g) => {
-          const exam = filteredExams.find(e => e.id === g.examId);
-          return sum + (exam ? (g.score/exam.total)*100 : 0);
-        }, 0) / sg.length;
-        return { ...s, avgPct: Math.round(avg), examCount: sg.length };
-      })
+    return joinStudentAggregate(students, activeAgg)
       .sort((a,b) => {
         if (a.avgPct === null && b.avgPct !== null) return 1;
         if (a.avgPct !== null && b.avgPct === null) return -1;
         return (b.avgPct ?? -1) - (a.avgPct ?? -1);
       });
-  }, [students, grades, exams, filterExam]);
+  }, [students, activeAgg]);
 
   return (
     <div>
@@ -201,10 +220,17 @@ function RankingTable({ students, grades, exams }) {
 }
 
 // ── Weak students ────────────────────────────────────────────
-function WeakStudentsView({ students, groups, grades, exams }) {
+// Phase 1D: threshold-filters the SAME shared studentAgg the Top Students tab already
+// fetched — no second network call for this tab.
+function WeakStudentsView({ students, groups, studentAgg }) {
   const [threshold, setThreshold] = useState(60);
 
-  const weak = useMemo(() => getWeakStudents(students, grades, exams, threshold), [students, grades, exams, threshold]);
+  const weak = useMemo(
+    () => joinStudentAggregate(students, studentAgg)
+      .filter((s) => s.avgPct !== null && s.avgPct < threshold)
+      .sort((a, b) => a.avgPct - b.avgPct),
+    [students, studentAgg, threshold],
+  );
 
   return (
     <div>
@@ -274,13 +300,26 @@ function WeakStudentsView({ students, groups, grades, exams }) {
 // ─────────────────────────────────────────────────────────────
 export default function ExamReports() {
   const exams                = useAppStore((s) => s.exams);
-  const grades               = useAppStore((s) => s.grades);
   const groups               = useAppStore((s) => s.groups);
   const students             = useAppStore((s) => s.students);
   const centerProfile        = useAppStore((s) => s.centerProfile);
+  const toast = useToast();
   const [tab, setTab] = useState('top');
 
-  const topStudents = useMemo(() => getTopStudents(students, grades, exams, 10), [students, grades, exams]);
+  // Phase 1D (Grades global-read migration) — one unfiltered groupBy=student aggregate,
+  // shared by the Top Students and Weak Students tabs (RankingTable fetches its own
+  // examId-scoped variant separately, only when its filter is set).
+  const { data: studentAgg = [], error: studentAggError } = useAsyncData(
+    () => pgGetGradesAggregate({ groupBy: 'student' }), [], []);
+
+  useEffect(() => {
+    if (studentAggError) toast.error(studentAggError.message || 'فشل تحميل إحصاءات الدرجات');
+  }, [studentAggError]);
+
+  const topStudents = useMemo(
+    () => joinStudentAggregate(students, studentAgg).filter((s) => s.avgPct !== null).sort((a, b) => b.avgPct - a.avgPct).slice(0, 10),
+    [students, studentAgg],
+  );
 
   return (
     <>
@@ -301,9 +340,9 @@ export default function ExamReports() {
 
       <div style={{ animation:'fadeIn .18s ease' }}>
         {tab === 'top'     && <TopStudentsPodium topStudents={topStudents}/>}
-        {tab === 'ranking' && <RankingTable students={students} grades={grades} exams={exams}/>}
-        {tab === 'weak'    && <WeakStudentsView students={students} groups={groups} grades={grades} exams={exams}/>}
-        {tab === 'print'   && <ExamPrintView groups={groups} exams={exams} students={students} grades={grades} profile={centerProfile}/>}
+        {tab === 'ranking' && <RankingTable students={students} exams={exams} studentAgg={studentAgg}/>}
+        {tab === 'weak'    && <WeakStudentsView students={students} groups={groups} studentAgg={studentAgg}/>}
+        {tab === 'print'   && <ExamPrintView groups={groups} exams={exams} students={students} profile={centerProfile}/>}
       </div>
     </div>
     </>
@@ -311,13 +350,26 @@ export default function ExamReports() {
 }
 
 // ── تاب الطباعة: بالطالب أو بالمجموعة+امتحان ──────────────────────────────────
-function ExamPrintView({ groups, exams, students, grades, profile }) {
+// Phase 1D: grades for the print report are fetched on-demand, scoped by studentId/examId,
+// only when "generate" is clicked — not read from the global store continuously.
+function ExamPrintView({ groups, exams, students, profile }) {
   const [mode, setMode] = useState('group'); // 'group' | 'student'
   const [groupId, setGroupId] = useState('');
   const [examId, setExamId] = useState('');
   const [studentId, setStudentId] = useState('');
+  const [generating, setGenerating] = useState(false);
+  const toast = useToast();
 
-  const groupExams    = exams.filter(e => e.groupId === groupId);
+  // C2 fix (Pre-Installer Audit): new exams no longer carry a groupId (Exams Phase 2 —
+  // targeted by grade, not group; see ExamForm.jsx/examService.js). `exam.groupId ===
+  // groupId` was therefore always empty for any current exam. Migration 007 backfilled
+  // `grade` on every historical exam row from its old group's grade, so resolving via the
+  // selected group's grade covers current AND historical exams with no ambiguity —
+  // mirrors getExamEligibleStudents' own grade-only eligibility rule exactly.
+  const selectedGroup = groups.find(g => g.id === groupId);
+  const groupExams    = selectedGroup ? exams.filter(e => e.grade === selectedGroup.grade) : [];
+  // student mode's group scoping is unrelated to exam targeting — student.groupId is the
+  // Primary-group membership field (kept in sync by enrollmentService), not exam.groupId.
   const groupStudents = students.filter(s => s.groupId === groupId && s.status === 'active');
   const boxStyle = { width:'100%', background:'var(--surface2)', border:'1px solid var(--border)', borderRadius:9, padding:'10px 12px', color:'var(--text)', fontFamily:'Cairo,sans-serif', fontSize:'0.88rem', cursor:'pointer', direction:'rtl' };
   const lblStyle = { fontSize:'0.75rem', fontWeight:700, color:'var(--text3)', display:'block', marginBottom:6 };
@@ -360,23 +412,35 @@ function ExamPrintView({ groups, exams, students, grades, profile }) {
           {mode === 'student' && (
             <div>
               <label style={lblStyle}>الطالب</label>
-              <select value={studentId} onChange={e=>setStudentId(e.target.value)} style={boxStyle} disabled={!groupId}>
-                <option value="">{!groupId ? 'اختر المجموعة أولاً...' : 'اختر الطالب...'}</option>
-                {groupStudents.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-              </select>
+              <StudentSearchSelect
+                students={groupStudents}
+                value={studentId}
+                onChange={(id) => setStudentId(id)}
+                disabled={!groupId}
+                placeholder={!groupId ? 'اختر المجموعة أولاً...' : 'ابحث عن الطالب...'}
+              />
             </div>
           )}
 
           <Button variant="primary"
-            disabled={mode==='group' ? (!groupId || !examId) : (!groupId || !studentId)}
-            onClick={() => {
+            disabled={generating || (mode==='group' ? (!groupId || !examId) : (!groupId || !studentId))}
+            onClick={async () => {
               const group = groups.find(g => g.id === groupId);
-              if (mode === 'group') {
-                const exam = exams.find(e => e.id === examId);
-                openGroupExamReport({ group, exam, students, grades, profile });
-              } else {
-                const student = students.find(s => s.id === studentId);
-                openStudentExamReport({ student, group, exams, grades, profile });
+              setGenerating(true);
+              try {
+                if (mode === 'group') {
+                  const exam = exams.find(e => e.id === examId);
+                  const grades = await pgGetGrades({ examId: exam.id });
+                  openGroupExamReport({ group, exam, students, grades, profile });
+                } else {
+                  const student = students.find(s => s.id === studentId);
+                  const grades = await pgGetGrades({ studentId: student.id });
+                  openStudentExamReport({ student, group, exams, grades, profile });
+                }
+              } catch (err) {
+                toast.error(err.message || 'فشل تحميل درجات الكشف');
+              } finally {
+                setGenerating(false);
               }
             }} style={{ marginTop:6 }}>
             🖨 توليد الكشف وطباعته

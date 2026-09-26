@@ -4,9 +4,10 @@ import { useAppStore } from '../../store/app.store';
 import { useToast } from '../../components/Toast';
 import Button       from '../../components/ui/Button';
 import { PAY_STATUS, deriveMatDist } from '../../services/materialService';
-import { pgSaveMaterialDistribution, pgGetCollection } from '../../services/api';
+import { pgSaveMaterialDistribution, pgGetCollection, pgConfirmMaterialPayment } from '../../services/api';
 import { mergeById, normalizeCollectionForMerge } from '../../store/db.middleware';
 import { formatDate, formatCurrency } from '../../utils/helpers';
+import BookletPaymentModal from './BookletPaymentModal';
 
 const AV_PAL = [
   {bg:'rgba(59,130,246,.18)',color:'#3b82f6'},{bg:'rgba(16,185,129,.18)',color:'#10b981'},
@@ -16,7 +17,7 @@ const AV_PAL = [
 const av = n => AV_PAL[((n.charCodeAt(0)||0)+(n.charCodeAt(1)||0))%AV_PAL.length];
 
 // ── Single student row ───────────────────────────────────────
-function StudentDistRow({ student, dist, material, onChange }) {
+function StudentDistRow({ student, dist, material, onChange, onRequestPayment }) {
   const { bg, color } = av(student.name);
   const letters = student.name.split(' ').map(w=>w[0]).slice(0,2).join('');
 
@@ -32,17 +33,32 @@ function StudentDistRow({ student, dist, material, onChange }) {
     });
   };
 
+  // "مدفوع"/"مدفوع جزئياً" لا يُحدَّثان محلياً أبداً — يفتحان نافذة تأكيد الدفع، التي
+  // تستدعي نقطة نهاية ذرّية حقيقية على الخادم (دفعة + حركة خزنة + استلام معاً). "غير
+  // مدفوع" وحده يبقى تعديلاً محلياً بحتاً يُرحَّل لاحقاً مع "حفظ التوزيع" — لا مال متورّط.
   const handlePayStatus = (status) => {
-    const amount = status === 'paid' ? material.price : status === 'unpaid' ? 0 : (dist?.paidAmount || 0);
-    if (status === 'paid') setLocalPaid(material.price);
-    if (status === 'unpaid') setLocalPaid(0);
-    onChange(student.id, { ...dist, payStatus: status, paidAmount: amount });
+    if (status === 'unpaid') {
+      setLocalPaid(0);
+      onChange(student.id, { ...dist, payStatus: 'unpaid', paidAmount: 0 });
+      return;
+    }
+    if ((material.price || 0) <= 0 || dist?.payStatus === 'paid') return; // لا شيء ليُدفَع
+    onRequestPayment(student, status);
   };
 
+  // كتابة مبلغ مباشرة في الحقل تمر بنفس بوابة تأكيد الدفع (نافذة + خزنة) — لا مسار بديل
+  // يُنشئ حالة "مدفوع/جزئي" محلياً بلا حركة خزنة حقيقية مقابلة (نفس السبب الجذري للمشكلة
+  // الأصلية: legacy_metadata كان يُكتَب بمعزل تام عن أي مال حقيقي).
   const handlePaidBlur = () => {
     const amount = Number(localPaid) || 0;
-    const status = amount === 0 ? 'unpaid' : amount >= material.price ? 'paid' : 'partial';
-    onChange(student.id, { ...dist, paidAmount: amount, payStatus: status });
+    if (amount === 0) {
+      onChange(student.id, { ...dist, paidAmount: 0, payStatus: 'unpaid' });
+      return;
+    }
+    setLocalPaid(dist?.paidAmount ?? ''); // يُعاد لقيمته المؤكَّدة الأخيرة — النافذة هي مصدر الحقيقة الآن
+    if ((material.price || 0) <= 0 || dist?.payStatus === 'paid') return;
+    const status = amount >= material.price ? 'paid' : 'partial';
+    onRequestPayment(student, status, amount);
   };
 
   const received   = dist?.received || false;
@@ -135,13 +151,18 @@ export default function MaterialDistribution({ material, onClose }) {
   const groups               = useAppStore((s) => s.groups);
   const inventoryTxn         = useAppStore((s) => s.inventoryTxn);
   const setInventoryTxn      = useAppStore((s) => s.setInventoryTxn);
+  const setPayments          = useAppStore((s) => s.setPayments);
+  const setTreasuryTxn       = useAppStore((s) => s.setTreasuryTxn);
   const students             = useAppStore((s) => s.students);
+  const cashboxes            = useAppStore((s) => s.cashboxes);
   // matDist مُشتَق من inventoryTxn — لا حالة مستقلة بعد الآن.
   const matDist = useMemo(() => deriveMatDist(inventoryTxn), [inventoryTxn]);
   const toast = useToast();
   const [saving, setSaving] = useState(false);
   const [filterGrp, setFilterGrp] = useState('');
   const [search, setSearch] = useState('');
+  // نافذة تأكيد دفع مذكرة واحدة — { student, targetStatus, initialAmount } | null
+  const [paymentRequest, setPaymentRequest] = useState(null);
 
   // Students eligible: same grade as material
   const eligibleStudents = useMemo(() => {
@@ -229,7 +250,44 @@ export default function MaterialDistribution({ material, onClose }) {
     }
   };
 
+  // "مدفوع"/"مدفوع جزئياً" — يفتح نافذة تأكيد الدفع بدل أي تعديل محلي فوري.
+  const handleRequestPayment = useCallback((student, targetStatus, initialAmount) => {
+    setPaymentRequest({ student, targetStatus, initialAmount });
+  }, []);
+
+  // تأكيد الدفع من النافذة: نداء واحد لنقطة نهاية ذرّية على الخادم (دفعة + حركة خزنة +
+  // استلام معاً)، ثم إعادة جلب inventoryTxn الحقيقي وتحديث حالة هذا الطالب محلياً منه —
+  // نفس مبدأ server-truth-first في handleSave أعلاه، بلا أي تفاؤل محلي قبل نجاح الخادم.
+  // Financial Integrity Fix — payment/treasuryTxn المُعادَين من الخادم كانا يُهمَلان هنا
+  // بالكامل: الحركة المالية تُنشأ بشكل صحيح وذرّي على الخادم لكنها لا تدخل أبداً حالة
+  // Zustand المحلية (treasuryTxn/payments)، فتبقى غائبة عن شاشة "حركات الخزنة" حتى إعادة
+  // تحميل كاملة (boot-sync التالي). نفس النمط المُتَّبَع فعلاً في PaymentsPage.jsx
+  // (setTreasuryTxn(prev => [...prev, newTxn])) وAdmissionsPage.jsx — لا نمط جديد.
+  const handleConfirmPayment = async ({ amount, cashboxId }) => {
+    const { student, targetStatus } = paymentRequest;
+    const { payment, treasuryTxn: newTxn } = await pgConfirmMaterialPayment(material.id, student.id, {
+      payStatus: targetStatus,
+      amount,
+      cashboxId,
+      date: new Date().toISOString().split('T')[0],
+    });
+    setPayments(prev => [payment, ...prev]);
+    setTreasuryTxn(prev => [...prev, newTxn]);
+
+    const fresh = await pgGetCollection('inventoryTxn');
+    setInventoryTxn((prev) => mergeById(prev, normalizeCollectionForMerge('inventoryTxn', fresh)));
+    const freshDist = deriveMatDist(fresh).find((d) => d.matId === material.id && d.studentId === student.id);
+    if (freshDist) updateDist(student.id, freshDist);
+
+    toast.success(`تم تسجيل دفعة "${material.name}" — ${student.name} ✓`);
+    setPaymentRequest(null);
+  };
+
   const SEL = { background:'var(--surface2)', border:'1px solid var(--border)', borderRadius:9, padding:'7px 10px', color:'var(--text)', fontFamily:'Cairo,sans-serif', fontSize:'0.82rem', outline:'none', cursor:'pointer', direction:'rtl' };
+
+  const paymentRemaining = paymentRequest
+    ? Math.max(0, (material.price || 0) - (localDist[paymentRequest.student.id]?.paidAmount || 0))
+    : 0;
 
   return (
     <div>
@@ -324,6 +382,7 @@ export default function MaterialDistribution({ material, onClose }) {
                   dist={localDist[s.id]}
                   material={material}
                   onChange={updateDist}
+                  onRequestPayment={handleRequestPayment}
                 />
               ))}
             </tbody>
@@ -344,6 +403,18 @@ export default function MaterialDistribution({ material, onClose }) {
           <Button variant="primary" loading={saving} onClick={handleSave}>💾 حفظ التوزيع</Button>
         </div>
       </div>
+
+      <BookletPaymentModal
+        isOpen={!!paymentRequest}
+        onClose={() => setPaymentRequest(null)}
+        student={paymentRequest?.student}
+        material={material}
+        remaining={paymentRemaining}
+        targetStatus={paymentRequest?.targetStatus}
+        initialAmount={paymentRequest?.initialAmount}
+        cashboxes={cashboxes}
+        onConfirm={handleConfirmPayment}
+      />
     </div>
   );
 }

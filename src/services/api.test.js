@@ -4,7 +4,7 @@
 // لعمود @db.Date)، واستجابة الخادم تُطبَّع (date → plain، total/pass → أرقام حقيقية
 // لا نصوص Decimal). لا يلمس شبكة حقيقية — fetch مموَّه بالكامل.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { pgCreateExam, pgUpdateExam, pgCreateHomework, pgUpdateHomework, pgSaveHwSubmissions, pgCreateCommunication, pgCreateCommTask, pgCreateActivityLog } from './api';
+import { pgCreateExam, pgUpdateExam, pgCreateHomework, pgUpdateHomework, pgSaveHwSubmissions, pgCreateCommunication, pgCreateCommTask, pgCreateActivityLog, pgCreateStudent, pgUpdateStudent, pgCreateTreasuryTxn, pgCreateMaterial, pgGetGrades, pgGetHomeworks, pgGetHwSubmissions } from './api';
 
 describe('pgCreateExam / pgUpdateExam', () => {
   let fetchMock;
@@ -64,6 +64,84 @@ describe('pgCreateExam / pgUpdateExam', () => {
     });
     await expect(pgCreateExam({ name: 'x', groupId: 'g1', date: '2026-01-01', total: 50, pass: 100 }))
       .rejects.toThrow('قيمة تنتهك قيداً');
+  });
+});
+
+describe('pgCreateStudent / pgUpdateStudent', () => {
+  let fetchMock;
+  beforeEach(() => { fetchMock = vi.fn(); globalThis.fetch = fetchMock; });
+  afterEach(() => vi.restoreAllMocks());
+
+  function mockResponse(data, status = 201) {
+    fetchMock.mockResolvedValue({ ok: true, status, json: async () => ({ ok: true, data }) });
+  }
+
+  it('pgCreateStudent sends enrollDate as a full ISO timestamp, not a plain YYYY-MM-DD string', async () => {
+    mockResponse({ id: 's1', name: 'x', enrollDate: '2026-01-15T00:00:00.000Z' });
+    await pgCreateStudent({ name: 'x', groupId: 'g1', enrollDate: '2026-01-15' });
+
+    const [, opts] = fetchMock.mock.calls[0];
+    const sentBody = JSON.parse(opts.body);
+    expect(sentBody.enrollDate).toBe('2026-01-15T00:00:00.000Z');
+  });
+
+  it('pgUpdateStudent sends enrollDate as a full ISO timestamp too, when present', async () => {
+    mockResponse({ id: 's1', name: 'x', enrollDate: '2026-01-15T00:00:00.000Z' });
+    await pgUpdateStudent('s1', { name: 'x', enrollDate: '2026-01-15' });
+
+    const [, opts] = fetchMock.mock.calls[0];
+    const sentBody = JSON.parse(opts.body);
+    expect(sentBody.enrollDate).toBe('2026-01-15T00:00:00.000Z');
+  });
+
+  it('pgUpdateStudent without enrollDate omits it from the request body (partial-update semantics preserved)', async () => {
+    mockResponse({ id: 's1', name: 'x' });
+    await pgUpdateStudent('s1', { name: 'x' });
+
+    const [, opts] = fetchMock.mock.calls[0];
+    const sentBody = JSON.parse(opts.body);
+    expect('enrollDate' in sentBody).toBe(false);
+  });
+
+  it('pgCreateStudent throws the real server error message on failure', async () => {
+    fetchMock.mockResolvedValue({ ok: false, status: 400, json: async () => ({ ok: false, error: 'اسم الطالب مطلوب.' }) });
+    await expect(pgCreateStudent({ groupId: 'g1', enrollDate: '2026-01-01' })).rejects.toThrow('اسم الطالب مطلوب.');
+  });
+});
+
+describe('pgCreateTreasuryTxn', () => {
+  let fetchMock;
+  beforeEach(() => { fetchMock = vi.fn(); globalThis.fetch = fetchMock; });
+  afterEach(() => vi.restoreAllMocks());
+
+  it('sends date as a full ISO timestamp, not a plain YYYY-MM-DD string', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true, status: 201,
+      json: async () => ({ ok: true, data: { id: 't1', date: '2026-01-15T00:00:00.000Z', amount: '100.00', type: 'income', category: 'other', cashboxId: 'cb1', method: 'cash', party: null, notes: 'وصف' } }),
+    });
+    await pgCreateTreasuryTxn({
+      cashboxId: 'cb1', type: 'income', category: 'other', amount: 100,
+      method: 'cash', date: '2026-01-15', description: 'وصف',
+    });
+
+    const [, opts] = fetchMock.mock.calls[0];
+    const sentBody = JSON.parse(opts.body);
+    expect(sentBody.date).toBe('2026-01-15T00:00:00.000Z');
+  });
+});
+
+describe('pgCreateMaterial / pgUpdateMaterial — addedAt serialization', () => {
+  let fetchMock;
+  beforeEach(() => { fetchMock = vi.fn(); globalThis.fetch = fetchMock; });
+  afterEach(() => vi.restoreAllMocks());
+
+  it('pgCreateMaterial sends addedAt as a full ISO timestamp', async () => {
+    fetchMock.mockResolvedValue({ ok: true, status: 201, json: async () => ({ ok: true, data: { id: '1', addedAt: '2026-01-15T00:00:00.000Z', price: '0', cost: '0', minStock: '0' } }) });
+    await pgCreateMaterial({ name: 'م', subject: 'رياضيات', grade: 'g', price: 10, addedAt: '2026-01-15' });
+
+    const [, opts] = fetchMock.mock.calls[0];
+    const sentBody = JSON.parse(opts.body);
+    expect(sentBody.addedAt).toBe('2026-01-15T00:00:00.000Z');
   });
 });
 
@@ -331,5 +409,51 @@ describe('pgCreateActivityLog', () => {
 
     await expect(pgCreateActivityLog({ action: 'error', module: 'ui', description: 'x' }))
       .rejects.toThrow('يجب تسجيل الدخول للوصول لهذا المسار.');
+  });
+});
+
+// Grades + Homework global-read migration, Phase 3 (final cutover): grades/homeworks/
+// hwSubmissions are no longer boot-synced, so db.middleware.js's COLLECTION_FIXUPS entries for
+// them were removed. These cases (moved verbatim from db.middleware.test.js) now prove the same
+// normalization on the only remaining read path — the scoped pgGet* functions.
+describe('pgGetGrades / pgGetHomeworks / pgGetHwSubmissions — response normalization', () => {
+  let fetchMock;
+  beforeEach(() => { fetchMock = vi.fn(); globalThis.fetch = fetchMock; });
+  const respond = (data) => fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({ ok: true, data }) });
+
+  it('grades: coerces score (Decimal-as-string) to a number, preserving null', async () => {
+    respond([
+      { id: '1', examId: 'e1', studentId: 's1', score: '87', absent: false },
+      { id: '2', examId: 'e1', studentId: 's2', score: null, absent: true },
+    ]);
+    expect(await pgGetGrades({ examId: 'e1' })).toEqual([
+      { id: '1', examId: 'e1', studentId: 's1', score: 87, absent: false },
+      { id: '2', examId: 'e1', studentId: 's2', score: null, absent: true },
+    ]);
+  });
+
+  it('homeworks: trims dueDate, renames assignedDate to createdAt, coerces totalScore to a number', async () => {
+    respond([{ id: 'h1', dueDate: '2026-03-15T00:00:00.000Z', assignedDate: '2026-03-01T00:00:00.000Z', totalScore: '10', title: 'x' }]);
+    expect(await pgGetHomeworks()).toEqual([
+      { id: 'h1', dueDate: '2026-03-15', createdAt: '2026-03-01', totalScore: 10, title: 'x' },
+    ]);
+  });
+
+  it('homeworks: falls back to raw createdAt when assignedDate is absent', async () => {
+    respond([{ id: 'h1', dueDate: '2026-03-15', totalScore: '10', createdAt: '2026-01-01T00:00:00.000Z' }]);
+    expect(await pgGetHomeworks()).toEqual([
+      { id: 'h1', dueDate: '2026-03-15', totalScore: 10, createdAt: '2026-01-01T00:00:00.000Z' },
+    ]);
+  });
+
+  it('hwSubmissions: renames homeworkId to hwId, coerces score, trims submittedAt', async () => {
+    respond([
+      { id: 's1', homeworkId: 'h1', studentId: 'st1', score: '8.5', submittedAt: '2026-03-10T00:00:00.000Z', status: 'submitted' },
+      { id: 's2', homeworkId: 'h1', studentId: 'st2', score: null, submittedAt: null, status: 'missing' },
+    ]);
+    expect(await pgGetHwSubmissions({ homeworkId: 'h1' })).toEqual([
+      { id: 's1', hwId: 'h1', studentId: 'st1', score: 8.5, submittedAt: '2026-03-10', status: 'submitted' },
+      { id: 's2', hwId: 'h1', studentId: 'st2', score: null, submittedAt: null, status: 'missing' },
+    ]);
   });
 });

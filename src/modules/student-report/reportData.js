@@ -9,6 +9,23 @@ import { scorePercent, gradeStatus } from '../../services/examService';
 import { getStudentFee, getRefundedAmount } from '../../services/paymentService';
 import { deriveMatDist } from '../../services/materialService';
 import { formatCurrency } from '../../utils/helpers';
+import { isSectionVisible } from '../../reportEngine';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// الواجبات — نفس منطق الأهلية المُستخدَم بالفعل في buildInteractiveReportData أدناه
+// (Homework 2.0: الصف لا المجموعة) — مُستخرَج هنا كدالة مشتركة واحدة بدل نسخه، حتى لا
+// يوجد أكثر من "خوارزمية أهلية" واحدة للواجبات في هذا الملف. gatherStudentData
+// (التقرير الاحترافي/واتساب) وbuildInteractiveReportData (الشاشة الحيّة/الطباعة البسيطة)
+// كلاهما يستدعيها الآن.
+// ─────────────────────────────────────────────────────────────────────────────
+function computeHomeworkRows(studentId, student, source) {
+  const hwSubmissions = (source.hwSubmissions || []).filter((s) => s.studentId === studentId);
+  const gradeHomeworks = (source.homeworks || []).filter((h) => h.grade === student.grade);
+  return gradeHomeworks.map((hw) => {
+    const sub = hwSubmissions.find((s) => s.hwId === hw.id && s.studentId === studentId);
+    return { hw, status: sub?.status || 'missing', submittedAt: sub?.submittedAt, score: sub?.score };
+  }).sort((a, b) => a.hw.dueDate.localeCompare(b.hw.dueDate));
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // تجميع كل بيانات الطالب من الـ store
@@ -18,6 +35,37 @@ export function gatherStudentData(studentId, store) {
   if (!student) return null;
 
   const group = (store.groups || []).find((g) => g.id === student.groupId) || null;
+
+  // ── ولي الأمر (Professional Report audit fix) ── students.parentId هو FK حقيقي إلى
+  // parents (Phase 3B-16) — لا عمود parentName على الطالب نفسه، ولا يُضاف أحد هنا (لا
+  // ازدواج بيانات) — بحث فقط في نفس المصدر الموثوق (store.parents، مُغذّى من نفس
+  // parents الذي تستخدمه شاشة التواصل/القبول). null إن لم يوجد ولي أمر مرتبط.
+  const parent = (store.parents || []).find((p) => p.id === student.parentId) || null;
+  const parentName = parent?.fullName || null;
+
+  // ── المجموعات الإضافية (Professional Report audit fix) ── نفس جدول
+  // student_group_enrollments الموثوق المُستخدَم بالفعل في StudentProfile.jsx's GroupsTab
+  // — هنا كل التسجيلات (نشطة وتاريخية معاً)، لا النشطة فقط كـ GET /enrollments، حتى لا
+  // تُفقَد مجموعة إضافية منسحبة/منتهية صامتة من التقرير. المجموعة الرئيسية تبقى من
+  // student.groupId كما هي (بلا تغيير) — enrollments هنا للإضافية فقط.
+  const enrollments = (store.enrollments || []).filter((e) => e.studentId === studentId);
+  const additionalEnrollments = enrollments
+    .filter((e) => e.role === 'additional')
+    .map((e) => ({ ...e, group: (store.groups || []).find((g) => g.id === e.groupId) || null }));
+
+  // ── سجل المجموعة الأساسية (Student Report Phase 2) ── نفس جدول student_group_enrollments
+  // أعلاه بالضبط، role='primary' بدل 'additional' — التسجيل الرئيسي الحالي + كل تسجيل
+  // رئيسي سابق أُغلِق بـ status='transferred' (setPrimaryGroupTx، enrollmentService.js) —
+  // لا يُخلَط أبداً مع additionalEnrollments (فلترة role منفصلة تماماً).
+  const primaryEnrollments = enrollments
+    .filter((e) => e.role === 'primary')
+    .map((e) => ({ ...e, group: (store.groups || []).find((g) => g.id === e.groupId) || null }));
+
+  // ── القبول المرتبط (Student Report Phase 2) ── admissions.studentId هو FK حقيقي (لا
+  // مطابقة بالاسم/الهاتف كالتواصل) — بحث في bundle.admissions (مُصفّاة لهذا الطالب فعلاً من
+  // الخادم عبر student_id، نفس مبدأ enrollments/payments/attendance). null إن لم يوجد قبول
+  // مرتبط بهذا الطالب.
+  const admission = (store.admissions || []).find((a) => a.studentId === studentId) || null;
 
   // ── الحضور ──
   const attendance = getAttendanceStats(studentId, store.attendance || []);
@@ -58,6 +106,15 @@ export function gatherStudentData(studentId, store) {
   const hwTotal = hwSubmissions.length;
   const hwDone = hwSubmissions.filter((h) => h.status === 'submitted').length;
   const hwRate = hwTotal ? Math.round((hwDone / hwTotal) * 100) : null;
+
+  // صفوف الواجبات كاملة (بما فيها التي لم تُسلَّم) — للتقرير الاحترافي's قسم الواجبات
+  // الجديد فقط؛ لا تُستخدَم لحساب hwRate/hwTotal/hwDone أعلاه (تبقى كما كانت تماماً،
+  // درجة الصحة الأكاديمية غير متأثّرة). نفس computeHomeworkRows المُستخدَمة في
+  // buildInteractiveReportData أدناه — لا خوارزمية أهلية ثانية.
+  const hwRows = computeHomeworkRows(studentId, student, store);
+  const hwSubmittedCount = hwRows.filter((r) => r.status === 'submitted').length;
+  const hwLateCount = hwRows.filter((r) => r.status === 'late').length;
+  const hwMissingCount = hwRows.filter((r) => r.status === 'missing').length;
 
   // ── الامتحانات ودرجاتها ──
   const grades = (store.grades || []).filter((g) => g.studentId === studentId);
@@ -111,10 +168,19 @@ export function gatherStudentData(studentId, store) {
   const monthlyFee = getStudentFee(student, group);
 
   // ── التواصل (إن وُجد) ──
-  const communications = (store.communications || []).filter(
-    (c) => (student.parentPhone && c.phone === student.parentPhone) ||
-           (student.name && c.studentName === student.name)
-  ).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  // Pre-Installer Audit D1: كانت المطابقة هنا تعتمد حصراً على هاتف ولي الأمر/اسم الطالب،
+  // بينما StudentsPage.jsx/GroupsPage.jsx (ونقطة نهاية GET /api/communications المُفلترة
+  // في communications.js) تطابقان عبر studentId مباشرة — عمود موجود وحقيقي منذ الهجرة،
+  // لكنه لم يكن يُقرأ هنا إطلاقاً، فسجل بهاتف لا يطابق هاتف ولي الأمر الحالي (تغيّر لاحقاً)
+  // كان يختفي من التقرير رغم كونه مرتبطاً بالطالب فعلياً عبر studentId. الآن: studentId هو
+  // المصدر المُعتمَد لأي سجل يحمله (مطابقة حصرية، حتى لو اختلف الهاتف/الاسم)، وphone/name
+  // يبقيان احتياطاً فقط للسجلات القديمة التي لا studentId لها إطلاقاً — نفس نمط
+  // bookletDeliveries أعلاه بالضبط، لا حذف لأي سجل قديم كان يظهر سابقاً بهذه الطريقة.
+  const communications = (store.communications || []).filter((c) => {
+    if (c.studentId) return c.studentId === studentId;
+    return (student.parentPhone && c.phone === student.parentPhone) ||
+           (student.name && c.studentName === student.name);
+  }).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
   // ── المذكرات المسلّمة (من المخزون) ──
   // Phase 3B-12 (إغلاق، Finding #3): نقطة نهاية التسوية (materialDistribution.js) تكتب
@@ -143,17 +209,47 @@ export function gatherStudentData(studentId, store) {
     };
   });
 
+  // ── التسميع ── كل سجل recitations محفوظ لهذا الطالب هو صف تاريخي مستقل — لا دمج/تجميع
+  // لجلستين إطلاقاً هنا (نفس مبدأ examRows أعلاه: صف واحد = محاولة واحدة). النسبة تُشتقّ
+  // دائماً عبر scorePercent الحالية، لا تُقرَأ من أي حقل مخزَّن (لا يوجد أصلاً على
+  // recitations — انظر Phase 1). المتوسط يُحسَب فقط من السجلات المُقيَّمة فعلياً (pct !=
+  // null)، لا من كل السجلات — سجل recitations لا يمكن أن يوجد بلا score أصلاً (يفرضه
+  // الخادم في Phase 2)، فـ pct=null هنا يعني فقط maxScore غير صالح (دفاعي بحت).
+  const recitationRows = (store.recitations || [])
+    .filter((r) => r.studentId === studentId)
+    .map((r) => ({
+      groupName: r.groupName,
+      date: r.date,
+      sessionTime: r.sessionTime,
+      score: r.score,
+      maxScore: r.maxScore,
+      pct: r.score !== null && r.score !== undefined && r.maxScore ? scorePercent(r.score, r.maxScore) : null,
+      note: r.note,
+    }))
+    .sort((a, b) => b.date.localeCompare(a.date));
+  const evaluatedRecitations = recitationRows.filter((r) => r.pct !== null);
+  const avgRecitationPct = evaluatedRecitations.length
+    ? Math.round(evaluatedRecitations.reduce((s, r) => s + r.pct, 0) / evaluatedRecitations.length)
+    : null;
+
   return {
     student, group,
+    parentName,
+    additionalEnrollments,
+    primaryEnrollments,
+    admission,
     attendance,
     attRecords, consecutiveAbsence, monthlyAttendance, attendanceTrend,
     hwTotal, hwDone, hwRate,
+    hwRows, hwSubmittedCount, hwLateCount, hwMissingCount,
     exams: examRows, examAvg, failedCount,
     examHighest, examLowest, examSuccessRate, examTrend,
     payments, paidTotal, refundTotal, monthlyFee,
     netPaid: paidTotal - refundTotal,
     communications,
     bookletDeliveries,
+    recitationRows, avgRecitationPct,
+    evaluatedRecitationCount: evaluatedRecitations.length,
   };
 }
 
@@ -222,16 +318,24 @@ export function determineOverallStatus(data) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // تنبيهات نشطة — من البيانات الحقيقية
+// Professional Report audit fix — كل تنبيه مربوط بعلم قسمه في reportConfig (cfg، اختياري
+// — {} أو بلا تمرير = الكل ظاهر، نفس سلوك isSectionVisible في كل مكان آخر). كانت هذه
+// التنبيهات تظهر دائماً داخل الملخّص التنفيذي (snapshotPage) بصرف النظر عن
+// showAttendance/showExams/showFinancialSummary — أحد مسارَي التسرّب اللذين أثبتهما تدقيق
+// المراجعة (الآخر buildAiSummary أدناه).
 // ─────────────────────────────────────────────────────────────────────────────
-export function buildAlerts(data) {
+export function buildAlerts(data, cfg = {}) {
   const alerts = [];
   const { attendance, failedCount, refundTotal, netPaid, monthlyFee } = data;
+  const showAttendance = isSectionVisible(cfg, 'showAttendance');
+  const showExams = isSectionVisible(cfg, 'showExams');
+  const showFinancial = isSectionVisible(cfg, 'showFinancialSummary');
 
-  if (attendance.pct != null && attendance.pct < 60) alerts.push('⚠ نسبة حضور منخفضة');
-  if (attendance.absent >= 3) alerts.push(`⚠ ${attendance.absent} حالات غياب`);
-  if (failedCount >= 2) alerts.push(`⚠ رسوب في ${failedCount} امتحانات`);
-  if (refundTotal > 0) alerts.push('⚠ يوجد استرداد مالي');
-  if (netPaid <= 0 && monthlyFee > 0) alerts.push('⚠ لا توجد مدفوعات');
+  if (showAttendance && attendance.pct != null && attendance.pct < 60) alerts.push('⚠ نسبة حضور منخفضة');
+  if (showAttendance && attendance.absent >= 3) alerts.push(`⚠ ${attendance.absent} حالات غياب`);
+  if (showExams && failedCount >= 2) alerts.push(`⚠ رسوب في ${failedCount} امتحانات`);
+  if (showFinancial && refundTotal > 0) alerts.push('⚠ يوجد استرداد مالي');
+  if (showFinancial && netPaid <= 0 && monthlyFee > 0) alerts.push('⚠ لا توجد مدفوعات');
 
   return alerts;
 }
@@ -299,41 +403,58 @@ export function computeHealthScore(data) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ملخّص تنفيذي ذكي — جُمل من البيانات الحقيقية فقط (لا اختراع)
+// Professional Report audit fix — كل مجموعة جُمل مربوطة بعلم قسمها (cfg، اختياري — نفس
+// معاملة buildAlerts أعلاه). كانت هذه الجُمل (بما فيها الجُمل الوصفية بلا رقم، مثل "لا
+// توجد مدفوعات مسجّلة" التي تكشف الحالة المالية دون رقم) تظهر دائماً داخل قسم الملخّص
+// الذكي بصرف النظر عن showAttendance/showExams/showFinancialSummary/showCommunication —
+// مسار التسرّب الثاني الذي أثبته تدقيق المراجعة.
 // ─────────────────────────────────────────────────────────────────────────────
-export function buildAiSummary(data) {
+export function buildAiSummary(data, cfg = {}) {
   const notes = [];
   const {
     attendance, attendanceTrend, consecutiveAbsence,
     examAvg, examTrend, failedCount,
     netPaid, monthlyFee, communications,
   } = data;
+  const showAttendance = isSectionVisible(cfg, 'showAttendance');
+  const showExams = isSectionVisible(cfg, 'showExams');
+  const showFinancial = isSectionVisible(cfg, 'showFinancialSummary');
+  const showCommunication = isSectionVisible(cfg, 'showCommunication');
 
   // اتجاه الحضور
-  if (attendanceTrend != null) {
-    if (attendanceTrend <= -15) notes.push(`انخفض الحضور بنسبة ${Math.abs(attendanceTrend)}% مقارنة بالشهر السابق.`);
-    else if (attendanceTrend >= 15) notes.push(`تحسّن الحضور بنسبة ${attendanceTrend}% مقارنة بالشهر السابق.`);
+  if (showAttendance) {
+    if (attendanceTrend != null) {
+      if (attendanceTrend <= -15) notes.push(`انخفض الحضور بنسبة ${Math.abs(attendanceTrend)}% مقارنة بالشهر السابق.`);
+      else if (attendanceTrend >= 15) notes.push(`تحسّن الحضور بنسبة ${attendanceTrend}% مقارنة بالشهر السابق.`);
+    }
+    if (attendance.pct != null && attendance.pct >= 95) notes.push('حضور شبه مثالي طوال الفترة.');
+    if (consecutiveAbsence >= 3) notes.push(`سلسلة غياب متتالية بلغت ${consecutiveAbsence} حصص.`);
   }
-  if (attendance.pct != null && attendance.pct >= 95) notes.push('حضور شبه مثالي طوال الفترة.');
-  if (consecutiveAbsence >= 3) notes.push(`سلسلة غياب متتالية بلغت ${consecutiveAbsence} حصص.`);
 
   // اتجاه الامتحانات
-  if (examTrend != null) {
-    if (examTrend >= 10) notes.push(`تحسّنت درجات الامتحانات بمقدار ${examTrend}%.`);
-    else if (examTrend <= -10) notes.push(`تراجعت درجات الامتحانات بمقدار ${Math.abs(examTrend)}%.`);
+  if (showExams) {
+    if (examTrend != null) {
+      if (examTrend >= 10) notes.push(`تحسّنت درجات الامتحانات بمقدار ${examTrend}%.`);
+      else if (examTrend <= -10) notes.push(`تراجعت درجات الامتحانات بمقدار ${Math.abs(examTrend)}%.`);
+    }
+    if (examAvg != null && examAvg >= 90) notes.push('أداء أكاديمي متميّز باستمرار.');
+    if (failedCount >= 2) notes.push(`رسوب في ${failedCount} امتحانات يستدعي المتابعة.`);
   }
-  if (examAvg != null && examAvg >= 90) notes.push('أداء أكاديمي متميّز باستمرار.');
-  if (failedCount >= 2) notes.push(`رسوب في ${failedCount} امتحانات يستدعي المتابعة.`);
 
   // المالية
-  if (monthlyFee > 0 && netPaid <= 0) notes.push('لا توجد مدفوعات مسجّلة حتى الآن.');
-  else if (monthlyFee > 0 && netPaid < monthlyFee) notes.push(`يوجد رصيد متبقٍّ قدره ${monthlyFee - netPaid} ج.م.`);
+  if (showFinancial) {
+    if (monthlyFee > 0 && netPaid <= 0) notes.push('لا توجد مدفوعات مسجّلة حتى الآن.');
+    else if (monthlyFee > 0 && netPaid < monthlyFee) notes.push(`يوجد رصيد متبقٍّ قدره ${monthlyFee - netPaid} ج.م.`);
+  }
 
   // التواصل
-  if (communications.length === 0) notes.push('لا يوجد تواصل مسجّل مع ولي الأمر.');
-  else {
-    const lastComm = communications[0];
-    const days = Math.floor((Date.now() - new Date(lastComm.createdAt)) / 86400000);
-    if (days > 30) notes.push(`لم يتم التواصل مع ولي الأمر منذ ${days} يوماً.`);
+  if (showCommunication) {
+    if (communications.length === 0) notes.push('لا يوجد تواصل مسجّل مع ولي الأمر.');
+    else {
+      const lastComm = communications[0];
+      const days = Math.floor((Date.now() - new Date(lastComm.createdAt)) / 86400000);
+      if (days > 30) notes.push(`لم يتم التواصل مع ولي الأمر منذ ${days} يوماً.`);
+    }
   }
 
   if (notes.length === 0) notes.push('لا توجد ملاحظات جوهرية — الوضع مستقر.');
@@ -399,12 +520,9 @@ export function buildInteractiveReportData(studentId, bundle) {
   // ── الواجبات ── (كل واجب في صف الطالب، بما فيها التي لم تُسلَّم إطلاقاً)
   // Homework 2.0 Phase 2: الهدف الأكاديمي أصبح الصف لا المجموعة — h.grade===student.grade
   // بدل h.groupId===student.groupId (لا علاقة بأي مجموعة إضافية/رئيسية للطالب هنا إطلاقاً).
-  const hwSubmissions = (bundle.hwSubmissions || []).filter((s) => s.studentId === studentId);
-  const gradeHomeworks = (bundle.homeworks || []).filter((h) => h.grade === student.grade);
-  const hwRows = gradeHomeworks.map((hw) => {
-    const sub = hwSubmissions.find((s) => s.hwId === hw.id && s.studentId === studentId);
-    return { hw, status: sub?.status || 'missing', submittedAt: sub?.submittedAt, score: sub?.score };
-  }).sort((a, b) => a.hw.dueDate.localeCompare(b.hw.dueDate));
+  // computeHomeworkRows المشتركة أعلاه — نفس الاستدعاء الذي يستخدمه الآن gatherStudentData
+  // للتقرير الاحترافي أيضاً، بلا نسخ الخوارزمية.
+  const hwRows = computeHomeworkRows(studentId, student, bundle);
   const hwSubmitted = hwRows.filter((r) => r.status === 'submitted').length;
   const hwLate      = hwRows.filter((r) => r.status === 'late').length;
   const hwMissing   = hwRows.filter((r) => r.status === 'missing').length;
@@ -426,6 +544,12 @@ export function buildInteractiveReportData(studentId, bundle) {
   const refundedTotal = refundTotal;
   const paidCount = payRows.filter((p) => p.status === 'paid').length;
 
+  // ── التسميع ── نفس recitationRows/avgRecitationPct المحسوبة بالفعل في gatherStudentData
+  // أعلاه (لا تكرار منطق — نفس مبدأ إعادة استخدام attendance/payments من gathered بالضبط).
+  const recitationRows = gathered.recitationRows;
+  const avgRecitationPct = gathered.avgRecitationPct;
+  const evaluatedRecitationCount = gathered.evaluatedRecitationCount;
+
   // ── الخط الزمني ── (نفس منطق الدمج/الفرز الأصلي حرفياً)
   const timeline = [
     { date: student.enrollDate, icon: '🎓', title: 'التسجيل في المركز', sub: group?.name, color: '#0d9488', type: 'enroll' },
@@ -434,6 +558,7 @@ export function buildInteractiveReportData(studentId, bundle) {
     ...examRows.map((r) => ({ date: r.exam.date, icon: '📝', title: r.exam.name, sub: r.absent ? 'غائب' : `${r.score}/${r.total}`, color: r.pct >= 60 ? '#8b5cf6' : '#ef4444', type: 'exam' })),
     ...hwRows.filter((r) => r.submittedAt).map((r) => ({ date: r.submittedAt, icon: '📋', title: `تسليم: ${r.hw.title}`, sub: INTERACTIVE_HW_META[r.status]?.label, color: INTERACTIVE_HW_META[r.status]?.c || '#94a3b8', type: 'hw' })),
     ...matRows.filter((r) => r.receivedAt).map((r) => ({ date: r.receivedAt, icon: '📚', title: `استلام: ${r.mat.name}`, sub: r.mat.subject, color: '#3b82f6', type: 'material' })),
+    ...recitationRows.map((r) => ({ date: r.date, icon: '🎤', title: `تسميع — ${r.groupName || ''}`, sub: r.pct !== null ? `${r.score}/${r.maxScore}` : 'لم يُسمَّع', color: r.pct !== null && r.pct >= 60 ? '#8b5cf6' : '#ef4444', type: 'recitation' })),
   ].filter((t) => t.date).sort((a, b) => b.date.localeCompare(a.date));
 
   return {
@@ -443,6 +568,7 @@ export function buildInteractiveReportData(studentId, bundle) {
     hwRows, hwSubmitted, hwLate, hwMissing,
     matRows, matReceived, matPaid, matTotal,
     payRows, totalPaid, refundedTotal, netPaid, paidCount,
+    recitationRows, avgRecitationPct, evaluatedRecitationCount,
     timeline,
   };
 }

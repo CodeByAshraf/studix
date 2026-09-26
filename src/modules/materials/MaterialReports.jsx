@@ -4,6 +4,7 @@ import { useAppStore } from '../../store/app.store';
 import { formatDate, formatCurrency } from '../../utils/helpers';
 import { PAY_STATUS, deriveMatDist } from '../../services/materialService';
 import { PrintHeader } from '../../components/shared';
+import { openMaterialReportPrint } from './buildMaterialsReport';
 
 const TABS = [
   { id:'received',    label:'استلموا',        icon:'✓',  color:'#10b981' },
@@ -60,6 +61,7 @@ export default function MaterialReports({ onDistribute }) {
   const inventoryTxn         = useAppStore((s) => s.inventoryTxn);
   const materials            = useAppStore((s) => s.invMaterials);
   const students             = useAppStore((s) => s.students);
+  const centerProfile        = useAppStore((s) => s.centerProfile);
   // matDist مُشتَق من inventoryTxn — لا حالة مستقلة بعد الآن.
   const matDist = useMemo(() => deriveMatDist(inventoryTxn), [inventoryTxn]);
   const [tab, setTab]              = useState('received');
@@ -148,6 +150,19 @@ export default function MaterialReports({ onDistribute }) {
         </select>
         {(filterSubj||filterMat) && (
           <button onClick={() => { setFilterSubj(''); setFilterMat(''); }} style={{ ...SEL, color:'var(--text3)', cursor:'pointer' }}>× مسح</button>
+        )}
+        {/* الطباعة تحتاج مذكرة واحدة محددة (الفلتر الأساسي) — لا زر بلا اختيار مذكرة فعلي؛
+            لا فلتر مجموعة في هذه الشاشة حالياً، فالتقرير يشمل كل الطلاب المؤهَّلين بالصف. */}
+        {filterMat && (
+          <button
+            onClick={() => openMaterialReportPrint({
+              material: materials.find(m => m.id === filterMat),
+              students, inventoryTxn, profile: centerProfile,
+            })}
+            style={{ ...SEL, background:'var(--accent)', color:'#fff', fontWeight:700, cursor:'pointer', border:'none' }}
+          >
+            🖨 طباعة تقرير المذكرة
+          </button>
         )}
       </div>
 

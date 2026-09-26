@@ -1,9 +1,12 @@
 // src/modules/homework/HomeworkReports.jsx
-import { useState, useMemo } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useAppStore } from '../../store/app.store';
 import { formatDate } from '../../utils/helpers';
 import { SUB_STATUS, getHomeworkEligibleStudents } from '../../services/homeworkService';
 import { PrintHeader } from '../../components/shared';
+import { pgGetHwSubmissionsAggregate, pgGetHomeworks } from '../../services/api';
+import { useAsyncData } from '../../hooks/useAsyncData';
+import { useToast } from '../../components/Toast';
 
 const TABS = [
   { id:'subject', label:'حسب المادة',       icon:'📚' },
@@ -62,25 +65,51 @@ function HwRow({ hw, stats, onView }) {
 // ─────────────────────────────────────────────────────────────
 export default function HomeworkReports({ onViewHomework }) {
   const groups               = useAppStore((s) => s.groups);
-  const homeworks            = useAppStore((s) => s.homeworks);
-  const hwSubmissions        = useAppStore((s) => s.hwSubmissions);
   const students             = useAppStore((s) => s.students);
+  const toast = useToast();
+
+  // Phase 2 (Homework global-read migration): one page-level GET /api/homeworks (pgGetHomeworks)
+  // replaces the global s.homeworks bootstrap — every tab + the summary span all homeworks, so
+  // the full parent list is the required scope. Fetched once per mount, reused by every tab.
+  const { data: homeworks = [], error: homeworksError } = useAsyncData(() => pgGetHomeworks(), [], []);
+  useEffect(() => {
+    if (homeworksError) toast.error(homeworksError.message || 'فشل تحميل الواجبات');
+  }, [homeworksError]);
   const [tab, setTab] = useState('subject');
   const [filterPeriod, setFilterPeriod] = useState({ from: '', to: '' });
   const [filterGroup, setFilterGroup] = useState('');
 
+  // C4 Grades/hwSubmissions Frontend Migration (Batch A, feature 004): two page-level aggregate
+  // fetches (fetched ONCE, reused across all 4 tabs + summary — FR-007/SC-002, research.md §7:
+  // fully migratable, no deferred sub-part) replace the global hwSubmissions store selector.
+  const { data: statusAgg = [], error: statusAggError } = useAsyncData(
+    () => pgGetHwSubmissionsAggregate({ groupBy: 'status' }), [], []);
+  const { data: perHomeworkAgg = [], error: perHomeworkAggError } = useAsyncData(
+    () => pgGetHwSubmissionsAggregate({ groupBy: 'homework' }), [], []);
+
+  useEffect(() => {
+    const err = statusAggError || perHomeworkAggError;
+    if (err) toast.error(err.message || 'فشل تحميل إحصائيات تسليم الواجبات');
+  }, [statusAggError, perHomeworkAggError]);
+
+  const perHomeworkMap = useMemo(() =>
+    new Map(perHomeworkAgg.map(r => [r.key, r])),
+  [perHomeworkAgg]);
+
   // Build stats for a list of homeworks
   // Homework 2.0 Phase 2: grade-based eligibility (getHomeworkEligibleStudents), never
   // Group-based — the fifth (and last) independent copy of this roster logic, now unified.
+  // FR-008: total stays the eligible-student count (client-computed), never the aggregate row's
+  // own `total` (a submission-ROW count — see research.md §4).
   const getStats = (hwList) => hwList.map(hw => {
     const eligibleStudents = getHomeworkEligibleStudents(hw, students);
-    const subs = hwSubmissions.filter(s => s.hwId === hw.id);
+    const agg = perHomeworkMap.get(hw.id);
     return {
       hw,
       total:     eligibleStudents.length,
-      submitted: subs.filter(s => s.status === 'submitted').length,
-      late:      subs.filter(s => s.status === 'late').length,
-      missing:   subs.filter(s => s.status === 'missing').length,
+      submitted: agg?.submitted ?? 0,
+      late:      agg?.late ?? 0,
+      missing:   agg?.missing ?? 0,
     };
   });
 
@@ -96,7 +125,7 @@ export default function HomeworkReports({ onViewHomework }) {
       }), { total:0, submitted:0, late:0, missing:0 });
       return { subject: sub, count: hwList.length, hws: stats, totals };
     });
-  }, [homeworks, hwSubmissions, students]);
+  }, [homeworks, perHomeworkMap, students]);
 
   // ── By teacher ───────────────────────────────────────────
   const byTeacher = useMemo(() => {
@@ -110,12 +139,19 @@ export default function HomeworkReports({ onViewHomework }) {
       }), { total:0, submitted:0, late:0, missing:0 });
       return { teacher, count: hwList.length, hws: stats, totals };
     });
-  }, [homeworks, hwSubmissions, students]);
+  }, [homeworks, perHomeworkMap, students]);
 
   // ── By group ─────────────────────────────────────────────
+  // C3 fix (Pre-Installer Audit): new homeworks no longer carry a groupId (Homework 2.0 —
+  // targeted by grade, not group), so `h.groupId === g.id` was always empty for any
+  // current homework. Resolve via the group's grade instead — same rule as
+  // getHomeworkEligibleStudents. A homework can now legitimately appear under more than
+  // one group's breakdown when several groups share a grade — that's the correct
+  // consequence of grade-based targeting (the same homework genuinely applies to every
+  // group in that grade), not a duplication bug.
   const byGroup = useMemo(() => {
     return groups.map(g => {
-      const hwList = homeworks.filter(h => h.groupId === g.id);
+      const hwList = homeworks.filter(h => h.grade === g.grade);
       const stats  = getStats(hwList);
       const totals = stats.reduce((a, s) => ({
         total: a.total+s.total, submitted: a.submitted+s.submitted,
@@ -123,23 +159,28 @@ export default function HomeworkReports({ onViewHomework }) {
       }), { total:0, submitted:0, late:0, missing:0 });
       return { group: g, count: hwList.length, hws: stats, totals };
     }).filter(g => g.count > 0);
-  }, [homeworks, hwSubmissions, students, groups]);
+  }, [homeworks, perHomeworkMap, students, groups]);
 
   // ── By period ────────────────────────────────────────────
+  // C3 fix (Pre-Installer Audit): same dead-filter pattern as byGroup above — filterGroup
+  // holds a group id, resolved here to its grade before matching h.grade.
   const byPeriod = useMemo(() => {
     let filtered = homeworks;
     if (filterPeriod.from) filtered = filtered.filter(h => h.dueDate >= filterPeriod.from);
     if (filterPeriod.to)   filtered = filtered.filter(h => h.dueDate <= filterPeriod.to);
-    if (filterGroup)       filtered = filtered.filter(h => h.groupId === filterGroup);
+    if (filterGroup) {
+      const grade = groups.find(g => g.id === filterGroup)?.grade;
+      filtered = filtered.filter(h => h.grade === grade);
+    }
     return getStats(filtered);
-  }, [homeworks, hwSubmissions, students, filterPeriod, filterGroup]);
+  }, [homeworks, perHomeworkMap, students, filterPeriod, filterGroup, groups]);
 
-  // Summary totals
+  // Summary totals — from the same statusAgg fetch above (groupBy=status), not a client-side
+  // filter over every submission row.
   const totalHWs = homeworks.length;
-  const allSubs  = hwSubmissions;
-  const totalSub = allSubs.filter(s => s.status==='submitted').length;
-  const totalLate= allSubs.filter(s => s.status==='late').length;
-  const totalMis = allSubs.filter(s => s.status==='missing').length;
+  const totalSub = statusAgg.find(r => r.key === 'submitted')?.count ?? 0;
+  const totalLate= statusAgg.find(r => r.key === 'late')?.count ?? 0;
+  const totalMis = statusAgg.find(r => r.key === 'missing')?.count ?? 0;
 
   const SEL = { background:'var(--surface2)', border:'1px solid var(--border)', borderRadius:9, padding:'7px 11px', color:'var(--text)', fontFamily:'Cairo,sans-serif', fontSize:'0.82rem', outline:'none', cursor:'pointer', direction:'rtl' };
 

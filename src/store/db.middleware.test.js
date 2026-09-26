@@ -119,6 +119,30 @@ describe('normalizeCollectionForMerge', () => {
       { id: 's2', homeworkId: 'h1', studentId: 'st2', score: null, submittedAt: null, status: 'missing' },
     ];
     expect(normalizeCollectionForMerge('hwSubmissions', data)).toEqual([
+
+  // Pre-installer defect audit — groups.teacher_name arrives from PostgreSQL as
+  // "teacherName" (raw snakeToCamel), but GroupForm.jsx/GroupsPage.jsx/GroupCard.jsx
+  // read "teacher" exclusively. Before this fixup, a real PostgreSQL-shaped group row
+  // had no "teacher" field at all, so the edit form silently rendered it empty and
+  // saving without retyping it erased the real teacher_name in the database. This
+  // proves the actual normalization path (normalizeCollectionForMerge, the same
+  // function the real sync loop calls) now protects the real production data shape —
+  // not a bypass or a mock of it.
+  it('groups: renames teacherName to teacher, preserving the rest of the row untouched', () => {
+    const data = [
+      { id: 'g1', name: 'مجموعة أ', teacherName: 'أحمد محمد', grade: 'الأول الثانوي' },
+    ];
+    const [group] = normalizeCollectionForMerge('groups', data);
+    expect(group.teacher).toBe('أحمد محمد');
+    expect(group).toEqual({
+      id: 'g1', name: 'مجموعة أ', teacherName: 'أحمد محمد', grade: 'الأول الثانوي', teacher: 'أحمد محمد',
+    });
+  });
+
+  it('groups: falls back to an empty string (never undefined/null) when teacherName is absent', () => {
+    const data = [{ id: 'g2', name: 'مجموعة ب', teacherName: null }];
+    expect(normalizeCollectionForMerge('groups', data)[0].teacher).toBe('');
+  });
       { id: 's1', hwId: 'h1', studentId: 'st1', score: 8.5, submittedAt: '2026-03-10', status: 'submitted' },
       { id: 's2', hwId: 'h1', studentId: 'st2', score: null, submittedAt: null, status: 'missing' },
     ]);

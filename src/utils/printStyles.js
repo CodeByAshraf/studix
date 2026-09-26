@@ -137,8 +137,12 @@ export function reportHeaderHTML(profile) {
     <div class="report-header">
       <div class="rh-right">
         ${hasLogo
+          // لا بديل مُشتَقّ من الاسم (لا أحرف أولى/اختصار) عند غياب اللوجو — نفس الإصلاح
+          // المُطبَّق بالفعل في reportEngine/components.js وbuildPrintReport.js: تُحذَف خانة
+          // اللوجو كلياً بدل توليد شارة أحرف أولى قد تُقرَأ بصرياً كأنها ملتصقة بالاسم الكامل
+          // المجاور لها (مثال حقيقي: "م خالد جمعه" ← initials() القديمة كانت تُنتج "مخ").
           ? `<img class="rh-logo" src="${esc(profile.logoUrl)}" alt="logo"/>`
-          : `<div class="rh-logo rh-logo-ph">${esc(initials(name))}</div>`}
+          : ''}
         <div>
           <div class="rh-name">${esc(name)}</div>
           ${profile && profile.slogan ? `<div class="rh-slogan">${esc(profile.slogan)}</div>` : ''}

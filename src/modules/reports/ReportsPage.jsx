@@ -1,9 +1,11 @@
 // src/modules/reports/ReportsPage.jsx
-import { useState, useMemo } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { useAppStore } from '../../store/app.store';
 import { SectionBoundary } from '../../components/ErrorBoundary';
 import { formatCurrency } from '../../utils/helpers';
-import { getNetRevenue } from '../../services/paymentService';
+import { pgGetPaymentAggregates, pgGetAttendanceAggregate, pgGetGradesAggregate } from '../../services/api';
+import { useAsyncData } from '../../hooks/useAsyncData';
+import { useToast } from '../../components/Toast';
 // المرحلة 4: lazy loading لـ sub-reports — كل تقرير يُحمَّل عند أول استخدام فقط
 // يُقلّل الـ initial bundle لـ ReportsPage بنسبة ~60%
 import { lazy, Suspense } from 'react';
@@ -32,43 +34,83 @@ const TABS = [
 
 // ── Executive summary ────────────────────────────────────────
 function OverviewDashboard() {
-  const attendance           = useAppStore((s) => s.attendance);
   const exams                = useAppStore((s) => s.exams);
-  const grades               = useAppStore((s) => s.grades);
   const groups               = useAppStore((s) => s.groups);
-  const payments             = useAppStore((s) => s.payments);
   const students             = useAppStore((s) => s.students);
-  const treasuryTxn          = useAppStore((s) => s.treasuryTxn);
+  const toast = useToast();
+
+  const now = new Date();
+  const thisMonth = now.getMonth() + 1;
+  const thisYear  = now.getFullYear();
+
+  // Monthly revenue trend (last 6 months) — يعبر حدود السنة أحياناً (مثال: فبراير
+  // يشمل سبتمبر–ديسمبر من السنة السابقة)، فيُحسَب الشهر والسنة معاً عبر Date بدل حساب
+  // دوري (modulo) يتجاهل السنة تماماً. trendMonths/trendYears يُحسَبان هنا فقط لتحديد
+  // أي سنوات تقويمية يجب طلب /aggregate?groupBy=month لها (سنة واحدة أو سنتان).
+  const trendMonths = useMemo(() => Array.from({ length: 6 }, (_, i) => {
+    const d = new Date(thisYear, (thisMonth - 1) - (5 - i), 1);
+    return { month: d.getMonth() + 1, year: d.getFullYear() };
+  }), [thisMonth, thisYear]);
+  const trendYears = useMemo(() => [...new Set(trendMonths.map(t => t.year))], [trendMonths]);
+
+  // Scalability Architecture Phase 4 Cutover 2: بدل مصفوفة payments الكاملة من الـ
+  // store، كل رقم هنا يُجلَب عبر GET /api/payments/aggregate — بلا أي تغيير على صيغة أي
+  // حساب (نفس getNetRevenue بالضبط، مطابقة صارمة month+year بلا أي fallback — لا يوجد
+  // fallback هنا أصلاً في السلوك الحالي، فلا يُضاف الآن).
+  const { data: monthAgg = [], error: monthErr } = useAsyncData(
+    () => pgGetPaymentAggregates({ groupBy: 'none', month: thisMonth, year: thisYear }), [thisMonth, thisYear], []);
+  const { data: totalAgg = [], error: totalErr } = useAsyncData(
+    () => pgGetPaymentAggregates({ groupBy: 'none' }), [], []);
+  const { data: statusAgg = [], error: statusErr } = useAsyncData(
+    () => pgGetPaymentAggregates({ groupBy: 'status' }), [], []);
+  const { data: trendAggY1 = [], error: trendErr1 } = useAsyncData(
+    () => pgGetPaymentAggregates({ groupBy: 'month', year: trendYears[0] }), [trendYears[0]], []);
+  const { data: trendAggY2 = [], error: trendErr2 } = useAsyncData(
+    () => (trendYears[1] !== undefined ? pgGetPaymentAggregates({ groupBy: 'month', year: trendYears[1] }) : Promise.resolve([])),
+    [trendYears[1]], []);
+
+  // Attendance C4 Batch A: بدل مصفوفة attendance الكاملة من الـ store، النسبة المئوية هنا
+  // تُحسَب عبر GET /api/attendance/aggregate?groupBy=status — نفس عدّاد present/(present+
+  // absent+late) بالضبط، فقط مصدره الآن عدّ من جهة الخادم بدل تصفية مصفوفة كاملة محلياً.
+  const { data: attStatusAgg = [], error: attStatusErr } = useAsyncData(
+    () => pgGetAttendanceAggregate({ groupBy: 'status' }), [], []);
+
+  // Phase 1D (Grades global-read migration): "متوسط الدرجات" now comes from
+  // GET /api/grades/aggregate?groupBy=none instead of filtering the store's global grades
+  // array — same mean-of-(score/exam.total*100) formula, computed server-side.
+  const { data: gradesOverall = [], error: gradesOverallErr } = useAsyncData(
+    () => pgGetGradesAggregate({ groupBy: 'none' }), [], []);
+
+  useEffect(() => {
+    const err = monthErr || totalErr || statusErr || trendErr1 || trendErr2 || attStatusErr || gradesOverallErr;
+    if (err) toast.error(err.message || 'فشل تحميل ملخّص المدفوعات');
+  }, [monthErr, totalErr, statusErr, trendErr1, trendErr2, attStatusErr, gradesOverallErr]);
 
   const summary = useMemo(() => {
-    const now = new Date();
-    const thisMonth = now.getMonth()+1;
-    const thisYear  = now.getFullYear();
-
     // Students
     const activeStudents = students.filter(s => s.status==='active').length;
     const newThisMonth   = students.filter(s => s.enrollDate?.startsWith(now.toISOString().slice(0,7))).length;
 
-    // Revenue
-    // MEDIUM-A Finding 1: يجب مطابقة السنة أيضاً — بلا هذا القيد، "إيراد هذا الشهر" يجمع
-    // كل الدفعات بنفس رقم الشهر عبر كل السنوات.
-    // BUG-02: صافي بعد طرح أي استرداد فعّال (getNetRevenue) — كانت تجمع payments.amount
-    // الخام، فتُبقي دفعة استُرِدَّت جزئياً/كلياً محسوبة بكامل مبلغها إلى الأبد.
-    const monthRev = getNetRevenue(payments.filter(p => p.month===thisMonth && p.year===thisYear), treasuryTxn);
-    const totalRev = getNetRevenue(payments, treasuryTxn);
+    // Revenue — monthRev/totalRev وعدداهما (payments.length/هذا الشهر) من نفس نداءَي
+    // /aggregate?groupBy=none أعلاه، بلا نداء إضافي.
+    const monthRev = monthAgg[0]?.revenue ?? 0;
+    const totalRev = totalAgg[0]?.revenue ?? 0;
+    const totalCount = totalAgg[0]?.count ?? 0;
+    const monthCount = monthAgg[0]?.count ?? 0;
+    const paidCount  = statusAgg.find(r => r.key === 'paid')?.count ?? 0;
 
-    // Attendance
-    const attRecs   = attendance;
-    const attPct    = attRecs.length ? Math.round(attRecs.filter(r=>r.status==='present').length/attRecs.length*100) : null;
+    // Attendance — counts per status from the server-side aggregate (groupBy=status);
+    // a status with zero rows is simply absent from attStatusAgg, so default to 0.
+    const attByStatus = new Map(attStatusAgg.map(r => [r.key, r.count]));
+    const attPresent  = attByStatus.get('present') ?? 0;
+    const attAbsent   = attByStatus.get('absent')  ?? 0;
+    const attLate     = attByStatus.get('late')    ?? 0;
+    const attTotal    = attPresent + attAbsent + attLate;
+    const attPct      = attTotal ? Math.round(attPresent / attTotal * 100) : null;
 
-    // Exams avg
-    const validGrades = grades.filter(g => !g.absent && g.score!==null);
-    const avgExamPct  = validGrades.length
-      ? Math.round(validGrades.reduce((sum,g) => {
-          const exam = exams.find(e => e.id===g.examId);
-          return sum + (exam ? (g.score/exam.total)*100 : 0);
-        }, 0) / validGrades.length)
-      : null;
+    // Exams avg — gradesOverall is already the server-side mean, scoped to non-absent,
+    // scored grades only (GET /api/grades/aggregate?groupBy=none).
+    const avgExamPct = gradesOverall[0]?.avgPct ?? null;
 
     // Groups
     const fullGroups = groups.filter(g => {
@@ -76,18 +118,13 @@ function OverviewDashboard() {
       return count >= g.max;
     }).length;
 
-    // Monthly revenue trend (last 6 months) — يعبر حدود السنة أحياناً (مثال: فبراير
-    // يشمل سبتمبر–ديسمبر من السنة السابقة)، فيُحسَب الشهر والسنة معاً عبر Date بدل
-    // حساب دوري (modulo) يتجاهل السنة تماماً.
-    const monthlyTrend = Array.from({length:6}, (_,i) => {
-      const d = new Date(thisYear, now.getMonth() - (5 - i), 1);
-      const m = d.getMonth() + 1;
-      const y = d.getFullYear();
-      return getNetRevenue(payments.filter(p => p.month===m && p.year===y), treasuryTxn);
-    });
+    const revenueByYearMonth = new Map();
+    for (const r of trendAggY1) revenueByYearMonth.set(`${trendYears[0]}-${r.key}`, r.revenue);
+    if (trendYears[1] !== undefined) for (const r of trendAggY2) revenueByYearMonth.set(`${trendYears[1]}-${r.key}`, r.revenue);
+    const monthlyTrend = trendMonths.map(({ month, year }) => revenueByYearMonth.get(`${year}-${month}`) ?? 0);
 
-    return { activeStudents, newThisMonth, monthRev, totalRev, attPct, avgExamPct, fullGroups, monthlyTrend };
-  }, [students, groups, payments, attendance, grades, exams, treasuryTxn]);
+    return { activeStudents, newThisMonth, monthRev, totalRev, totalCount, monthCount, paidCount, attPct, avgExamPct, fullGroups, monthlyTrend };
+  }, [students, groups, attStatusAgg, gradesOverall, monthAgg, totalAgg, statusAgg, trendAggY1, trendAggY2, trendMonths, trendYears]);
 
   const M = ['Cairo,sans-serif'];
 
@@ -154,9 +191,9 @@ function OverviewDashboard() {
         <div style={{ background:'var(--surface)', border:'1px solid var(--border)', borderRadius:14, padding:'18px' }}>
           <div style={{ fontSize:'0.75rem', fontWeight:700, color:'var(--text3)', marginBottom:12 }}>💳 المدفوعات</div>
           {[
-            {l:'إجمالي الدفعات',  v:payments.length},
-            {l:'هذا الشهر',       v:payments.filter(p=>p.month===new Date().getMonth()+1 && p.year===new Date().getFullYear()).length, c:'var(--accent)'},
-            {l:'مدفوعات كاملة',   v:payments.filter(p=>p.status==='paid').length, c:'#10b981'},
+            {l:'إجمالي الدفعات',  v:summary.totalCount},
+            {l:'هذا الشهر',       v:summary.monthCount, c:'var(--accent)'},
+            {l:'مدفوعات كاملة',   v:summary.paidCount, c:'#10b981'},
           ].map(x=>(
             <div key={x.l} style={{ display:'flex', justifyContent:'space-between', marginBottom:8 }}>
               <span style={{ fontSize:'0.82rem', color:'var(--text2)' }}>{x.l}</span>

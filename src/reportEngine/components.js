@@ -5,15 +5,19 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { THEME } from './theme';
-import { esc, fmtDate, fmtDateTime, initials } from './helpers';
+import { esc, fmtDate, fmtDateTime } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // رأس التقرير — شعار، اسم السنتر، بيانات المدرّس، عنوان التقرير، رقمه
 // ─────────────────────────────────────────────────────────────────────────────
 export function ReportHeader({ profile = {}, title, reportNo, generatedBy }) {
+  // لا بديل مُشتقّ من الاسم (لا أحرف أولى/اختصار) عند غياب اللوجو — نفس ما تفعله
+  // PrintHeader.jsx بالضبط: تُحذَف خانة اللوجو كلياً بدل توليد شارة أحرف أولى قد
+  // تُقرَأ بصرياً كأنها ملتصقة بالاسم الكامل المجاور لها (مثال حقيقي: "م خالد جمعه" ←
+  // initials() القديمة كانت تُنتج "مخ" من أول حرفين من أول كلمتين).
   const logo = profile.logoUrl
     ? `<img src="${esc(profile.logoUrl)}" style="width:56px;height:56px;object-fit:contain;border-radius:8px"/>`
-    : `<div style="width:56px;height:56px;border-radius:10px;background:${THEME.accent};color:#fff;display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:800">${esc(initials(profile.name || 'س'))}</div>`;
+    : '';
 
   return `
   <div class="rpt-header no-break" style="display:flex;justify-content:space-between;align-items:flex-start;padding-bottom:14px;border-bottom:2.5px solid ${THEME.accent};margin-bottom:18px">
@@ -153,12 +157,17 @@ export function DataTable({ columns = [], rows = [], totals = null, options = {}
     return `<tr class="no-break"${bg !== 'transparent' ? ` style="background:${bg}"` : ''}>${cells}</tr>`;
   }).join('');
 
-  // صف الإجماليات
+  // صف الإجماليات — Print-quality audit fix: قيم totals جاهزة للعرض بالفعل دائماً (كل
+  // مستدعٍ حالي يمرّرها مُنسَّقة سلفاً، مثال examsSection's fmtPct(examAvg) هنا بالضبط)،
+  // لا قيماً خاماً تحتاج render(row) الخاص بالعمود العادي. كانت c.render(totals) تُعيد
+  // تمرير هذه القيمة الجاهزة عبر render الصف العادي فتُنسَّق مرّتين (fmtPct('71%') يعيد
+  // '0%' — NaN من Number('71%') يسقط على || 0 داخل fmtPct) — لا استدعاء render هنا إطلاقاً
+  // الآن؛ القيمة المُمرَّرة في totals تُعرَض كما هي حرفياً (esc فقط)، أياً كان العمود.
   let totalsRow = '';
   if (totals) {
     const cells = columns.map((c, i) => {
       const val = totals[c.key];
-      const content = val != null ? (c.render ? c.render(totals) : esc(val)) : (i === 0 ? 'الإجمالي' : '');
+      const content = val != null ? esc(val) : (i === 0 ? 'الإجمالي' : '');
       return `<td style="text-align:${colAlign(c)};padding:10px;font-size:9.5pt;font-weight:800;color:${THEME.ink};border-top:2px solid ${THEME.border};background:${THEME.surface}">${content}</td>`;
     }).join('');
     totalsRow = `<tr class="no-break">${cells}</tr>`;

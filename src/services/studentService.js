@@ -1,7 +1,6 @@
 // src/services/studentService.js
 // Backend API version — async functions calling REST API
 import { sanitizeText } from '../utils/sanitize';
-import { generateCode } from '../utils/helpers';
 import {
   validate, hasErrors, sanitizeFormData,
   studentSchema, validators,
@@ -35,7 +34,6 @@ export function createStudent(data, existingStudents) {
   return {
     ...clean,
     id:         `s${Date.now()}`,
-    code:       generateCode('TC', existingStudents.length + 1),
     enrollDate: new Date().toISOString().split('T')[0],
     createdAt:  new Date().toISOString(),
     updatedAt:  new Date().toISOString(),
@@ -92,7 +90,11 @@ function sanitizeStudentData(data) {
     phone:       clean.phone.trim(),
     parentPhone: clean.parentPhone?.trim() || '',
     grade:       clean.grade,
-    groupId:     clean.groupId,
+    // Phase 3B: an empty-string groupId (no Primary Group chosen) must become real null,
+    // never ''. The backend's students.group_id branch (crud.js) treats '' as "set the
+    // Primary Group to the empty string" — an FK violation, not "no Primary Group" — only
+    // null takes the correct "no Primary Group" / withdraw path.
+    groupId:     clean.groupId || null,
     school:      clean.school?.trim() || '',
     notes:       clean.notes?.trim() || '',
     status:      clean.status || 'active',

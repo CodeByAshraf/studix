@@ -13,11 +13,15 @@ import { useAppStore } from '../../store/app.store';
 import { AuthProvider } from '../../store/auth.context';
 import { ToastProvider } from '../../components/Toast';
 
+// Phase 2 (Scalability Architecture): handleOpenPreview now fetches the student's scoped
+// report-data bundle (GET /students/:id/report-data) before generating the WhatsApp
+// message, instead of reading the (locally-assembled) full store directly — mocked here
+// with a resolved bundle matching the same empty-everything seed used below.
 vi.mock('../../services/api', async () => {
   const actual = await vi.importActual('../../services/api');
-  return { ...actual, pgCreateWaReportLog: vi.fn() };
+  return { ...actual, pgCreateWaReportLog: vi.fn(), pgGetStudentReportData: vi.fn() };
 });
-import { pgCreateWaReportLog } from '../../services/api';
+import { pgCreateWaReportLog, pgGetStudentReportData } from '../../services/api';
 
 vi.mock('./studentWhatsappService', async () => {
   const actual = await vi.importActual('./studentWhatsappService');
@@ -68,6 +72,14 @@ describe('StudentReportPage — waReportLog write path (best-effort, after an ir
     vi.clearAllMocks();
     sessionStorage.clear();
     seedStore();
+    pgGetStudentReportData.mockResolvedValue({
+      students: [{
+        id: STUDENT_ID, name: 'Test Student', code: 'C1', phone: '0100000000',
+        parentPhone: '0111111111', groupId: null, enrollDate: '2026-01-01', monthlyFee: 100,
+      }],
+      groups: [], attendance: [], hwSubmissions: [], grades: [], exams: [],
+      payments: [], treasuryTxn: [], communications: [], inventoryTxn: [], invMaterials: [],
+    });
   });
 
   it('shows WhatsApp success immediately, without waiting for the audit-log write, and sends createdBy as the real session user id (not a display name)', async () => {

@@ -2,9 +2,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useAppStore } from '../../store/app.store';
 import useForm     from '../../hooks/useForm';
+import { useAsyncData } from '../../hooks/useAsyncData';
+import { pgGetPayments } from '../../services/api';
 import { validatePayment, PAYMENT_METHODS, PAYMENT_TYPES, MONTHS_AR, getStudentFee, getNetRevenue } from '../../services/paymentService';
 import Button      from '../../components/ui/Button';
 import { ConfirmModal } from '../../components/ui/Modal';
+import StudentSearchSelect from '../../components/ui/StudentSearchSelect';
 import { useToast } from '../../components/Toast';
 
 const PALETTE = [
@@ -58,7 +61,6 @@ const EMPTY = {
 
 export default function PaymentForm({ onSubmit, onCancel, loading, prefilledStudentId }) {
   const groups               = useAppStore((s) => s.groups);
-  const payments             = useAppStore((s) => s.payments);
   const students             = useAppStore((s) => s.students);
   const materials            = useAppStore((s) => s.invMaterials);
   const cashboxes            = useAppStore((s) => s.cashboxes);
@@ -71,6 +73,9 @@ export default function PaymentForm({ onSubmit, onCancel, loading, prefilledStud
   // دائماً، حتى لو كانت هناك خزنة نشطة واحدة فقط؛ المستخدم يجب أن يختارها صراحةً بنفسه،
   // والتحقّق (paymentSchema.cashboxId) يمنع الإرسال بلا اختيار فعلي.
   const activeCashboxes = useMemo(() => cashboxes.filter(cb => cb.active), [cashboxes]);
+  // نفس الفلتر المُستخدَم سابقاً في خيارات <select> الطالب — يبقى في هذا المكوّن (لا داخل
+  // StudentSearchSelect العام) لأن أي مستهلك مستقبلي آخر قد يحتاج طلاباً غير نشطين أيضاً.
+  const activeStudents = useMemo(() => students.filter(s => s.status === 'active'), [students]);
 
   useEffect(() => { if (prefilledStudentId) setField('studentId', prefilledStudentId); }, [prefilledStudentId]);
 
@@ -81,12 +86,28 @@ export default function PaymentForm({ onSubmit, onCancel, loading, prefilledStud
     if (selectedStudent && getStudentFee(selectedStudent, selectedGroup) && !values.amount) setField('amount', String(getStudentFee(selectedStudent, selectedGroup)));
   }, [selectedGroup?.id]);
 
+  // Scalability Architecture Phase 4 Cutover 1: بدل الاعتماد على مصفوفة payments
+  // الكاملة من الـ store، يُجلَب تاريخ هذا الطالب فقط من GET /api/payments?studentId=
+  // (نفس النطاق المستخدَم سابقاً محلياً عبر .filter(p=>p.studentId===...)، مُتحقَّق
+  // تكافؤه في تدقيق Phase 4 Step 3). monthPayments/alreadyPaidMaterial أدناه تُشتقّان
+  // من نفس الجلب الواحد هذا — بلا أي تغيير على منطق التصفية نفسه (نفس شرطي MEDIUM-A
+  // Finding 1 بالضبط)، فقط مصدر البيانات تغيّر من "الكل" إلى "هذا الطالب فقط".
+  const { data: studentPayments = [], loading: studentPaymentsLoading, error: studentPaymentsError } = useAsyncData(
+    () => (values.studentId ? pgGetPayments({ studentId: values.studentId }) : Promise.resolve([])),
+    [values.studentId],
+    [],
+  );
+
+  useEffect(() => {
+    if (studentPaymentsError) toast.error(studentPaymentsError.message || 'فشل تحميل سجل مدفوعات الطالب');
+  }, [studentPaymentsError]);
+
   // MEDIUM-A Finding 1: يجب مطابقة السنة أيضاً، لا الشهر فقط — طالب دفع اشتراك أكتوبر
   // 2025 لا يجب أن يُعتبر "دافع بالفعل" عند تسجيل اشتراك أكتوبر 2026 (نفس رقم الشهر،
   // سنة مختلفة). values.year قادم من <select> فيصل كنص دائماً، بنفس نمط Number(values.month).
   const monthPayments = useMemo(() =>
-    payments.filter(p => p.studentId === values.studentId && p.month === Number(values.month) && p.year === Number(values.year)),
-  [payments, values.studentId, values.month, values.year]);
+    studentPayments.filter(p => p.month === Number(values.month) && p.year === Number(values.year)),
+  [studentPayments, values.month, values.year]);
 
   // مذكرات السنة الدراسية للطالب المختار (تظهر عند اختيار نوع الدفع = مذكرة).
   const gradeMaterials = useMemo(() => {
@@ -102,12 +123,8 @@ export default function PaymentForm({ onSubmit, onCancel, loading, prefilledStud
   // هل دفع الطالب هذه المذكرة تحديداً من قبل؟ (تحذير فقط)
   const alreadyPaidMaterial = useMemo(() => {
     if (!values.materialId) return false;
-    return payments.some(p =>
-      p.studentId === values.studentId &&
-      p.payType === 'material' &&
-      p.materialId === values.materialId
-    );
-  }, [payments, values.studentId, values.materialId]);
+    return studentPayments.some(p => p.payType === 'material' && p.materialId === values.materialId);
+  }, [studentPayments, values.materialId]);
 
   const selectedMaterial = gradeMaterials.find(m => m.id === values.materialId);
 
@@ -162,13 +179,13 @@ export default function PaymentForm({ onSubmit, onCancel, loading, prefilledStud
         )}
         <div style={{ gridColumn:'1/-1' }}>
           <F label="الطالب" required error={err('studentId')}>
-            <Sel name="studentId" value={values.studentId} onChange={handleChange} invalid={isEr('studentId')}>
-              <option value="">اختر الطالب...</option>
-              {students.filter(s=>s.status==='active').map(s => {
-                const g = groups.find(g=>g.id===s.groupId);
-                return <option key={s.id} value={s.id}>{s.name} — {g?.name||'بلا مجموعة'}</option>;
-              })}
-            </Sel>
+            <StudentSearchSelect
+              name="studentId"
+              students={activeStudents}
+              value={values.studentId}
+              onChange={(id) => setField('studentId', id)}
+              invalid={isEr('studentId')}
+            />
           </F>
         </div>
 
@@ -255,8 +272,13 @@ export default function PaymentForm({ onSubmit, onCancel, loading, prefilledStud
 
       <div style={{ display:'flex', justifyContent:'flex-end', gap:10, marginTop:20, paddingTop:16, borderTop:'1px solid var(--border)' }}>
         <Button variant="secondary" onClick={onCancel}>إلغاء</Button>
-        <Button variant="primary" loading={loading} disabled={activeCashboxes.length === 0} onClick={() => {
+        <Button variant="primary" loading={loading} disabled={activeCashboxes.length === 0 || studentPaymentsLoading} onClick={() => {
           if (!validate()) return;
+
+          // سجل مدفوعات الطالب (المُستخدَم لفحصَي التكرار أعلاه) لا يزال يُحمَّل — يُمنع
+          // الإرسال حتى اكتماله بدل السماح بتجاوز فحص التكرار على بيانات قديمة/فارغة
+          // (سباق حالة حقيقي مُحتمَل بعد الانتقال من مصفوفة محلية إلى جلب شبكة).
+          if (studentPaymentsLoading) return;
 
           // اشتراك مكرر لنفس الشهر → أوقف العملية تماماً (toast بدل alert)
           if (values.payType === 'subscription' && alreadyPaidSubscription) {

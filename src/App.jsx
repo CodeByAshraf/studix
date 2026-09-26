@@ -46,6 +46,7 @@ const loaders = {
   homework:      () => import('./modules/homework/HomeworkPage'),
   materials:     () => import('./modules/materials/MaterialsPage'),
   inventory:     () => import('./modules/inventory/InventoryPage'),
+  recitation:    () => import('./modules/recitation/RecitationPage'),
   communication: () => import('./modules/communication/CommunicationPage'),
   users:         () => import('./modules/users/UsersPage'),
   studentReport: () => import('./modules/student-report/StudentReportPage'),
@@ -84,6 +85,7 @@ const ExamsPage         = lazy(loaders.exams);
 const HomeworkPage      = lazy(loaders.homework);
 const MaterialsPage     = lazy(loaders.materials);
 const InventoryPage     = lazy(loaders.inventory);
+const RecitationPage    = lazy(loaders.recitation);
 const CommunicationPage = lazy(loaders.communication);
 const UsersPage         = lazy(loaders.users);
 const StudentReportPage = lazy(loaders.studentReport);
@@ -224,6 +226,7 @@ function AppRoutes() {
         <Route path={ROUTES.HOMEWORK}         element={<ProtectedRoute pageId="homework"><PageShell><HomeworkPage/></PageShell></ProtectedRoute>}/>
         <Route path={ROUTES.MATERIALS}        element={<ProtectedRoute pageId="materials"><PageShell><MaterialsPage/></PageShell></ProtectedRoute>}/>
         <Route path={ROUTES.INVENTORY}        element={<ProtectedRoute pageId="materials"><PageShell><InventoryPage/></PageShell></ProtectedRoute>}/>
+        <Route path={ROUTES.RECITATION}       element={<ProtectedRoute pageId="recitation"><PageShell><RecitationPage/></PageShell></ProtectedRoute>}/>
         <Route path={ROUTES.COMMUNICATION}    element={<ProtectedRoute pageId="students"><PageShell><CommunicationPage/></PageShell></ProtectedRoute>}/>
         <Route path={ROUTES.USERS}            element={<ProtectedRoute pageId="users"><PageShell><UsersPage/></PageShell></ProtectedRoute>}/>
         <Route path={ROUTES.STUDENT_REPORT}   element={<ProtectedRoute pageId="students"><PageShell><StudentReportPage/></PageShell></ProtectedRoute>}/>

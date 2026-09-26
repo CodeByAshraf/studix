@@ -2,9 +2,14 @@
 // New feature — wires a "🖨 طباعة تقرير الدرجات" print action into the existing
 // per-homework grading screen (HomeworkTracking.jsx), the natural entry point since it is
 // already scoped to exactly one group + one homework (no duplicate homework-report screen
-// was created). Critically, the button must print from the store's PERSISTED hwSubmissions,
-// not the screen's local unsaved edits (localSubs) — printing a draft score before "💾 حفظ
-// الحالات" is clicked would show data that was never actually saved.
+// was created). Critically, the button must print from the persisted (scoped-fetched)
+// hwSubmissions, not the screen's local unsaved edits (localSubs) — printing a draft score
+// before "💾 حفظ الحالات" is clicked would show data that was never actually saved.
+//
+// C4 Grades/hwSubmissions Frontend Migration (Batch A, feature 004): HomeworkTracking now
+// fetches its submissions scoped to this homework (GET /api/hwSubmissions?homeworkId=) instead
+// of reading the store's array — seed() below now mocks that fetch instead of store state, and
+// every interaction awaits the print button (only reachable once the fetch resolves).
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import '@testing-library/jest-dom';
@@ -15,8 +20,9 @@ import { ToastProvider } from '../../components/Toast';
 
 vi.mock('../../services/api', async () => {
   const actual = await vi.importActual('../../services/api');
-  return { ...actual, pgSaveHwSubmissions: vi.fn() };
+  return { ...actual, pgSaveHwSubmissions: vi.fn(), pgGetHwSubmissions: vi.fn() };
 });
+import { pgGetHwSubmissions } from '../../services/api';
 
 // Homework 2.0 Phase 2: the roster is grade-based — HW.grade/S1.grade set explicitly and
 // matching (not two coincidentally-undefined values) so this file still proves real wiring.
@@ -39,9 +45,9 @@ function seed(hwSubmissions = []) {
   useAppStore.setState({
     students: [{ id: S1, name: 'أحمد علي', code: 'C001', grade: GRADE, status: 'active' }],
     groups: [{ id: GROUP_ID, name: 'مجموعة أ' }],
-    hwSubmissions,
     centerProfile: { name: 'م خالد جمعه' },
   });
+  pgGetHwSubmissions.mockResolvedValue(hwSubmissions);
 }
 
 let writtenHtml;
@@ -55,11 +61,11 @@ function mockWindow() {
 describe('HomeworkTracking — print action wiring', () => {
   beforeEach(() => { mockWindow(); vi.clearAllMocks(); });
 
-  it('renders the print button and opens the real report with the correct group/homework/profile', () => {
+  it('renders the print button and opens the real report with the correct group/homework/profile', async () => {
     seed([{ hwId: 'hw1', studentId: S1, status: 'submitted', submittedAt: '2026-03-14', score: 18, notes: '' }]);
     renderTracking();
 
-    const printBtn = screen.getByText('🖨 طباعة تقرير الدرجات');
+    const printBtn = await screen.findByText('🖨 طباعة تقرير الدرجات');
     fireEvent.click(printBtn);
 
     expect(window.open).toHaveBeenCalled();
@@ -70,10 +76,12 @@ describe('HomeworkTracking — print action wiring', () => {
     expect(writtenHtml).toContain('م خالد جمعه');
   });
 
-  it('prints from the persisted store hwSubmissions, not an unsaved local score edit', () => {
-    // لا شيء محفوظ بعد في المتجر — الطالب "لم يُسلَّم" فعلياً حتى لو عدّل المستخدم الحالة/الدرجة محلياً الآن.
+  it('prints from the persisted (scoped-fetched) hwSubmissions, not an unsaved local score edit', async () => {
+    // لا شيء محفوظ بعد (الجلب المحدود يعيد مصفوفة فارغة) — الطالب "لم يُسلَّم" فعلياً حتى لو
+    // عدّل المستخدم الحالة/الدرجة محلياً الآن.
     seed([]);
     renderTracking();
+    await screen.findByText('🖨 طباعة تقرير الدرجات');
 
     // تعديل محلي غير محفوظ: "تحديد الكل: تم التسليم" (أول زر مطابق — زر "تحديد الكل" العام
     // يسبق أزرار الحالة داخل كل صف طالب) ثم كتابة درجة، بلا الضغط على "💾 حفظ الحالات"

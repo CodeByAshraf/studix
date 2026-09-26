@@ -1,5 +1,5 @@
 // src/modules/groups/GroupsPage.jsx
-import { useState, useMemo, useCallback } from 'react';
+import { useEffect, useState, useMemo, useCallback } from 'react';
 import { useAppStore } from '../../store/app.store';
 import { useAuth }     from '../../store/auth.context';
 import { SectionBoundary }  from '../../components/ErrorBoundary';
@@ -8,19 +8,22 @@ import Button               from '../../components/ui/Button';
 import { useToast }         from '../../components/Toast';
 import { useErrorHandler }  from '../../hooks/useErrorHandler';
 import { createGroup, updateGroup, getGroupStats, formatDays, GROUP_COLORS } from '../../services/groupService';
-import { pgCreateGroup, pgUpdateGroup, pgDeleteGroup } from '../../services/api';
-import { getNetRevenue } from '../../services/paymentService';
+import { pgCreateGroup, pgUpdateGroup, pgDeleteGroup, pgGetPayments, pgGetPaymentAggregates, pgGetCommunications, pgGetAttendanceAggregate } from '../../services/api';
+import { normalizeCollectionForMerge } from '../../store/db.middleware';
+import { zeroFillGroupAggregate } from '../../services/paymentService';
+import { useAsyncData } from '../../hooks/useAsyncData';
 import { formatCurrency }   from '../../utils/helpers';
 import GroupForm             from './GroupForm';
 import GroupCard             from './components/GroupCard';
 import GroupStudents, { TransferModal } from './GroupStudents';
 
 // ── Overview stats bar ───────────────────────────────────────
-function OverviewBar({ groups, students, payments, attendance, treasuryTxn }) {
+// Scalability Architecture Phase 4 Cutover 1: totalRevenue يصل الآن جاهزاً من الأعلى
+// (GET /api/payments/aggregate?groupBy=none — نفس صيغة getNetRevenue(كل الدفعات)
+// بالضبط، مُتحقَّق تكافؤه في تدقيق Phase 4 Step 3) بدل تمرير payments/treasuryTxn
+// الكاملتين لحساب هذا المكوّن نفسه.
+function OverviewBar({ groups, students, totalRevenue }) {
   const totalStudents = students.filter(s => s.status === 'active').length;
-  // BUG-02: كانت تجمع payments.amount الخام — دفعة استُرِدَّت جزئياً/كلياً تبقى محسوبة
-  // بكامل مبلغها إلى الأبد. getNetRevenue تطرح الاسترداد الفعّال عبر treasury_txn.
-  const totalRevenue  = getNetRevenue(payments, treasuryTxn);
   const fullGroups    = groups.filter(g => {
     const count = students.filter(s => s.groupId === g.id && s.status === 'active').length;
     return count >= g.max;
@@ -53,18 +56,62 @@ function OverviewBar({ groups, students, payments, attendance, treasuryTxn }) {
 export default function GroupsPage() {
   const addLog               = useAppStore((s) => s.addLog);
   const admissions           = useAppStore((s) => s.admissions);
-  const attendance           = useAppStore((s) => s.attendance);
-  const communications       = useAppStore((s) => s.communications);
   const exams                = useAppStore((s) => s.exams);
   const groups               = useAppStore((s) => s.groups);
-  const homeworks            = useAppStore((s) => s.homeworks);
-  const payments             = useAppStore((s) => s.payments);
   const setGroups            = useAppStore((s) => s.setGroups);
   const students             = useAppStore((s) => s.students);
-  const treasuryTxn          = useAppStore((s) => s.treasuryTxn);
   const { currentUser } = useAuth();
   const toast = useToast();
   const { loading, run } = useErrorHandler(toast);
+
+  // Scalability Architecture Phase 4 Cutover 1: الإيراد الكلي (شريط الملخّص) وإيراد كل
+  // مجموعة (عرض القائمة) يصلان الآن من GET /api/payments/aggregate بدل مصفوفة payments
+  // الكاملة من الـ store. نداءان منفصلان عمداً (لا اشتقاق أحدهما من الآخر) — totalRevenue
+  // يشمل أي دفعة بلا groupId أيضاً (نفس getNetRevenue(كل الدفعات) الأصلي)، بينما تجميع
+  // المجموعات يبقى بالضرورة بلا تلك الدفعات غير المرتبطة بمجموعة.
+  const { data: totalRevenue = 0 } = useAsyncData(
+    () => pgGetPaymentAggregates({ groupBy: 'none' }).then((rows) => rows[0]?.revenue ?? 0),
+    [],
+    0,
+  );
+  const { data: groupRevenueRows = [] } = useAsyncData(
+    () => pgGetPaymentAggregates({ groupBy: 'group' }),
+    [],
+    [],
+  );
+  const revenueByGroup = useMemo(
+    () => new Map(zeroFillGroupAggregate(groupRevenueRows, groups).map((g) => [g.id, g.revenue])),
+    [groupRevenueRows, groups],
+  );
+
+  // Scalability Architecture Phase 4 Cutover 2: عرض الشبكة (GroupCard) يحتاج getGroupStats
+  // بالضبط كما تحتاجه GroupStatistics.jsx (P9) — شهر/سنة "الآن" الحقيقيان، غير مُفلتَر
+  // بمجموعة (كل المجموعات تحتاج نفس الصفوف). نداء واحد هنا، يُمرَّر لكل GroupCard كـ prop
+  // بدل أن يقرأ كل بطاقة payments من الـ store بنفسها — نفس مصدر البيانات والصيغة
+  // المُستخدَمَين في عرض القائمة (list view)، فقط getGroupStats بدل getRevenueByGroup.
+  const now = new Date();
+  const currentMonth = now.getMonth() + 1;
+  const currentYear  = now.getFullYear();
+  const { data: monthPayments = [], error: monthPaymentsErr } = useAsyncData(
+    () => pgGetPayments({ month: currentMonth, year: currentYear }), [currentMonth, currentYear], []);
+
+  useEffect(() => {
+    if (monthPaymentsErr) toast.error(monthPaymentsErr.message || 'فشل تحميل مدفوعات هذا الشهر');
+  }, [monthPaymentsErr]);
+
+  // C4 Attendance migration Phase 2: same principle as monthPayments above — ONE
+  // GET /api/attendance/aggregate?groupBy=group call for every group at once, instead of
+  // GroupCard reading+filtering the full global attendance array N times per render.
+  const { data: groupAttendanceRows = [], error: groupAttendanceErr } = useAsyncData(
+    () => pgGetAttendanceAggregate({ groupBy: 'group' }), [], []);
+  const attendanceStatsByGroup = useMemo(
+    () => new Map(groupAttendanceRows.map((r) => [r.key, r])),
+    [groupAttendanceRows],
+  );
+
+  useEffect(() => {
+    if (groupAttendanceErr) toast.error(groupAttendanceErr.message || 'فشل تحميل إحصاءات حضور المجموعات');
+  }, [groupAttendanceErr]);
 
   // ── Modal state ───────────────────────────────────────────
   const [modal,         setModal]        = useState({ type: null, group: null });
@@ -106,14 +153,19 @@ export default function GroupsPage() {
     await run(async () => {
       if (modal.type === 'edit' && modal.group) {
         const updated = updateGroup(modal.group.id, formData, groups);
-        const saved   = await pgUpdateGroup(modal.group.id, updated);
+        const raw     = await pgUpdateGroup(modal.group.id, updated);
+        // نفس تطبيع normalizeCollectionForMerge المُستخدَم في مسار الإقلاع/المزامنة —
+        // بلا هذا، استجابة الخادم الخام (teacherName بلا teacher) تمحو حقل "المدرس"
+        // من الحالة المحلية فوراً بعد الحفظ حتى تُعاد المزامنة (انظر تدقيق التثبيت النهائي).
+        const [saved] = normalizeCollectionForMerge('groups', [raw]);
         setGroups(prev => prev.map(g => g.id === modal.group.id ? saved : g));
         addLog({ action:'update', module:'groups', entityType:'group', entityId:saved.id, description:`تعديل مجموعة: ${saved.name}` })
           .catch((e) => toast.error(e.message || 'تعذّر تسجيل الحدث في سجل النشاط'));
         toast.success(`تم تعديل "${saved.name}" ✓`);
       } else {
         const ng    = createGroup(formData, groups);
-        const saved = await pgCreateGroup(ng);
+        const raw   = await pgCreateGroup(ng);
+        const [saved] = normalizeCollectionForMerge('groups', [raw]);
         setGroups(prev => [...prev, saved]);
         addLog({ action:'create', module:'groups', entityType:'group', entityId:saved.id, description:`إنشاء مجموعة: ${saved.name}` })
           .catch((e) => toast.error(e.message || 'تعذّر تسجيل الحدث في سجل النشاط'));
@@ -134,7 +186,20 @@ export default function GroupsPage() {
       closeModal();
       return;
     }
-    const attendanceCount = attendance.filter(a => a.groupId === g.id).length;
+    // C4 Attendance migration Phase 2: بدل مصفوفة attendance الكاملة من الـ store، يُجلَب
+    // إجمالي سجلات هذه المجموعة تحديداً فقط عبر GET /api/attendance/aggregate?groupBy=
+    // group&groupId= (نفس نمط pgGetCommunications/pgGetPayments أدناه بالضبط — نداء طازج
+    // عند الحذف، لا إعادة استخدام لـ attendanceStatsByGroup المعروضة على البطاقات، لضمان
+    // فحص حقيقي وقت الحذف نفسه).
+    let attendanceCount;
+    try {
+      const rows = await pgGetAttendanceAggregate({ groupBy: 'group', groupId: g.id });
+      attendanceCount = rows[0]?.total ?? 0;
+    } catch (e) {
+      toast.error(e.message || 'فشل التحقّق من سجلات حضور المجموعة');
+      closeModal();
+      return;
+    }
     if (attendanceCount > 0) {
       toast.error(`لا يمكن حذف المجموعة — لها ${attendanceCount} سجل حضور تاريخي.`);
       closeModal();
@@ -158,19 +223,37 @@ export default function GroupsPage() {
       closeModal();
       return;
     }
-    const communicationsCount = communications.filter(c => c.groupId === g.id).length;
+    // Pre-Installer Audit C4: بدل مصفوفة communications الكاملة من الـ store (لم تعد
+    // تُحمَّل إقلاعياً — انظر db.middleware.js)، يُجلَب عدد سجلات تواصل هذه المجموعة
+    // تحديداً فقط عبر GET /api/communications?groupId= (نفس نمط pgGetPayments أدناه بالضبط).
+    let communicationsCount;
+    try {
+      communicationsCount = (await pgGetCommunications({ groupId: g.id })).length;
+    } catch (e) {
+      toast.error(e.message || 'فشل التحقّق من سجلات تواصل المجموعة');
+      closeModal();
+      return;
+    }
     if (communicationsCount > 0) {
       toast.error(`لا يمكن حذف المجموعة — لها ${communicationsCount} سجل تواصل مرتبط.`);
       closeModal();
       return;
     }
-    const homeworksCount = homeworks.filter(h => h.groupId === g.id).length;
-    if (homeworksCount > 0) {
-      toast.error(`لا يمكن حذف المجموعة — لها ${homeworksCount} واجب مسجَّل.`);
+    // Homework guard (C3: matched by the group's grade — Homework 2.0 targets grade, not
+    // group): Phase 2.1 moved it to the server, inside DELETE /api/groups/:id itself
+    // (backend/src/routes/groupDelete.js, 'groups' permission) — reading homework here needed
+    // the unrelated 'homework' permission. Its 409 (code GROUP_HAS_HOMEWORK) is shown below.
+    // Scalability Architecture Phase 4 Cutover 1: بدل مصفوفة payments الكاملة، عدد
+    // مدفوعات هذه المجموعة تحديداً يُجلَب عبر GET /api/payments?groupId= (نفس نطاق
+    // .filter(p=>p.groupId===g.id) السابق بالضبط).
+    let paymentsCount;
+    try {
+      paymentsCount = (await pgGetPayments({ groupId: g.id })).length;
+    } catch (e) {
+      toast.error(e.message || 'فشل التحقّق من مدفوعات المجموعة');
       closeModal();
       return;
     }
-    const paymentsCount = payments.filter(p => p.groupId === g.id).length;
     if (paymentsCount > 0) {
       toast.error(`لا يمكن حذف المجموعة — لها ${paymentsCount} دفعة مسجَّلة.`);
       closeModal();
@@ -183,8 +266,8 @@ export default function GroupsPage() {
         .catch((e) => toast.error(e.message || 'تعذّر تسجيل الحدث في سجل النشاط'));
       toast.info(`تم حذف "${g.name}"`);
       closeModal();
-    }, { errorMsg: 'فشل حذف المجموعة' });
-  }, [modal.group, students, attendance, exams, admissions, communications, homeworks, payments, setGroups, run, toast, addLog, currentUser, closeModal]);
+    }, { errorMsg: (err) => (err?.code === 'GROUP_HAS_HOMEWORK' ? err.message : 'فشل حذف المجموعة') });
+  }, [modal.group, students, exams, admissions, setGroups, run, toast, addLog, currentUser, closeModal]);
 
   const selStyle = { background:'var(--surface2)', border:'1px solid var(--border)', borderRadius:9, padding:'7px 11px', color:'var(--text)', fontFamily:'Cairo,sans-serif', fontSize:'0.82rem', outline:'none', cursor:'pointer', direction:'rtl' };
 
@@ -219,7 +302,7 @@ export default function GroupsPage() {
 
       {/* ── Overview stats ──────────────────── */}
       <SectionBoundary label="Overview Stats">
-        <OverviewBar groups={groups} students={students} payments={payments} attendance={attendance} treasuryTxn={treasuryTxn}/>
+        <OverviewBar groups={groups} students={students} totalRevenue={totalRevenue}/>
       </SectionBoundary>
 
       {/* ── Filters ─────────────────────────── */}
@@ -262,6 +345,8 @@ export default function GroupsPage() {
                 <SectionBoundary key={group.id} label={`GroupCard:${group.id}`}>
                   <GroupCard
                     group={group}
+                    payments={monthPayments}
+                    attendanceStats={attendanceStatsByGroup.get(group.id)}
                     onEdit={() => openEdit(group)}
                     onDelete={() => openDelete(group)}
                     onViewStudents={() => openViewStudents(group)}
@@ -277,8 +362,9 @@ export default function GroupsPage() {
                 const count   = students.filter(s => s.groupId === group.id && s.status === 'active').length;
                 const fillPct = group.max > 0 ? Math.round(count / group.max * 100) : 0;
                 const isFull  = count >= group.max;
-                // BUG-02: صافي بعد طرح الاسترداد الفعّال (getNetRevenue) — نفس منطق OverviewBar أعلاه.
-                const revenue = getNetRevenue(payments.filter(p => p.groupId === group.id), treasuryTxn);
+                // BUG-02: صافي بعد طرح الاسترداد الفعّال — الآن مُحسَب من جهة الخادم
+                // (GET /api/payments/aggregate?groupBy=group)، لا مصفوفة payments المحلية.
+                const revenue = revenueByGroup.get(group.id) ?? 0;
 
                 return (
                   <div key={group.id} style={{

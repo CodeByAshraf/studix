@@ -69,7 +69,16 @@ export function updateGroup(id, data, existing = []) {
 
 
 // ── Client-side helpers ────────────────────────────────────────
-export function getGroupStats(group, students, payments, attendance, treasuryTxn = []) {
+// C4 Attendance migration Phase 2: the 4th parameter used to be the FULL global attendance
+// array, filtered internally by this function (`attendance.filter(a => a.groupId ===
+// group.id)`) — called once per group per render (GroupCard/GroupStatistics), an N-times
+// re-filter of the same large array. It is now a single pre-aggregated row for THIS group
+// (the shape GET /api/attendance/aggregate?groupBy=group returns: { total, present, absent,
+// late }), fetched ONCE per page (batched across every group) by the caller. Passing `[]`/
+// `undefined` (as existing unit tests that don't exercise attendance still do) safely
+// produces the same attendancePct: null as before, since `[].total`/`undefined.total` is
+// undefined either way.
+export function getGroupStats(group, students, payments, attendanceStats = {}, treasuryTxn = []) {
   const groupStudents = students.filter(s => s.groupId === group.id && s.status === 'active');
   const allStudents   = students.filter(s => s.groupId === group.id);
   const month = new Date().getMonth() + 1;
@@ -86,9 +95,8 @@ export function getGroupStats(group, students, payments, attendance, treasuryTxn
     const fee = Number(s.monthlyFee);
     return sum + (fee > 0 ? fee : (Number(group.price) || 0));
   }, 0);
-  const recentAtt = attendance.filter(a => a.groupId === group.id);
-  const attPct = recentAtt.length
-    ? Math.round(recentAtt.filter(a => a.status === 'present').length / recentAtt.length * 100)
+  const attPct = attendanceStats && attendanceStats.total
+    ? Math.round(attendanceStats.present / attendanceStats.total * 100)
     : null;
   const fillPct = group.max > 0 ? Math.round(groupStudents.length / group.max * 100) : 0;
   const isFull  = groupStudents.length >= group.max;

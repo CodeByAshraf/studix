@@ -6,28 +6,64 @@
 // month/year (same convention as ReportsPage.jsx/FinancialAnalytics.jsx) and nets out
 // active refunds via the shared getNetRevenue() helper (same single source of truth used
 // everywhere else in the app — no refund logic duplicated here).
-import { describe, it, expect } from 'vitest';
+//
+// Scalability Architecture Phase 4 Cutover 1: Dashboard.jsx now fetches
+// GET /api/payments?month=&year= (this month, feeds monthRev/monthPaid) and
+// GET /api/payments/aggregate?groupBy=none&month=&year= (last month, a single number)
+// instead of reading the store's payments array. We mock fetch directly (same technique
+// as PaymentsPage.payments.test.jsx), deriving both responses from one fixture array so
+// the tests stay a single source of truth per scenario.
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import Dashboard from './Dashboard';
 import { useAppStore } from '../store/app.store';
 import { UIProvider } from '../store/ui.context';
+import { ToastProvider } from '../components/Toast';
 import { formatCurrency } from '../utils/helpers';
 
 function renderDashboard() {
   return render(
-    <UIProvider>
-      <Dashboard />
-    </UIProvider>
+    <ToastProvider>
+      <UIProvider>
+        <Dashboard />
+      </UIProvider>
+    </ToastProvider>
   );
 }
+
+function mockPaymentsFetch(payments, treasuryTxn = []) {
+  globalThis.fetch = vi.fn((url) => {
+    const u = String(url);
+    const qp = new URL(u).searchParams;
+    const month = qp.get('month');
+    const year = qp.get('year');
+    let rows = payments;
+    if (month !== null) rows = rows.filter((p) => p.month === Number(month));
+    if (year !== null) rows = rows.filter((p) => p.year === Number(year));
+
+    if (u.includes('/api/payments/aggregate')) {
+      const gross = rows.reduce((s, p) => s + Number(p.amount), 0);
+      const refunded = rows.reduce((s, p) => {
+        const refs = treasuryTxn.filter((t) => t.paymentId === p.id && t.refType === 'refund' && t.status === 'active');
+        return s + refs.reduce((rs, t) => rs + Number(t.amount), 0);
+      }, 0);
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true, data: [{ key: null, count: rows.length, revenue: gross - refunded }] }) });
+    }
+    if (u.includes('/api/payments?')) {
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true, data: rows }) });
+    }
+    return Promise.reject(new Error(`unexpected fetch: ${u}`));
+  });
+}
+afterEach(() => { vi.restoreAllMocks(); });
 
 function seed(payments, treasuryTxn = []) {
   useAppStore.setState({
     students: [], groups: [], attendance: [], activityLogs: [],
-    communications: [], commTasks: [],
-    payments, treasuryTxn,
+    communications: [], commTasks: [], treasuryTxn,
   });
+  mockPaymentsFetch(payments, treasuryTxn);
 }
 
 function currentMonthYear() {
@@ -36,25 +72,25 @@ function currentMonthYear() {
 }
 
 describe('Dashboard — "إيراد هذا الشهر" is net of active refunds (BUG-02, remaining part)', () => {
-  it('payment 1000, refund 0 -> revenue unchanged at 1000', () => {
+  it('payment 1000, refund 0 -> revenue unchanged at 1000', async () => {
     const { month, year } = currentMonthYear();
     seed([{ id: 'p1', studentId: 's1', month, year, amount: 1000, status: 'paid' }], []);
     renderDashboard();
-    expect(screen.getByText(formatCurrency(1000))).toBeInTheDocument();
+    expect(await screen.findByText(formatCurrency(1000))).toBeInTheDocument();
   });
 
-  it('payment 1000, active refund 300 -> revenue shows 700, not 1000', () => {
+  it('payment 1000, active refund 300 -> revenue shows 700, not 1000', async () => {
     const { month, year } = currentMonthYear();
     seed(
       [{ id: 'p1', studentId: 's1', month, year, amount: 1000, status: 'paid' }],
       [{ paymentId: 'p1', refType: 'refund', status: 'active', amount: 300 }],
     );
     renderDashboard();
-    expect(screen.getByText(formatCurrency(700))).toBeInTheDocument();
+    expect(await screen.findByText(formatCurrency(700))).toBeInTheDocument();
     expect(screen.queryByText(formatCurrency(1000))).not.toBeInTheDocument();
   });
 
-  it('multiple active refunds on the same payment are deducted cumulatively', () => {
+  it('multiple active refunds on the same payment are deducted cumulatively', async () => {
     const { month, year } = currentMonthYear();
     seed(
       [{ id: 'p1', studentId: 's1', month, year, amount: 1000, status: 'paid' }],
@@ -64,26 +100,26 @@ describe('Dashboard — "إيراد هذا الشهر" is net of active refunds 
       ],
     );
     renderDashboard();
-    expect(screen.getByText(formatCurrency(500))).toBeInTheDocument();
+    expect(await screen.findByText(formatCurrency(500))).toBeInTheDocument();
   });
 
-  it('a cancelled (non-active) refund transaction is never deducted', () => {
+  it('a cancelled (non-active) refund transaction is never deducted', async () => {
     const { month, year } = currentMonthYear();
     seed(
       [{ id: 'p1', studentId: 's1', month, year, amount: 1000, status: 'paid' }],
       [{ paymentId: 'p1', refType: 'refund', status: 'cancelled', amount: 300 }],
     );
     renderDashboard();
-    expect(screen.getByText(formatCurrency(1000))).toBeInTheDocument();
+    expect(await screen.findByText(formatCurrency(1000))).toBeInTheDocument();
   });
 
-  it('no payments -> revenue shows 0', () => {
+  it('no payments -> revenue shows 0', async () => {
     seed([], []);
     renderDashboard();
-    expect(screen.getByText(formatCurrency(0))).toBeInTheDocument();
+    expect(await screen.findByText(formatCurrency(0))).toBeInTheDocument();
   });
 
-  it('only counts the current calendar month — a payment from last month is excluded', () => {
+  it('only counts the current calendar month — a payment from last month is excluded', async () => {
     const now = new Date();
     const thisMonth = now.getMonth() + 1;
     const thisYear = now.getFullYear();
@@ -96,11 +132,11 @@ describe('Dashboard — "إيراد هذا الشهر" is net of active refunds 
     ], []);
     renderDashboard();
 
-    expect(screen.getByText(formatCurrency(100))).toBeInTheDocument();
+    expect(await screen.findByText(formatCurrency(100))).toBeInTheDocument();
     expect(screen.queryByText(formatCurrency(1000))).not.toBeInTheDocument();
   });
 
-  it('only counts the current year — the same month number in a past year is excluded', () => {
+  it('only counts the current year — the same month number in a past year is excluded', async () => {
     const now = new Date();
     const thisMonth = now.getMonth() + 1;
     const thisYear = now.getFullYear();
@@ -111,7 +147,7 @@ describe('Dashboard — "إيراد هذا الشهر" is net of active refunds 
     ], []);
     renderDashboard();
 
-    expect(screen.getByText(formatCurrency(100))).toBeInTheDocument();
+    expect(await screen.findByText(formatCurrency(100))).toBeInTheDocument();
     expect(screen.queryByText(formatCurrency(1000))).not.toBeInTheDocument();
   });
 });

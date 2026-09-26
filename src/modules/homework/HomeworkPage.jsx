@@ -1,5 +1,5 @@
 // src/modules/homework/HomeworkPage.jsx
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useAppStore } from '../../store/app.store';
 import { useAuth }     from '../../store/auth.context';
 import { SectionBoundary } from '../../components/ErrorBoundary';
@@ -8,7 +8,8 @@ import Button        from '../../components/ui/Button';
 import { useToast }  from '../../components/Toast';
 import { useErrorHandler } from '../../hooks/useErrorHandler';
 import { createHomework, updateHomework, getHomeworkEligibleStudents, HW_STATUS, SUB_STATUS, isOverdue, daysUntilDue } from '../../services/homeworkService';
-import { pgCreateHomework, pgUpdateHomework, pgDeleteHomework } from '../../services/api';
+import { pgCreateHomework, pgUpdateHomework, pgDeleteHomework, pgGetHwSubmissionsAggregate, pgGetHomeworks } from '../../services/api';
+import { useAsyncData } from '../../hooks/useAsyncData';
 import { formatDate } from '../../utils/helpers';
 import HomeworkForm     from './HomeworkForm';
 import HomeworkTracking from './HomeworkTracking';
@@ -140,14 +141,39 @@ function HomeworkCard({ hw, group, stats, onEdit, onDelete, onTrack }) {
 export default function HomeworkPage() {
   const addLog               = useAppStore((s) => s.addLog);
   const groups               = useAppStore((s) => s.groups);
-  const homeworks            = useAppStore((s) => s.homeworks);
-  const hwSubmissions        = useAppStore((s) => s.hwSubmissions);
-  const setHomeworks         = useAppStore((s) => s.setHomeworks);
+  const setStoreHomeworks    = useAppStore((s) => s.setHomeworks);
   const setHwSubmissions     = useAppStore((s) => s.setHwSubmissions);
   const students             = useAppStore((s) => s.students);
   const { currentUser } = useAuth();
   const toast = useToast();
   const { loading, run } = useErrorHandler(toast);
+
+  // Phase 2 (Homework global-read migration): the parent list is read once per page mount via
+  // GET /api/homeworks (pgGetHomeworks) instead of the global s.homeworks bootstrap. KPIs,
+  // the subject dropdown and the tracking table span every homework, so the full list is the
+  // genuinely-required scope here. Writes still also update the store copy (setStoreHomeworks)
+  // — it remains in PG_COLLECTIONS and feeds backup/export until the Phase 3 cutover.
+  const [homeworks, setLocalHomeworks] = useState([]);
+  const { data: fetchedHomeworks, loading: homeworksLoading, error: homeworksError } = useAsyncData(
+    () => pgGetHomeworks(), [], null);
+
+  useEffect(() => {
+    if (!fetchedHomeworks) return;
+    // Keep any homework created in this session before the fetch resolved (not in the response).
+    setLocalHomeworks(prev => {
+      const ids = new Set(fetchedHomeworks.map(h => h.id));
+      return [...prev.filter(h => !ids.has(h.id)), ...fetchedHomeworks];
+    });
+  }, [fetchedHomeworks]);
+
+  useEffect(() => {
+    if (homeworksError) toast.error(homeworksError.message || 'فشل تحميل الواجبات');
+  }, [homeworksError]);
+
+  const setHomeworks = useCallback((updater) => {
+    setLocalHomeworks(updater);
+    setStoreHomeworks(updater);
+  }, [setStoreHomeworks]);
 
   const [view,        setView]        = useState('list');
   const [modal,       setModal]       = useState({ type:null, hw:null });
@@ -165,26 +191,50 @@ export default function HomeworkPage() {
   const openTrack  = useCallback((hw) => { setTrackHw(hw); setView('tracking'); }, []);
   const closeTrack = useCallback(() => { setTrackHw(null); setView('list'); },     []);
 
+  // C4 Grades/hwSubmissions Frontend Migration (Batch A, feature 004): two page-level aggregate
+  // fetches (fetched ONCE, not per rendered homework row — FR-007/SC-002) replace the global
+  // hwSubmissions store selector entirely. statusAgg feeds kpi.totalSub; perHomeworkAgg feeds
+  // getHwStats via a Map lookup below.
+  const { data: statusAgg = [], error: statusAggError } = useAsyncData(
+    () => pgGetHwSubmissionsAggregate({ groupBy: 'status' }), [], []);
+  const { data: perHomeworkAgg = [], error: perHomeworkAggError } = useAsyncData(
+    () => pgGetHwSubmissionsAggregate({ groupBy: 'homework' }), [], []);
+
+  useEffect(() => {
+    const err = statusAggError || perHomeworkAggError;
+    if (err) toast.error(err.message || 'فشل تحميل إحصائيات تسليم الواجبات');
+  }, [statusAggError, perHomeworkAggError]);
+
+  const perHomeworkMap = useMemo(() =>
+    new Map(perHomeworkAgg.map(r => [r.key, r])),
+  [perHomeworkAgg]);
+
   // ── KPIs ──────────────────────────────────────────────────
   const kpi = useMemo(() => {
     const now = new Date().toISOString().split('T')[0];
     const active  = homeworks.filter(h => h.status==='active').length;
     const overdue = homeworks.filter(h => isOverdue(h)).length;
     const dueToday= homeworks.filter(h => h.dueDate===now && h.status==='active').length;
-    const totalSub= hwSubmissions.filter(s => s.status==='submitted').length;
+    const totalSub= statusAgg.find(r => r.key === 'submitted')?.count ?? 0;
     return { total:homeworks.length, active, overdue, dueToday, totalSub };
-  }, [homeworks, hwSubmissions]);
+  }, [homeworks, statusAgg]);
 
   // ── Filtered list ─────────────────────────────────────────
+  // C3 fix (Pre-Installer Audit): new homeworks no longer carry a groupId (Homework 2.0 —
+  // targeted by grade, not group; see homeworkService.js). `h.groupId === filterGroup` was
+  // therefore always empty for any current homework. Resolve the selected group's grade
+  // and filter by `h.grade` instead — mirrors getHomeworkEligibleStudents' own grade-only
+  // eligibility rule, and covers historical rows too (grade was backfilled on migration).
   const filtered = useMemo(() => {
     const q = search.toLowerCase();
+    const filterGroupGrade = filterGroup ? groups.find(g => g.id === filterGroup)?.grade : null;
     return homeworks.filter(h =>
-      (!filterStatus || h.status === filterStatus) &&
-      (!filterGroup  || h.groupId === filterGroup)  &&
-      (!filterSubj   || h.subject === filterSubj)   &&
+      (!filterStatus       || h.status === filterStatus)      &&
+      (!filterGroupGrade   || h.grade  === filterGroupGrade)  &&
+      (!filterSubj         || h.subject === filterSubj)       &&
       (!q || h.title.toLowerCase().includes(q) || h.subject.toLowerCase().includes(q) || h.teacher?.toLowerCase().includes(q))
     ).sort((a,b) => b.dueDate.localeCompare(a.dueDate));
-  }, [homeworks, filterStatus, filterGroup, filterSubj, search]);
+  }, [homeworks, filterStatus, filterGroup, filterSubj, search, groups]);
 
   const subjects = useMemo(() => [...new Set(homeworks.map(h=>h.subject))], [homeworks]);
 
@@ -194,14 +244,16 @@ export default function HomeworkPage() {
   // filters the flat students array directly and never reads groupId at all.
   const getHwStats = useCallback((hw) => {
     const eligibleStudents = getHomeworkEligibleStudents(hw, students);
-    const subs = hwSubmissions.filter(s => s.hwId===hw.id);
+    const agg = perHomeworkMap.get(hw.id);
+    // FR-008: total stays the eligible-student count (client-computed), never the aggregate
+    // row's own `total` (a submission-ROW count — can differ from eligibility, see research.md §4).
     return {
       total:     eligibleStudents.length,
-      submitted: subs.filter(s=>s.status==='submitted').length,
-      late:      subs.filter(s=>s.status==='late').length,
-      missing:   subs.filter(s=>s.status==='missing').length,
+      submitted: agg?.submitted ?? 0,
+      late:      agg?.late ?? 0,
+      missing:   agg?.missing ?? 0,
     };
-  }, [students, hwSubmissions]);
+  }, [students, perHomeworkMap]);
 
   // ── CRUD ──────────────────────────────────────────────────
   // Phase 3B-6: PostgreSQL هو مصدر الحقيقة الآن — الحفظ/الحذف يذهب للـ backend أولاً،
@@ -316,7 +368,9 @@ export default function HomeworkPage() {
               </div>
 
               {/* Grid */}
-              {filtered.length === 0 ? (
+              {filtered.length === 0 && homeworksLoading ? (
+                <div style={{ textAlign:'center', padding:'60px', color:'var(--text3)' }}>جارٍ تحميل الواجبات...</div>
+              ) : filtered.length === 0 ? (
                 <div style={{ textAlign:'center', padding:'60px', background:'var(--surface)', border:'1px solid var(--border)', borderRadius:14, color:'var(--text3)' }}>
                   <div style={{ fontSize:44, opacity:.4, marginBottom:10 }}>📋</div>
                   <div style={{ fontWeight:600 }}>{hasFilters ? 'لا توجد نتائج' : 'لا توجد واجبات بعد'}</div>
@@ -351,7 +405,7 @@ export default function HomeworkPage() {
                   </div>
                   <div style={{ background:'var(--surface)', border:'1px solid var(--border)', borderRadius:14, overflow:'hidden' }}>
                     {homeworks.length === 0 ? (
-                      <div style={{ textAlign:'center', padding:'40px', color:'var(--text3)' }}>لا توجد واجبات</div>
+                      <div style={{ textAlign:'center', padding:'40px', color:'var(--text3)' }}>{homeworksLoading ? 'جارٍ تحميل الواجبات...' : 'لا توجد واجبات'}</div>
                     ) : (
                       <table style={{ width:'100%', borderCollapse:'collapse', fontSize:'0.82rem' }}>
                         <thead>

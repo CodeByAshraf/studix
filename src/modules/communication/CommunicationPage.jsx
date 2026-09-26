@@ -5,11 +5,13 @@
 // موديول مستقل — لا يعتمد على موديولات أخرى.
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useAppStore } from '../../store/app.store';
 import { useAuth } from '../../store/auth.context';
 import { SectionBoundary } from '../../components/ErrorBoundary';
 import { useToast } from '../../components/Toast';
+import { useAsyncData } from '../../hooks/useAsyncData';
+import { normalizeCollectionForMerge } from '../../store/db.middleware';
 import { CommType, CommResult, CommStatus, TaskStatus } from './constants';
 import {
   buildCommunication, buildFollowupTask, searchCommunications, nextCommNumber,
@@ -37,6 +39,32 @@ export default function CommunicationPage() {
   const records = useAppStore((s) => s.communications);
   const tasks   = useAppStore((s) => s.commTasks);
   const realParents = useAppStore((s) => s.parents);
+  const setCommunications = useAppStore((s) => s.setCommunications);
+  const setCommTasks      = useAppStore((s) => s.setCommTasks);
+
+  // Pre-Installer Audit C4: communications/commTasks are no longer boot-loaded into the
+  // store at login (see db.middleware.js's PG_COLLECTIONS) — this is their one live
+  // consumer, so it fetches and seeds both itself on mount instead, mirroring the same
+  // "fetch on the page that needs it" pattern already used for admissionPayments
+  // (AdmissionsPage.jsx). normalizeCollectionForMerge applies the exact same per-field
+  // fixups (legacyParentName→parentName, date normalization) boot-sync used to apply.
+  const { data: commsData, error: commsError } = useAsyncData(
+    () => pgGetCollection('communications'), [], null);
+  const { data: tasksData, error: tasksError } = useAsyncData(
+    () => pgGetCollection('commTasks'), [], null);
+
+  useEffect(() => {
+    if (commsData) setCommunications(normalizeCollectionForMerge('communications', commsData));
+  }, [commsData, setCommunications]);
+  useEffect(() => {
+    if (tasksData) setCommTasks(normalizeCollectionForMerge('commTasks', tasksData));
+  }, [tasksData, setCommTasks]);
+  useEffect(() => {
+    if (commsError) toast.error(commsError.message || 'فشل تحميل سجلات التواصل');
+  }, [commsError]);
+  useEffect(() => {
+    if (tasksError) toast.error(tasksError.message || 'فشل تحميل مهام المتابعة');
+  }, [tasksError]);
   // MEDIUM-C (Finding 5): طلاب/قبولات مُزامَنة بالفعل — تُمرَّران لـ CommFormModal فقط
   // لبحث الربط الحقيقي (studentId/admissionId)؛ realParents (أعلاه) تُمرَّر أيضاً لحلّ
   // اسم ولي الأمر الحقيقي عند اختيار طالب له parentId. لا استيراد store داخل المودال

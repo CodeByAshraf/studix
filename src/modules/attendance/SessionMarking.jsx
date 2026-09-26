@@ -1,14 +1,15 @@
 // src/modules/attendance/SessionMarking.jsx
 // Core feature: open a session, mark every student, save
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo, useCallback, useEffect } from 'react';
 import { useAppStore } from '../../store/app.store';
 import { useAuth }     from '../../store/auth.context';
 import { useToast }  from '../../components/Toast';
 import Button        from '../../components/ui/Button';
 import StatusToggle, { StatusQuickBtn } from './components/StatusToggle';
 import AttendanceStats from './components/AttendanceStats';
-import { getSessionRecords, STATUS_META } from '../../services/attendanceService';
-import { pgSaveAttendanceSession } from '../../services/api';
+import { STATUS_META } from '../../services/attendanceService';
+import { pgSaveAttendanceSession, pgGetEligibleStudentsForSession, pgGetAttendance } from '../../services/api';
+import { useAsyncData } from '../../hooks/useAsyncData';
 import { useAvatarStyle } from '../students/components/StudentAvatar';
 import { formatDate } from '../../utils/helpers';
 
@@ -72,7 +73,6 @@ function StudentMarkRow({ student, status, onStatusChange, index }) {
 // ────────────────────────────────────────────────────────────
 export default function SessionMarking({ onDone }) {
   const addLog               = useAppStore((s) => s.addLog);
-  const attendance           = useAppStore((s) => s.attendance);
   const groups               = useAppStore((s) => s.groups);
   const setAttendance        = useAppStore((s) => s.setAttendance);
   const students             = useAppStore((s) => s.students);
@@ -91,9 +91,25 @@ export default function SessionMarking({ onDone }) {
   // ── Load group students ───────────────────────────────────
   const group = useMemo(() => groups.find(g => g.id === selectedGroup), [groups, selectedGroup]);
 
-  const groupStudents = useMemo(() =>
-    students.filter(s => s.groupId === selectedGroup && s.status === 'active'),
-  [students, selectedGroup]);
+  // Group Closure (Attendance Integration) — the roster is now enrollment/date/day based
+  // (GET /api/attendance-sessions/:groupId/:date/roster → attendanceEligibility.js), not a
+  // plain students.groupId match. Re-fetched whenever the group or date changes — this is
+  // exactly what "eligible for THIS group on THIS date" means (Primary and Additional
+  // enrollments both included, per the backend rule). Eligible ids are joined against the
+  // local students store for display fields; a student's own active/inactive business
+  // status (unrelated to enrollment) is still applied here, same as before.
+  const { data: eligibleIds = [], loading: rosterLoading, error: rosterError } = useAsyncData(
+    () => (selectedGroup ? pgGetEligibleStudentsForSession(selectedGroup, sessionDate) : Promise.resolve([])),
+    [selectedGroup, sessionDate], []);
+
+  useEffect(() => {
+    if (rosterError) toast.error(rosterError.message || 'فشل تحميل قائمة الطلاب المؤهَّلين لهذه الحصة');
+  }, [rosterError]);
+
+  const groupStudents = useMemo(() => {
+    const eligibleSet = new Set(eligibleIds);
+    return students.filter(s => eligibleSet.has(s.id) && s.status === 'active');
+  }, [students, eligibleIds]);
 
   const filteredStudents = useMemo(() => {
     const q = search.toLowerCase();
@@ -101,9 +117,17 @@ export default function SessionMarking({ onDone }) {
   }, [groupStudents, search]);
 
   // ── Existing session check ────────────────────────────────
-  const existingSession = useMemo(() =>
-    getSessionRecords(selectedGroup, sessionDate, attendance),
-  [selectedGroup, sessionDate, attendance]);
+  // C4 Attendance migration Phase 2: scoped GET /api/attendance?groupId=&date= instead of
+  // filtering the full global attendance array — this is already exactly a group+date
+  // query (getSessionRecords' own filter), so the fetch's result needs no further
+  // filtering client-side.
+  const { data: existingSession = [], loading: existingSessionLoading, error: existingSessionError } = useAsyncData(
+    () => (selectedGroup ? pgGetAttendance({ groupId: selectedGroup, date: sessionDate }) : Promise.resolve([])),
+    [selectedGroup, sessionDate], []);
+
+  useEffect(() => {
+    if (existingSessionError) toast.error(existingSessionError.message || 'فشل التحقّق من وجود جلسة سابقة لهذا التاريخ');
+  }, [existingSessionError]);
 
   // ── Current stats ─────────────────────────────────────────
   const stats = useMemo(() => {
@@ -120,13 +144,19 @@ export default function SessionMarking({ onDone }) {
   // ── Start session ─────────────────────────────────────────
   const handleStartSession = useCallback(() => {
     if (!selectedGroup) { toast.warning('اختر مجموعة أولاً'); return; }
+    if (rosterLoading) { toast.warning('جارٍ تحميل قائمة الطلاب — حاول بعد لحظة'); return; }
+    // C4 Attendance migration Phase 2: existingSession is now an async fetch (previously a
+    // synchronous filter over the already-loaded global array) — guard against starting
+    // before it resolves for the current group/date, or a stale prior session's marks
+    // could get pre-filled instead of the real one (a race that couldn't happen before).
+    if (existingSessionLoading) { toast.warning('جارٍ التحقّق من وجود جلسة سابقة — حاول بعد لحظة'); return; }
     // Pre-fill from existing session if any
     const init = {};
     groupStudents.forEach(s => { init[s.id] = 'present'; }); // default all present
     existingSession.forEach(r => { init[r.studentId] = r.status; });
     setMarks(init);
     setStep('marking');
-  }, [selectedGroup, groupStudents, existingSession, toast]);
+  }, [selectedGroup, rosterLoading, existingSessionLoading, groupStudents, existingSession, toast]);
 
   // ── Mark all ──────────────────────────────────────────────
   const markAll = useCallback((status) => {
@@ -214,6 +244,9 @@ export default function SessionMarking({ onDone }) {
               <select value={selectedGroup} onChange={e => setSelectedGroup(e.target.value)} style={{ ...INP_STYLE, width:'100%', cursor:'pointer' }} {...INP_EVENTS}>
                 <option value="">اختر المجموعة...</option>
                 {groups.map(g => {
+                  // تقريبي عمداً (Primary Group فقط) — لا يُجلَب عدد مؤهَّل حقيقي لكل مجموعة هنا
+                  // (يتطلّب استدعاء شبكة منفصلاً لكل مجموعة قبل أي اختيار) — العدد الدقيق
+                  // (enrollment/date/day) يظهر في معاينة "عدد الطلاب" أدناه فور اختيار المجموعة والتاريخ.
                   const count = students.filter(s => s.groupId === g.id && s.status === 'active').length;
                   return <option key={g.id} value={g.id}>{g.name} ({count} طالب)</option>;
                 })}
@@ -248,7 +281,7 @@ export default function SessionMarking({ onDone }) {
             )}
 
             <Button variant="primary" onClick={handleStartSession}
-              disabled={!selectedGroup}>
+              disabled={!selectedGroup || rosterLoading || existingSessionLoading}>
               ▶ بدء تسجيل الحضور
             </Button>
           </div>

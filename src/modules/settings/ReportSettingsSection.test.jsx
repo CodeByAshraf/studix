@@ -25,13 +25,19 @@ beforeEach(() => {
 });
 
 describe('ReportSettingsSection — every requested section is exposed exactly once', () => {
-  it('shows all 12 requested sections with a label and a description', () => {
+  it('shows all 14 requested sections with a label and a description', () => {
     renderSection();
-    expect(REPORT_SECTIONS).toHaveLength(12);
+    expect(REPORT_SECTIONS).toHaveLength(14);
     for (const section of REPORT_SECTIONS) {
       expect(screen.getByText(section.label)).toBeInTheDocument();
       expect(screen.getByText(section.description)).toBeInTheDocument();
     }
+  });
+
+  it('Financial Summary and Payment History are exposed as two separate, non-overlapping switches', () => {
+    renderSection();
+    expect(screen.getByRole('switch', { name: 'الملخّص المالي' })).toBeInTheDocument();
+    expect(screen.getByRole('switch', { name: 'سجل المدفوعات' })).toBeInTheDocument();
   });
 
   it('Health Score and AI Summary are exposed as two independent switches, not one', () => {
@@ -49,7 +55,7 @@ describe('ReportSettingsSection — toggling a switch updates the shared store (
     const cfg = useAppStore.getState().reportConfig;
     expect(cfg.showCharts).toBe(false);
     expect(cfg.showAttendance).toBe(true);
-    expect(cfg.showPayments).toBe(true);
+    expect(cfg.showPaymentHistory).toBe(true);
   });
 
   it('turning it back on restores true', () => {
@@ -61,7 +67,7 @@ describe('ReportSettingsSection — toggling a switch updates the shared store (
   });
 
   it('the switch reflects reportConfig already in the store on mount (off by default state)', () => {
-    useAppStore.setState({ reportConfig: { ...DEFAULT_REPORT_CONFIG, showPayments: false } });
+    useAppStore.setState({ reportConfig: { ...DEFAULT_REPORT_CONFIG, showPaymentHistory: false } });
     renderSection();
     expect(screen.getByRole('switch', { name: 'سجل المدفوعات' })).toHaveAttribute('aria-checked', 'false');
     expect(screen.getByRole('switch', { name: 'الرسوم البيانية' })).toHaveAttribute('aria-checked', 'true');
@@ -70,7 +76,7 @@ describe('ReportSettingsSection — toggling a switch updates the shared store (
   it('the enabled-count badge reflects disabled sections', () => {
     useAppStore.setState({ reportConfig: { ...DEFAULT_REPORT_CONFIG, showCharts: false, showBooklets: false } });
     renderSection();
-    expect(screen.getByText('10 من 12 قسم مفعَّل')).toBeInTheDocument();
+    expect(screen.getByText('12 من 14 قسم مفعَّل')).toBeInTheDocument();
   });
 });
 
@@ -80,15 +86,15 @@ describe('ReportSettingsSection — reset to default', () => {
     renderSection();
 
     fireEvent.click(screen.getByText('↺ إعادة الضبط الافتراضي'));
-    expect(screen.getByText(/سيتم إعادة كل أقسام تقرير الطالب الاحترافي/)).toBeInTheDocument();
+    expect(screen.getByText(/سيتم إعادة كل أقسام تقرير الطالب/)).toBeInTheDocument();
 
     fireEvent.click(screen.getByText('إلغاء'));
     expect(useAppStore.getState().reportConfig.showCharts).toBe(false); // unchanged — cancelled
   });
 
   it('restores every flag to DEFAULT_REPORT_CONFIG and clears persisted storage after confirming', () => {
-    useAppStore.setState({ reportConfig: { ...DEFAULT_REPORT_CONFIG, showCharts: false, showPayments: false } });
-    localStorage.setItem('tc_report_config', JSON.stringify({ ...DEFAULT_REPORT_CONFIG, showCharts: false, showPayments: false }));
+    useAppStore.setState({ reportConfig: { ...DEFAULT_REPORT_CONFIG, showCharts: false, showPaymentHistory: false } });
+    localStorage.setItem('tc_report_config', JSON.stringify({ ...DEFAULT_REPORT_CONFIG, showCharts: false, showPaymentHistory: false }));
     renderSection();
 
     fireEvent.click(screen.getByText('↺ إعادة الضبط الافتراضي'));
@@ -96,6 +102,6 @@ describe('ReportSettingsSection — reset to default', () => {
 
     expect(useAppStore.getState().reportConfig).toEqual(DEFAULT_REPORT_CONFIG);
     expect(localStorage.getItem('tc_report_config')).toBeNull();
-    expect(screen.getByText('12 من 12 قسم مفعَّل')).toBeInTheDocument();
+    expect(screen.getByText('14 من 14 قسم مفعَّل')).toBeInTheDocument();
   });
 });

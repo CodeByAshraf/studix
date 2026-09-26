@@ -1,6 +1,6 @@
 // src/modules/students/StudentProfile.jsx
 // Full profile — attendance · payments · exams · notes
-import { useState, useMemo, useCallback } from 'react';
+import { useEffect, useState, useMemo, useCallback } from 'react';
 import { useAppStore } from '../../store/app.store';
 import { SectionBoundary } from '../../components/ErrorBoundary';
 import Button            from '../../components/ui/Button';
@@ -8,6 +8,15 @@ import StatusBadge       from './components/StatusBadge';
 import StudentAvatar     from './components/StudentAvatar';
 import { formatDate, formatCurrency } from '../../utils/helpers';
 import { getNetRevenue } from '../../services/paymentService';
+import {
+  pgGetPayments, pgUpdateStudent, pgGetAttendance, pgGetGrades,
+  pgGetStudentEnrollments, pgAddAdditionalGroup, pgWithdrawEnrollment,
+} from '../../services/api';
+import { ALL_DAYS, DAYS_AR } from '../../services/groupService';
+import { useAsyncData } from '../../hooks/useAsyncData';
+import { useErrorHandler } from '../../hooks/useErrorHandler';
+import { useToast } from '../../components/Toast';
+import { ConfirmModal } from '../../components/ui/Modal';
 
 // MEDIUM-A Finding 6: نفس قيم preferredMethod الثلاث المستخدَمة في نموذج تعديل ولي
 // الأمر (ParentEditModal.jsx بموديول communication) — نسخة محلية صغيرة هنا بدل استيراد
@@ -24,6 +33,7 @@ const TABS = [
   { id: 'payments',   label: 'المدفوعات',   icon: '💰' },
   { id: 'exams',      label: 'الامتحانات',  icon: '📝' },
   { id: 'notes',      label: 'الملاحظات',   icon: '📋' },
+  { id: 'groups',     label: 'المجموعات',   icon: '◈' },
 ];
 
 // ── Stat pill ────────────────────────────────────────────────
@@ -53,10 +63,13 @@ function SectionHead({ title, count }) {
 // ════════════════════════════════════════════════════════════
 // TAB: Attendance
 // ════════════════════════════════════════════════════════════
-function AttendanceTab({ student, attendance }) {
+// C4 Attendance migration Phase 2: `attendance` is now already student-scoped (fetched by
+// the parent via pgGetAttendance({studentId}), not filtered here from the global array) —
+// only the sort remains this component's own responsibility.
+function AttendanceTab({ attendance }) {
   const records = useMemo(() =>
-    attendance.filter(a => a.studentId === student.id).sort((a, b) => b.date.localeCompare(a.date)),
-  [attendance, student.id]);
+    [...attendance].sort((a, b) => b.date.localeCompare(a.date)),
+  [attendance]);
 
   const stats = useMemo(() => {
     const total   = records.length;
@@ -222,7 +235,7 @@ function PaymentsTab({ student, payments, treasuryTxn }) {
 // ════════════════════════════════════════════════════════════
 // TAB: Exams
 // ════════════════════════════════════════════════════════════
-function ExamsTab({ student, exams, grades }) {
+function ExamsTab({ student, exams, grades, loading }) {
   const studentGrades = useMemo(() =>
     grades
       .filter(g => g.studentId === student.id)
@@ -255,7 +268,7 @@ function ExamsTab({ student, exams, grades }) {
       </div>
 
       <SectionHead title="نتائج الامتحانات" count={studentGrades.length}/>
-      {studentGrades.length === 0 ? (
+      {loading ? null : studentGrades.length === 0 ? (
         <div style={{ textAlign:'center', padding:'32px 0', color:'var(--text3)', fontSize:'0.85rem' }}>لا توجد نتائج بعد</div>
       ) : (
         <div style={{ border:'1px solid var(--border)', borderRadius:12, overflow:'hidden' }}>
@@ -332,10 +345,15 @@ function ExamsTab({ student, exams, grades }) {
 function NotesTab({ student, onSaveNotes }) {
   const [editing, setEditing] = useState(false);
   const [noteText, setNoteText] = useState(student.notes || '');
+  const [saving, setSaving] = useState(false);
 
-  const handleSave = () => {
-    onSaveNotes(noteText);
-    setEditing(false);
+  // onSaveNotes الآن نداء خادم حقيقي (يُعيد true/false) — الإغلاق يحدث فقط عند نجاح
+  // حقيقي؛ عند الفشل يبقى وضع التعديل مفتوحاً بالنص الذي كتبه المستخدم كما هو (لا فقد).
+  const handleSave = async () => {
+    setSaving(true);
+    const ok = await onSaveNotes(noteText);
+    setSaving(false);
+    if (ok) setEditing(false);
   };
 
   return (
@@ -365,8 +383,8 @@ function NotesTab({ student, onSaveNotes }) {
             onBlur={e   => e.target.style.boxShadow='0 0 0 3px rgba(13,148,136,.12)'}
           />
           <div style={{ display:'flex', gap:8, justifyContent:'flex-end', marginTop:10 }}>
-            <Button variant="secondary" size="sm" onClick={() => { setNoteText(student.notes || ''); setEditing(false); }}>إلغاء</Button>
-            <Button variant="primary" size="sm" onClick={handleSave}>حفظ الملاحظات</Button>
+            <Button variant="secondary" size="sm" disabled={saving} onClick={() => { setNoteText(student.notes || ''); setEditing(false); }}>إلغاء</Button>
+            <Button variant="primary" size="sm" loading={saving} onClick={handleSave}>حفظ الملاحظات</Button>
           </div>
         </div>
       ) : (
@@ -385,19 +403,262 @@ function NotesTab({ student, onSaveNotes }) {
 }
 
 // ════════════════════════════════════════════════════════════
+// TAB: Groups (Phase 3B — Multi-Group Enrollment)
+// student_group_enrollments is the source of truth here (via pgGetStudentEnrollments) —
+// not students.groupId, which this tab never reads or writes. Primary Group display is
+// read-only in this tab (changing it stays the existing Phase 1 edit-student path);
+// Additional Groups can be added/withdrawn here via the Phase 3A API as-is.
+// ════════════════════════════════════════════════════════════
+const SELECT_STYLE = {
+  background:'var(--surface)', border:'1px solid var(--border)', borderRadius:9,
+  padding:'9px 12px', color:'var(--text)', fontFamily:'Cairo,sans-serif',
+  fontSize:'0.875rem', outline:'none', width:'100%', direction:'rtl', cursor:'pointer',
+};
+const DATE_INPUT_STYLE = {
+  ...SELECT_STYLE, cursor:'text', flex:1,
+};
+
+function EnrollmentRow({ enrollment, group, onWithdraw, withdrawing }) {
+  return (
+    <div style={{
+      display:'flex', alignItems:'center', justifyContent:'space-between', gap:12,
+      padding:'12px 14px', borderBottom:'1px solid var(--border)',
+    }}>
+      <div style={{ flex:1, minWidth:0 }}>
+        <div style={{ fontWeight:700, fontSize:'0.88rem' }}>{group?.name || 'مجموعة غير معروفة'}</div>
+        <div style={{ display:'flex', gap:12, flexWrap:'wrap', fontSize:'0.72rem', color:'var(--text3)', marginTop:4 }}>
+          {enrollment.startDate && (
+            <span>من {formatDate(enrollment.startDate, { month:'short', day:'numeric', year:'numeric' })}</span>
+          )}
+          {enrollment.endDate && (
+            <span>إلى {formatDate(enrollment.endDate, { month:'short', day:'numeric', year:'numeric' })}</span>
+          )}
+          {Array.isArray(enrollment.attendDays) && enrollment.attendDays.length > 0 && (
+            <span>أيام الحضور: {enrollment.attendDays.map(d => DAYS_AR[d] || d).join('، ')}</span>
+          )}
+        </div>
+      </div>
+      {onWithdraw && (
+        <Button variant="ghost" size="sm" loading={withdrawing} onClick={() => onWithdraw(enrollment)}>سحب</Button>
+      )}
+    </div>
+  );
+}
+
+// يمنع اختيار مجموعة الطالب فيها بالفعل تسجيل نشط (رئيسي أو إضافي) — excludeGroupIds
+// يأتي من enrollments النشطة الحالية (دفاع في العمق فوق رفض الخادم نفسه لهذا التكرار).
+function AddAdditionalGroupForm({ studentId, excludeGroupIds, groups, onAdded, onCancel }) {
+  const toast = useToast();
+  const { loading, run } = useErrorHandler(toast);
+  const [groupId, setGroupId]     = useState('');
+  const [startDate, setStartDate] = useState('');
+  const [endDate, setEndDate]     = useState('');
+  const [days, setDays]           = useState([]);
+
+  const availableGroups = groups.filter(g => !excludeGroupIds.includes(g.id));
+
+  const toggleDay = (d) => setDays(prev => prev.includes(d) ? prev.filter(x => x !== d) : [...prev, d]);
+
+  const handleSubmit = async () => {
+    if (!groupId) { toast.warning('اختر مجموعة'); return; }
+    await run(async () => {
+      const created = await pgAddAdditionalGroup(studentId, {
+        groupId,
+        startDate: startDate || undefined,
+        endDate: endDate || undefined,
+        attendDays: days.length ? days : undefined,
+      });
+      onAdded(created);
+    }, { successMsg: 'تمت إضافة المجموعة الإضافية ✓', errorMsg: 'تعذّر إضافة المجموعة' });
+  };
+
+  return (
+    <div style={{ background:'var(--surface2)', border:'1px solid var(--border)', borderRadius:12, padding:14, marginBottom:14, display:'flex', flexDirection:'column', gap:10 }}>
+      <select value={groupId} onChange={e => setGroupId(e.target.value)} style={SELECT_STYLE}>
+        <option value="">اختر مجموعة إضافية...</option>
+        {availableGroups.map(g => <option key={g.id} value={g.id}>{g.name} — {g.subject}</option>)}
+      </select>
+
+      <div style={{ display:'flex', gap:10 }}>
+        <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)}
+          aria-label="تاريخ البدء (اختياري)" style={DATE_INPUT_STYLE}/>
+        <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)}
+          aria-label="تاريخ الانتهاء (اختياري)" style={DATE_INPUT_STYLE}/>
+      </div>
+
+      <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
+        {ALL_DAYS.map(d => {
+          const active = days.includes(d);
+          return (
+            <button key={d} type="button" onClick={() => toggleDay(d)} aria-pressed={active}
+              style={{
+                padding:'5px 11px', borderRadius:7, fontSize:'0.72rem', fontWeight:700,
+                cursor:'pointer', fontFamily:'Cairo,sans-serif',
+                border: `1.5px solid ${active ? 'var(--accent)' : 'var(--border)'}`,
+                background: active ? 'rgba(13,148,136,.12)' : 'transparent',
+                color: active ? 'var(--accent)' : 'var(--text3)',
+              }}>
+              {DAYS_AR[d]}
+            </button>
+          );
+        })}
+      </div>
+
+      <div style={{ display:'flex', justifyContent:'flex-end', gap:8 }}>
+        <Button variant="secondary" size="sm" onClick={onCancel}>إلغاء</Button>
+        <Button variant="primary" size="sm" loading={loading} onClick={handleSubmit}>إضافة</Button>
+      </div>
+    </div>
+  );
+}
+
+function GroupsTab({ studentId, groups, refreshKey, bumpRefresh }) {
+  const toast = useToast();
+  const { data: enrollments = [], error } = useAsyncData(
+    () => pgGetStudentEnrollments(studentId), [studentId, refreshKey], []);
+  const [adding, setAdding] = useState(false);
+  const [confirmWithdraw, setConfirmWithdraw] = useState(null);
+  const { loading: withdrawing, run: runWithdraw } = useErrorHandler(toast);
+
+  useEffect(() => {
+    if (error) toast.error(error.message || 'فشل تحميل بيانات المجموعات');
+  }, [error]);
+
+  const primary        = enrollments.find(e => e.role === 'primary');
+  const additional      = enrollments.filter(e => e.role === 'additional');
+  const activeGroupIds  = enrollments.map(e => e.groupId);
+
+  const handleWithdraw = async () => {
+    const target = confirmWithdraw;
+    await runWithdraw(async () => {
+      await pgWithdrawEnrollment(target.id);
+      setConfirmWithdraw(null);
+      bumpRefresh();
+    }, { successMsg: 'تم سحب المجموعة الإضافية ✓', errorMsg: 'تعذّر سحب المجموعة' });
+  };
+
+  return (
+    <div>
+      <SectionHead title="المجموعة الرئيسية"/>
+      {primary ? (
+        <div style={{ border:'1px solid var(--border)', borderRadius:12, marginBottom:20, overflow:'hidden' }}>
+          <EnrollmentRow enrollment={primary} group={groups.find(g => g.id === primary.groupId)}/>
+        </div>
+      ) : (
+        <div style={{ textAlign:'center', padding:'20px 0', color:'var(--text3)', fontSize:'0.85rem', marginBottom:20 }}>
+          لا توجد مجموعة رئيسية حالياً
+        </div>
+      )}
+
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:14 }}>
+        <SectionHead title="المجموعات الإضافية" count={additional.length}/>
+        {!adding && <Button variant="ghost" size="sm" onClick={() => setAdding(true)}>+ إضافة مجموعة</Button>}
+      </div>
+
+      {adding && (
+        <AddAdditionalGroupForm
+          studentId={studentId}
+          excludeGroupIds={activeGroupIds}
+          groups={groups}
+          onAdded={() => { setAdding(false); bumpRefresh(); }}
+          onCancel={() => setAdding(false)}
+        />
+      )}
+
+      {additional.length === 0 ? (
+        <div style={{ textAlign:'center', padding:'20px 0', color:'var(--text3)', fontSize:'0.85rem' }}>
+          لا توجد مجموعات إضافية
+        </div>
+      ) : (
+        <div style={{ border:'1px solid var(--border)', borderRadius:12, overflow:'hidden' }}>
+          {additional.map(e => (
+            <EnrollmentRow key={e.id} enrollment={e} group={groups.find(g => g.id === e.groupId)}
+              onWithdraw={(en) => setConfirmWithdraw(en)}
+              withdrawing={withdrawing && confirmWithdraw?.id === e.id}/>
+          ))}
+        </div>
+      )}
+
+      <ConfirmModal
+        isOpen={!!confirmWithdraw}
+        onClose={() => setConfirmWithdraw(null)}
+        onConfirm={handleWithdraw}
+        title="سحب مجموعة إضافية"
+        message={`هل تريد سحب "${groups.find(g => g.id === confirmWithdraw?.groupId)?.name || ''}"؟`}
+        confirmLabel="نعم، اسحب"
+        loading={withdrawing}
+      />
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════
 // MAIN PROFILE COMPONENT
 // ════════════════════════════════════════════════════════════
 export default function StudentProfile({ studentId, onBack, onEdit }) {
-  const attendance           = useAppStore((s) => s.attendance);
   const exams                = useAppStore((s) => s.exams);
-  const grades               = useAppStore((s) => s.grades);
+  // C4 Grades/hwSubmissions Frontend Migration (Batch A, feature 004): removed in favor of the
+  // scoped studentGrades fetch below (same pattern as studentAttendance/studentPayments).
   const groups               = useAppStore((s) => s.groups);
   const parents               = useAppStore((s) => s.parents);
-  const payments             = useAppStore((s) => s.payments);
   const treasuryTxn          = useAppStore((s) => s.treasuryTxn);
   const setStudents          = useAppStore((s) => s.setStudents);
   const students             = useAppStore((s) => s.students);
+  const toast = useToast();
   const [activeTab, setActiveTab] = useState('attendance');
+  const [enrollmentsRefreshKey, setEnrollmentsRefreshKey] = useState(0);
+
+  // Scalability Architecture Phase 4 Cutover 2: بدل مصفوفة payments الكاملة من الـ
+  // store، يُجلَب تاريخ هذا الطالب فقط عبر GET /api/payments?studentId= — يُستخدَم لكل
+  // من مؤشر الرأس هنا وPaymentsTab أدناه معاً (نفس النطاق، جلب واحد). يجب استدعاء هذا
+  // الـ hook قبل أي return مبكّر (student غير موجود) — قاعدة hooks React.
+  const { data: studentPayments = [], error: paymentsError } = useAsyncData(
+    () => pgGetPayments({ studentId }), [studentId], []);
+
+  // C4 Attendance migration Phase 2: same pattern as studentPayments above — one scoped
+  // fetch (GET /api/attendance?studentId=) feeds both the header stat below and
+  // AttendanceTab, instead of filtering the full global attendance array in either place.
+  const { data: studentAttendance = [], error: attendanceError } = useAsyncData(
+    () => pgGetAttendance({ studentId }), [studentId], []);
+
+  // C4 Grades/hwSubmissions Frontend Migration (Batch A, feature 004): same pattern as
+  // studentPayments/studentAttendance above — one scoped fetch (GET /api/grades?studentId=)
+  // feeds ExamsTab instead of filtering the full global grades array there.
+  const { data: studentGrades = [], loading: gradesLoading, error: gradesError } = useAsyncData(
+    () => pgGetGrades({ studentId }), [studentId], []);
+
+  useEffect(() => {
+    if (paymentsError) toast.error(paymentsError.message || 'فشل تحميل مدفوعات الطالب');
+  }, [paymentsError]);
+
+  useEffect(() => {
+    if (attendanceError) toast.error(attendanceError.message || 'فشل تحميل حضور الطالب');
+  }, [attendanceError]);
+
+  useEffect(() => {
+    if (gradesError) toast.error(gradesError.message || 'فشل تحميل درجات الطالب');
+  }, [gradesError]);
+
+  // C1 fix (Pre-Installer Audit): handleSaveNotes doesn't depend on `student`, so it's
+  // hoisted above the `!student` early return below — hooks must run unconditionally and
+  // in the same order on every render (a student can disappear from the store between
+  // renders of an already-mounted instance, e.g. deleted elsewhere while this stays open).
+  // State Synchronization Audit fix — كانت هذه الدالة تُحدِّث Zustand محلياً فقط بلا أي
+  // نداء للخادم إطلاقاً؛ الملاحظة تبدو محفوظة لكنها تُفقَد صامتاً عند أي مزامنة تالية
+  // (boot-sync يستبدلها بقيمة القاعدة الحقيقية غير المُحدَّثة). الآن: نداء حقيقي عبر
+  // pgUpdateStudent (نفس نقطة النهاية ونفس اتفاقية الحمولة الجزئية المُستخدَمة في
+  // StudentsPage.jsx — الخادم يُطبِّق Prisma .update() جزئياً، فلا حاجة لإرسال كامل
+  // كائن الطالب)، ولا تحديث لحالة Zustand إلا بعد نجاح الخادم فعلياً.
+  const handleSaveNotes = useCallback(async (notes) => {
+    try {
+      const saved = await pgUpdateStudent(studentId, { notes });
+      setStudents(prev => prev.map(s => s.id === studentId ? saved : s));
+      return true;
+    } catch (e) {
+      toast.error(e.message || 'فشل حفظ الملاحظات');
+      return false;
+    }
+  }, [studentId, setStudents, toast]);
 
   const student = students.find(s => s.id === studentId);
   if (!student) return null;
@@ -407,19 +668,17 @@ export default function StudentProfile({ studentId, onBack, onEdit }) {
   // مُزامَنة بالفعل (Phase 3B-16)، فقط ينقص الربط والعرض هنا. عرض إضافي بحت، لا كتابة.
   const linkedParent = student.parentId ? parents.find(p => p.id === student.parentId) : null;
 
-  const handleSaveNotes = useCallback((notes) => {
-    setStudents(prev => prev.map(s => s.id === studentId ? { ...s, notes } : s));
-  }, [studentId, setStudents]);
-
-  // Attendance stats for header
-  const attRecs = attendance.filter(a => a.studentId === studentId);
+  // Attendance stats for header — studentAttendance is already scoped to this student.
+  const attRecs = studentAttendance;
   const attPct  = attRecs.length
     ? Math.round(attRecs.filter(a => a.status === 'present').length / attRecs.length * 100)
     : null;
 
   // BUG-02: صافي بعد طرح أي استرداد فعّال (getNetRevenue) — مؤشر رأس الملف، بلا جدول
-  // خام مجاور، فلا خطر مطابقة يمنع عرضه صافياً.
-  const payRecs = payments.filter(p => p.studentId === studentId);
+  // خام مجاور، فلا خطر مطابقة يمنع عرضه صافياً. studentId===... لم تعد مطلوبة هنا —
+  // studentPayments مُفلترة بالفعل من جهة الخادم (لا يوجد فرق سلوكي: هذا المؤشر لا
+  // يستبعد status==='unpaid' — نفس PaymentsTab أدناه بالضبط قبل الهجرة، بلا تغيير).
+  const payRecs = studentPayments;
   const totalPaid = getNetRevenue(payRecs, treasuryTxn);
 
   const CARD = {
@@ -558,16 +817,20 @@ export default function StudentProfile({ studentId, onBack, onEdit }) {
 
           <SectionBoundary label={`profile:${activeTab}`}>
             {activeTab === 'attendance' && (
-              <AttendanceTab student={student} attendance={attendance}/>
+              <AttendanceTab attendance={studentAttendance}/>
             )}
             {activeTab === 'payments' && (
-              <PaymentsTab student={student} payments={payments} treasuryTxn={treasuryTxn}/>
+              <PaymentsTab student={student} payments={studentPayments} treasuryTxn={treasuryTxn}/>
             )}
             {activeTab === 'exams' && (
-              <ExamsTab student={student} exams={exams} grades={grades}/>
+              <ExamsTab student={student} exams={exams} grades={studentGrades} loading={gradesLoading}/>
             )}
             {activeTab === 'notes' && (
               <NotesTab student={student} onSaveNotes={handleSaveNotes}/>
+            )}
+            {activeTab === 'groups' && (
+              <GroupsTab studentId={studentId} groups={groups} refreshKey={enrollmentsRefreshKey}
+                bumpRefresh={() => setEnrollmentsRefreshKey(k => k + 1)}/>
             )}
           </SectionBoundary>
         </div>

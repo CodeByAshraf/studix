@@ -3,7 +3,7 @@
 // submit?" across homeworks: one row per (homework, eligible student) pair, filterable by
 // Date/Date Range, Academic Year, Grade, and Submission Status. Sits alongside (does not
 // replace) the existing per-homework List/Reports screens.
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useAppStore } from '../../store/app.store';
 import { GRADES } from '../../services/groupService';
 import { SUB_STATUS } from '../../services/homeworkService';
@@ -14,14 +14,14 @@ import WhatsappPreviewModal from '../student-report/WhatsappPreviewModal';
 import { formatDate } from '../../utils/helpers';
 import Button from '../../components/ui/Button';
 import { useToast } from '../../components/Toast';
+import { pgGetHomeworks, pgGetHwSubmissions } from '../../services/api';
+import { useAsyncData } from '../../hooks/useAsyncData';
 
 const SEL = { background:'var(--surface2)', border:'1px solid var(--border)', borderRadius:9, padding:'7px 11px', color:'var(--text)', fontFamily:'Cairo,sans-serif', fontSize:'0.82rem', outline:'none', cursor:'pointer', direction:'rtl' };
 const LBL = { fontSize:'0.7rem', fontWeight:700, color:'var(--text3)', display:'block', marginBottom:4 };
 
 export default function HomeworkSearch() {
-  const homeworks     = useAppStore((s) => s.homeworks);
   const students       = useAppStore((s) => s.students);
-  const hwSubmissions  = useAppStore((s) => s.hwSubmissions);
   const centerProfile  = useAppStore((s) => s.centerProfile);
   const toast = useToast();
 
@@ -33,11 +33,37 @@ export default function HomeworkSearch() {
   const [grade, setGrade]               = useState('');
   const [status, setStatus]             = useState('');
 
+  // Phase 2 (Homework global-read migration): no global s.homeworks / s.hwSubmissions.
+  // - Parent homeworks: one GET /api/homeworks per mount — the academic-year dropdown and the
+  //   unfiltered result both span every homework, exactly as before.
+  // - Submissions: one GET /api/hwSubmissions per filter change, scoped server-side by the
+  //   homework-level filters (dueFrom/dueTo/academicYear/grade — the same predicates
+  //   filterHomeworkSubmissionRows applies), never one request per homework. The status filter
+  //   stays client-side: 'missing' rows come from eligibility, not from a submission record.
+  // Each response is tagged with the scope it was fetched for; rows are only built once the
+  // submissions match the current filters, so a stale scope can never show a false "missing".
+  const { data: homeworks = [], loading: homeworksLoading, error: homeworksError } = useAsyncData(
+    () => pgGetHomeworks(), [], []);
+
+  const subsScope = { dueFrom: dateFrom, dueTo: dateTo, academicYear, grade };
+  const subsScopeKey = JSON.stringify(subsScope);
+  const { data: subsResult, error: subsError } = useAsyncData(
+    () => pgGetHwSubmissions(subsScope).then((subs) => ({ key: subsScopeKey, subs })),
+    [subsScopeKey], null);
+
+  useEffect(() => {
+    const err = homeworksError || subsError;
+    if (err) toast.error(err.message || 'فشل تحميل بيانات بحث الواجبات');
+  }, [homeworksError, subsError]);
+
+  const ready = !homeworksLoading && !homeworksError && subsResult?.key === subsScopeKey;
+  const loadError = homeworksError || subsError;
+
   // مصدر البيانات الموحَّد: صف واحد لكل زوج (واجب، طالب مؤهَّل) — نفس الدالة المستخدَمة
   // في الطباعة، فلا يمكن أن تنحرف الشاشة والطباعة عن بعضهما.
   const allRows = useMemo(
-    () => buildHomeworkSubmissionRows(homeworks, students, hwSubmissions),
-    [homeworks, students, hwSubmissions]
+    () => (ready ? buildHomeworkSubmissionRows(homeworks, students, subsResult.subs) : []),
+    [ready, homeworks, students, subsResult]
   );
 
   const filtered = useMemo(
@@ -115,15 +141,19 @@ export default function HomeworkSearch() {
           </select>
         </div>
         {hasFilters && <Button variant="ghost" size="sm" onClick={clearFilters}>× مسح</Button>}
-        <Button variant="secondary" size="sm" onClick={() => openHomeworkSearchReportPrint({ rows: filtered, profile: centerProfile })}>
+        <Button variant="secondary" size="sm" disabled={!ready} onClick={() => openHomeworkSearchReportPrint({ rows: filtered, profile: centerProfile })}>
           🖨 طباعة النتائج
         </Button>
       </div>
 
-      <div style={{ fontSize:'0.78rem', color:'var(--text3)', marginBottom:10 }}>{filtered.length} نتيجة</div>
+      <div style={{ fontSize:'0.78rem', color:'var(--text3)', marginBottom:10 }}>{ready ? `${filtered.length} نتيجة` : '—'}</div>
 
       {/* Results */}
-      {filtered.length === 0 ? (
+      {!ready ? (
+        <div style={{ textAlign:'center', padding:'48px', background:'var(--surface)', border:'1px solid var(--border)', borderRadius:14, color:'var(--text3)' }}>
+          {loadError ? 'تعذّر تحميل نتائج البحث' : 'جارٍ تحميل النتائج...'}
+        </div>
+      ) : filtered.length === 0 ? (
         <div style={{ textAlign:'center', padding:'48px', background:'var(--surface)', border:'1px solid var(--border)', borderRadius:14, color:'var(--text3)' }}>
           لا توجد نتائج مطابقة
         </div>

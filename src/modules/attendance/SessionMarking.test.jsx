@@ -1,8 +1,15 @@
 // src/modules/attendance/SessionMarking.test.jsx
 // Phase 3B-4 — يتحقق من العقد الحرج: الحالة المحلية (Zustand) لا تتغيّر إلا بعد
 // نجاح الخادم، وتُطابق استجابة الخادم بالضبط عند النجاح، وتبقى دون تغيير عند الفشل.
+//
+// Group Closure (Attendance Integration) — the roster is now fetched from
+// pgGetEligibleStudentsForSession(groupId, date) (GET .../roster, attendanceEligibility.js
+// on the server) instead of a plain local students.groupId filter. Mocked here to resolve
+// [S1, S2] for GROUP_ID/TODAY, same as the old synchronous filter used to produce — every
+// test below still exercises exactly the same server-truth write path this file was
+// written to prove, just with one added await for the roster fetch to resolve first.
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import SessionMarking from './SessionMarking';
 import { useAppStore } from '../../store/app.store';
@@ -11,9 +18,9 @@ import { ToastProvider } from '../../components/Toast';
 
 vi.mock('../../services/api', async () => {
   const actual = await vi.importActual('../../services/api');
-  return { ...actual, pgSaveAttendanceSession: vi.fn() };
+  return { ...actual, pgSaveAttendanceSession: vi.fn(), pgGetEligibleStudentsForSession: vi.fn(), pgGetAttendance: vi.fn() };
 });
-import { pgSaveAttendanceSession } from '../../services/api';
+import { pgSaveAttendanceSession, pgGetEligibleStudentsForSession, pgGetAttendance } from '../../services/api';
 
 const GROUP_ID = 'g1';
 const S1 = 's1';
@@ -39,11 +46,21 @@ function seedStore() {
     ],
     attendance: [],
   });
+  pgGetEligibleStudentsForSession.mockResolvedValue([S1, S2]);
+  // C4 Attendance migration Phase 2: existingSession now comes from
+  // GET /api/attendance?groupId=&date= instead of filtering the store's global attendance
+  // array — default to "no existing session" so these write-path tests are unaffected.
+  pgGetAttendance.mockResolvedValue([]);
+}
+
+async function selectGroupAndWaitForRoster() {
+  const select = screen.getByRole('combobox');
+  fireEvent.change(select, { target: { value: GROUP_ID } });
+  await waitFor(() => expect(screen.getByRole('button', { name: /بدء تسجيل الحضور/ })).not.toBeDisabled());
 }
 
 async function startSessionAndSave() {
-  const select = screen.getByRole('combobox');
-  fireEvent.change(select, { target: { value: GROUP_ID } });
+  await selectGroupAndWaitForRoster();
   fireEvent.click(screen.getByRole('button', { name: /بدء تسجيل الحضور/ }));
   fireEvent.click(await screen.findByRole('button', { name: /حفظ الجلسة/ }));
 }
@@ -63,8 +80,7 @@ describe('SessionMarking — server-truth write path', () => {
     pgSaveAttendanceSession.mockImplementation(() => new Promise((resolve) => { resolveCall = resolve; }));
 
     renderPage();
-    const select = screen.getByRole('combobox');
-    fireEvent.change(select, { target: { value: GROUP_ID } });
+    await selectGroupAndWaitForRoster();
     fireEvent.click(screen.getByRole('button', { name: /بدء تسجيل الحضور/ }));
     fireEvent.click(await screen.findByRole('button', { name: /حفظ الجلسة/ }));
 
@@ -133,5 +149,66 @@ describe('SessionMarking — server-truth write path', () => {
       expect(attendance.find((r) => r.id === 'unrelated-1')).toBeTruthy();
       expect(attendance.find((r) => r.id === 'srv-1')).toBeTruthy();
     });
+  });
+});
+
+// C4 Attendance migration Phase 2 — existingSession (pre-fill + "session already exists"
+// warning) now comes from a scoped GET /api/attendance?groupId=&date= fetch instead of
+// filtering the store's global attendance array with getSessionRecords.
+describe('SessionMarking — existing-session detection (C4 Attendance migration Phase 2)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    seedStore();
+  });
+
+  it('fetches the existing session with the correct groupId+date params', async () => {
+    renderPage();
+    await selectGroupAndWaitForRoster();
+    expect(pgGetAttendance).toHaveBeenCalledWith({ groupId: GROUP_ID, date: TODAY });
+  });
+
+  it('shows the "will be replaced" warning and pre-fills marks from a real existing session, exactly as the old getSessionRecords filter did', async () => {
+    pgGetAttendance.mockResolvedValue([
+      { id: 'a1', studentId: S1, groupId: GROUP_ID, date: TODAY, status: 'absent', sessionTime: '09:00' },
+      { id: 'a2', studentId: S2, groupId: GROUP_ID, date: TODAY, status: 'late', sessionTime: '09:00' },
+    ]);
+    renderPage();
+
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: GROUP_ID } });
+    expect(await screen.findByText(/توجد بيانات محفوظة لهذه الجلسة/)).toBeInTheDocument();
+
+    await waitFor(() => expect(screen.getByRole('button', { name: /بدء تسجيل الحضور/ })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: /بدء تسجيل الحضور/ }));
+
+    // pre-filled from the real existing records (S1=absent, S2=late), not the "everyone
+    // present" default — checked via the session header's AttendanceStats counts (each
+    // stat is its own {value,label} pair, not one combined text node).
+    const absentLabel = await screen.findByText('غائب', { selector: 'span' });
+    expect(within(absentLabel.parentElement).getByText('1')).toBeInTheDocument();
+    const lateLabel = screen.getByText('متأخر', { selector: 'span' });
+    expect(within(lateLabel.parentElement).getByText('1')).toBeInTheDocument();
+  });
+
+  it('an empty session (no existing records) shows no warning and pre-fills everyone as present (the default)', async () => {
+    pgGetAttendance.mockResolvedValue([]);
+    renderPage();
+
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: GROUP_ID } });
+    await waitFor(() => expect(screen.getByRole('button', { name: /بدء تسجيل الحضور/ })).not.toBeDisabled());
+
+    expect(screen.queryByText(/توجد بيانات محفوظة لهذه الجلسة/)).not.toBeInTheDocument();
+  });
+
+  it('disables "بدء تسجيل الحضور" while the existing-session check is still loading, preventing a stale prior session from being pre-filled', async () => {
+    let resolveExisting;
+    pgGetAttendance.mockImplementation(() => new Promise((resolve) => { resolveExisting = resolve; }));
+    renderPage();
+
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: GROUP_ID } });
+    await waitFor(() => expect(pgGetEligibleStudentsForSession).toHaveBeenCalled());
+    expect(screen.getByRole('button', { name: /بدء تسجيل الحضور/ })).toBeDisabled();
+
+    resolveExisting([]);
+    await waitFor(() => expect(screen.getByRole('button', { name: /بدء تسجيل الحضور/ })).not.toBeDisabled());
   });
 });

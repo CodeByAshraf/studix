@@ -1,11 +1,12 @@
 // src/modules/exams/GradeEntry.jsx
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useAppStore } from '../../store/app.store';
 import { useAuth }     from '../../store/auth.context';
 import { useToast } from '../../components/Toast';
 import Button       from '../../components/ui/Button';
 import { scorePercent, scoreColor, scoreGrade, getExamEligibleStudents } from '../../services/examService';
-import { pgSaveExamGrades } from '../../services/api';
+import { pgSaveExamGrades, pgGetGrades } from '../../services/api';
+import { useAsyncData } from '../../hooks/useAsyncData';
 import { useAvatarStyle } from '../students/components/StudentAvatar';
 
 // ── Single student grade row ─────────────────────────────────
@@ -125,9 +126,37 @@ function GradeRow({ student, grade, exam, onChange, index }) {
 }
 
 // ─────────────────────────────────────────────────────────────
+// C4 Grades/hwSubmissions Frontend Migration (Batch A, feature 004): GradeEntry now fetches its
+// grades scoped to this exam (GET /api/grades?examId=) instead of reading the global store
+// array. Correctness requirement, not cosmetic (research.md §5 of the feature spec): the
+// editable table below seeds its local per-student score state via a ONE-TIME useState lazy
+// initializer — if that table mounted before the scoped fetch resolved, it would permanently
+// seed itself blank and never re-sync. The outer component below gates the inner form's mount
+// behind the fetch's loading flag, so the lazy initializer always runs against real data.
 export default function GradeEntry({ exam, onClose }) {
+  const toast = useToast();
+  const { data: grades = [], loading: gradesLoading, error: gradesError } = useAsyncData(
+    () => pgGetGrades({ examId: exam.id }), [exam.id], []);
+
+  useEffect(() => {
+    if (gradesError) toast.error(gradesError.message || 'فشل تحميل درجات الامتحان');
+  }, [gradesError]);
+
+  if (gradesLoading) {
+    return (
+      <div style={{ textAlign:'center', padding:'48px 20px', color:'var(--text3)' }}>
+        جارِ التحميل...
+      </div>
+    );
+  }
+
+  return <GradeEntryForm exam={exam} onClose={onClose} grades={grades} />;
+}
+
+// The actual editable form — mounted only once GradeEntry above confirms the scoped grades
+// fetch has resolved, so localGrades' lazy initializer (below) always seeds from real data.
+function GradeEntryForm({ exam, onClose, grades }) {
   const addLog               = useAppStore((s) => s.addLog);
-  const grades               = useAppStore((s) => s.grades);
   const setGrades            = useAppStore((s) => s.setGrades);
   const students             = useAppStore((s) => s.students);
   const { currentUser } = useAuth();

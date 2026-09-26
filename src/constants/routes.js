@@ -22,6 +22,7 @@ export const ROUTES = {
   INVENTORY:     'inventory',
   COMMUNICATION: 'communication',
   SUPPORT_ACCESS: 'support-access',
+  RECITATION:    'recitation',
 };
 
 export const NAV_SECTIONS = [

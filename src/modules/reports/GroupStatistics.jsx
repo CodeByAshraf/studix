@@ -1,21 +1,56 @@
 // src/modules/reports/GroupStatistics.jsx
-import { useMemo } from 'react';
+import { useEffect, useMemo } from 'react';
 import { useAppStore } from '../../store/app.store';
 import { formatCurrency } from '../../utils/helpers';
 import { MetricCard, BarChart, DonutChart, AnalyticsCard, ProgressRing } from './components/ChartComponents';
 import { getGroupStats, formatDays } from '../../services/groupService';
 import { MONTHS_AR } from '../../services/paymentService';
+import { pgGetPayments, pgGetAttendanceAggregate } from '../../services/api';
+import { useAsyncData } from '../../hooks/useAsyncData';
+import { useToast } from '../../components/Toast';
 
 export default function GroupStatistics() {
-  const attendance           = useAppStore((s) => s.attendance);
   const groups               = useAppStore((s) => s.groups);
-  const payments             = useAppStore((s) => s.payments);
   const students             = useAppStore((s) => s.students);
   const treasuryTxn          = useAppStore((s) => s.treasuryTxn);
+  const toast = useToast();
+
+  // Scalability Architecture Phase 4 Cutover 1: getGroupStats يحسب month/year الحاليين
+  // داخلياً (new Date()) ويُصفّي بـ groupId+month+year — بدل مصفوفة payments الكاملة،
+  // يُجلَب هذا الشهر/السنة فقط (لكل المجموعات معاً، نداء واحد فقط) عبر GET
+  // /api/payments?month=&year=، ثم يُمرَّر لكل استدعاء getGroupStats كما هو (الدالة نفسها
+  // غير مُعدَّلة إطلاقاً — لا تزال تُصفّي بـ groupId محلياً، فتُنتِج نفس المجموعة الفرعية
+  // بالضبط لكل مجموعة على حدة).
+  const now = new Date();
+  const currentMonth = now.getMonth() + 1;
+  const currentYear  = now.getFullYear();
+  const { data: monthPayments = [], error: paymentsError } = useAsyncData(
+    () => pgGetPayments({ month: currentMonth, year: currentYear }),
+    [currentMonth, currentYear],
+    [],
+  );
+
+  useEffect(() => {
+    if (paymentsError) toast.error(paymentsError.message || 'فشل تحميل مدفوعات هذا الشهر');
+  }, [paymentsError]);
+
+  // C4 Attendance migration Phase 2: same principle as monthPayments above — ONE
+  // GET /api/attendance/aggregate?groupBy=group call for every group at once, instead of
+  // getGroupStats re-filtering the full global attendance array once per group.
+  const { data: groupAttendanceRows = [], error: attendanceError } = useAsyncData(
+    () => pgGetAttendanceAggregate({ groupBy: 'group' }), [], []);
+  const attendanceStatsByGroup = useMemo(
+    () => new Map(groupAttendanceRows.map((r) => [r.key, r])),
+    [groupAttendanceRows],
+  );
+
+  useEffect(() => {
+    if (attendanceError) toast.error(attendanceError.message || 'فشل تحميل إحصاءات حضور المجموعات');
+  }, [attendanceError]);
 
   const allGroupStats = useMemo(() =>
-    groups.map(g => ({ ...g, stats: getGroupStats(g, students, payments, attendance, treasuryTxn) })),
-  [groups, students, payments, attendance, treasuryTxn]);
+    groups.map(g => ({ ...g, stats: getGroupStats(g, students, monthPayments, attendanceStatsByGroup.get(g.id), treasuryTxn) })),
+  [groups, students, monthPayments, attendanceStatsByGroup, treasuryTxn]);
 
   const globalStats = useMemo(() => {
     const totalGroups    = groups.length;

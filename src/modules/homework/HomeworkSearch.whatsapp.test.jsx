@@ -12,8 +12,25 @@ import HomeworkSearch from './HomeworkSearch';
 import { useAppStore } from '../../store/app.store';
 import { ToastProvider } from '../../components/Toast';
 
-function renderSearch() {
-  return render(<ToastProvider><HomeworkSearch /></ToastProvider>);
+// Phase 2 (Homework global-read migration): HomeworkSearch reads homeworks/submissions only via
+// the scoped APIs — seedState() serves the declared homeworks/hwSubmissions through those
+// mocks and leaves the store's global arrays empty.
+vi.mock('../../services/api', async () => {
+  const actual = await vi.importActual('../../services/api');
+  return { ...actual, pgGetHomeworks: vi.fn(), pgGetHwSubmissions: vi.fn() };
+});
+import { pgGetHomeworks, pgGetHwSubmissions } from '../../services/api';
+
+function seedState({ homeworks, hwSubmissions, ...rest }) {
+  pgGetHomeworks.mockImplementation(() => Promise.resolve(homeworks));
+  pgGetHwSubmissions.mockImplementation(() => Promise.resolve(hwSubmissions));
+  useAppStore.setState({ ...rest, homeworks: [], hwSubmissions: [] });
+}
+
+async function renderSearch() {
+  const utils = render(<ToastProvider><HomeworkSearch /></ToastProvider>);
+  await screen.findByText(/^\d+ نتيجة$/);
+  return utils;
 }
 
 vi.mock('./homeworkWhatsappService', async () => {
@@ -29,7 +46,7 @@ const S1_GRADED   = { id: 's1', name: 'أحمد علي',  code: 'C001', grade: G
 const S2_NO_PHONE = { id: 's2', name: 'سارة محمد', code: 'C002', grade: GRADE_6, status: 'active', parentPhone: '', phone: '' };
 
 function seed() {
-  useAppStore.setState({
+  seedState({
     homeworks: [HW],
     students: [S1_GRADED, S2_NO_PHONE],
     hwSubmissions: [
@@ -48,9 +65,9 @@ function waButtonForRow(name) {
 describe('HomeworkSearch — WhatsApp parent follow-up (Homework Phase 3B)', () => {
   beforeEach(() => { vi.clearAllMocks(); });
 
-  it('clicking the WhatsApp action opens a preview first — openWhatsapp is NOT called immediately', () => {
+  it('clicking the WhatsApp action opens a preview first — openWhatsapp is NOT called immediately', async () => {
     seed();
-    renderSearch();
+    await renderSearch();
 
     fireEvent.click(waButtonForRow('أحمد علي'));
 
@@ -58,9 +75,9 @@ describe('HomeworkSearch — WhatsApp parent follow-up (Homework Phase 3B)', () 
     expect(openWhatsapp).not.toHaveBeenCalled();
   });
 
-  it('only calls openWhatsapp after the user explicitly clicks the modal\'s own "فتح واتساب" button', () => {
+  it('only calls openWhatsapp after the user explicitly clicks the modal\'s own "فتح واتساب" button', async () => {
     seed();
-    renderSearch();
+    await renderSearch();
 
     fireEvent.click(waButtonForRow('أحمد علي'));
     fireEvent.click(screen.getByRole('button', { name: /فتح واتساب/ }));
@@ -73,12 +90,12 @@ describe('HomeworkSearch — WhatsApp parent follow-up (Homework Phase 3B)', () 
     expect(message).toContain('18/20'); // submitted + graded — real score
   });
 
-  it('passes the correct, row-specific data into the message — not another row\'s data', () => {
+  it('passes the correct, row-specific data into the message — not another row\'s data', async () => {
     seed();
     // Give s2 her own usable phone here so the modal's open action isn't disabled — the
     // dedicated "no usable phone" test below covers that case separately.
     useAppStore.setState({ students: [S1_GRADED, { ...S2_NO_PHONE, phone: '01099998888' }] });
-    renderSearch();
+    await renderSearch();
 
     fireEvent.click(waButtonForRow('سارة محمد'));
     fireEvent.click(screen.getByRole('button', { name: /فتح واتساب/ }));
@@ -90,9 +107,9 @@ describe('HomeworkSearch — WhatsApp parent follow-up (Homework Phase 3B)', () 
     expect(message).not.toContain('18/20');
   });
 
-  it('a student with no usable phone still gets a preview, but the WhatsApp-open action is disabled (copy remains available)', () => {
+  it('a student with no usable phone still gets a preview, but the WhatsApp-open action is disabled (copy remains available)', async () => {
     seed();
-    renderSearch();
+    await renderSearch();
 
     fireEvent.click(waButtonForRow('سارة محمد'));
 
@@ -105,9 +122,9 @@ describe('HomeworkSearch — WhatsApp parent follow-up (Homework Phase 3B)', () 
     expect(openWhatsapp).not.toHaveBeenCalled();
   });
 
-  it('closing the preview without opening WhatsApp never calls openWhatsapp', () => {
+  it('closing the preview without opening WhatsApp never calls openWhatsapp', async () => {
     seed();
-    renderSearch();
+    await renderSearch();
 
     fireEvent.click(waButtonForRow('أحمد علي'));
     fireEvent.click(screen.getByRole('button', { name: '✕' }));
@@ -123,7 +140,7 @@ describe('HomeworkSearch — WhatsApp action visibility (Phase 3B clarification:
   const S5_LATE_GRADED        = { id: 's5', name: 'ليلى أحمد', code: 'C005', grade: GRADE_6, status: 'active', parentPhone: '01155555555' };
 
   function seedVisibility() {
-    useAppStore.setState({
+    seedState({
       homeworks: [HW],
       students: [S1_GRADED, S2_NO_PHONE, S3_SUBMITTED_UNGRADED, S4_LATE_UNGRADED, S5_LATE_GRADED],
       hwSubmissions: [
@@ -137,17 +154,17 @@ describe('HomeworkSearch — WhatsApp action visibility (Phase 3B clarification:
     });
   }
 
-  it('shows the WhatsApp action for Not Submitted and for a graded submission (submitted or late)', () => {
+  it('shows the WhatsApp action for Not Submitted and for a graded submission (submitted or late)', async () => {
     seedVisibility();
-    renderSearch();
+    await renderSearch();
     expect(waButtonForRow('أحمد علي')).toBeInTheDocument(); // submitted + graded
     expect(waButtonForRow('سارة محمد')).toBeInTheDocument(); // missing
     expect(waButtonForRow('ليلى أحمد')).toBeInTheDocument(); // late + graded
   });
 
-  it('hides the WhatsApp action for submitted-but-ungraded and late-but-ungraded rows', () => {
+  it('hides the WhatsApp action for submitted-but-ungraded and late-but-ungraded rows', async () => {
     seedVisibility();
-    renderSearch();
+    await renderSearch();
     const khaledRow = screen.getByText('خالد سعيد').closest('tr');
     const monaRow    = screen.getByText('منى فتحي').closest('tr');
     expect(within(khaledRow).queryByRole('button', { name: /📲/ })).not.toBeInTheDocument();

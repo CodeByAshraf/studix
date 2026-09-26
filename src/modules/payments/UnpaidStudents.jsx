@@ -1,7 +1,10 @@
 // src/modules/payments/UnpaidStudents.jsx
 import { useAppStore } from '../../store/app.store';
-import { useState, useMemo } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { MONTHS_AR, getUnpaidStudents, getPartialStudents, getStudentFee, getNetRevenue } from '../../services/paymentService';
+import { pgGetPayments } from '../../services/api';
+import { useAsyncData } from '../../hooks/useAsyncData';
+import { useToast } from '../../components/Toast';
 import { formatCurrency } from '../../utils/helpers';
 import Button from '../../components/ui/Button';
 
@@ -16,26 +19,41 @@ const SEL = { background:'var(--surface2)', border:'1px solid var(--border)', bo
 
 export default function UnpaidStudents({ onQuickPay }) {
   const groups               = useAppStore((s) => s.groups);
-  const payments             = useAppStore((s) => s.payments);
   const students             = useAppStore((s) => s.students);
   const treasuryTxn          = useAppStore((s) => s.treasuryTxn);
+  const toast = useToast();
   const [month, setMonth] = useState(new Date().getMonth() + 1);
   const [filterGroup, setFilterGroup] = useState('');
   const [tab, setTab] = useState('unpaid'); // 'unpaid' | 'partial'
 
   const year = new Date().getFullYear();
 
+  // Scalability Architecture Phase 4 Cutover 1: بدل مصفوفة payments الكاملة من الـ
+  // store، يُجلَب هذا الشهر/السنة فقط عبر GET /api/payments?month=&year= (غير مُفلتَر
+  // بالطالب — نفس النطاق الذي يحتاجه getUnpaidStudents/getPartialStudents أصلاً، مُتحقَّق
+  // تكافؤه في تدقيق Phase 4 Step 3، بما في ذلك سلوك fallback year/date الحالي المحفوظ
+  // كما هو — لا تغيير على الدالتين نفسيهما، فقط مصدر الصف الذي يُغذّيهما).
+  const { data: monthPayments = [], error: paymentsError } = useAsyncData(
+    () => pgGetPayments({ month, year }),
+    [month, year],
+    [],
+  );
+
+  useEffect(() => {
+    if (paymentsError) toast.error(paymentsError.message || 'فشل تحميل مدفوعات هذا الشهر');
+  }, [paymentsError]);
+
   const unpaid = useMemo(() => {
-    let list = getUnpaidStudents(students, payments, month, year);
+    let list = getUnpaidStudents(students, monthPayments, month, year);
     if (filterGroup) list = list.filter(s => s.groupId === filterGroup);
     return list;
-  }, [students, payments, month, year, filterGroup]);
+  }, [students, monthPayments, month, year, filterGroup]);
 
   const partial = useMemo(() => {
-    let list = getPartialStudents(students, payments, month, year);
+    let list = getPartialStudents(students, monthPayments, month, year);
     if (filterGroup) list = list.filter(s => s.groupId === filterGroup);
     return list;
-  }, [students, payments, month, year, filterGroup]);
+  }, [students, monthPayments, month, year, filterGroup]);
 
   const activeList = tab === 'unpaid' ? unpaid : partial;
 
@@ -49,7 +67,7 @@ export default function UnpaidStudents({ onQuickPay }) {
   // أقل مما هو فعلاً. getNetRevenue تطرح أي استرداد فعّال (treasury_txn) لكل دفعة.
   const partialRemaining = partial.reduce((sum, s) => {
     const g = groups.find(g => g.id === s.groupId);
-    const paid = getNetRevenue(payments.filter(p => p.studentId === s.id && p.month === month && p.year === year), treasuryTxn);
+    const paid = getNetRevenue(monthPayments.filter(p => p.studentId === s.id), treasuryTxn);
     return sum + Math.max(0, getStudentFee(s, g) - paid);
   }, 0);
 
@@ -112,7 +130,7 @@ export default function UnpaidStudents({ onQuickPay }) {
             const { bg, color } = av(student.name);
             const letters = student.name.split(' ').map(w=>w[0]).slice(0,2).join('');
             // BUG-02: صافي بعد طرح أي استرداد فعّال — نفس منطق partialRemaining أعلاه.
-            const paidSoFar = getNetRevenue(payments.filter(p => p.studentId === student.id && p.month === month && p.year === year), treasuryTxn);
+            const paidSoFar = getNetRevenue(monthPayments.filter(p => p.studentId === student.id), treasuryTxn);
             const remaining = group ? Math.max(0, getStudentFee(student, group) - paidSoFar) : 0;
 
             return (

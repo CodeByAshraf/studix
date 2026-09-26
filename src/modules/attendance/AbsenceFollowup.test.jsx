@@ -153,6 +153,68 @@ describe('AbsenceFollowup — server-truth write path', () => {
   });
 });
 
+// ── الأقسام الثلاثة: تحتاج إجراء / متأخرة / سجل ──────────────────────────────────
+function todayStr() { return new Date().toISOString().split('T')[0]; }
+function pastStr(daysAgo) { return new Date(Date.now() - daysAgo * 86400000).toISOString().split('T')[0]; }
+
+describe('AbsenceFollowup — active / overdue / history sections', () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  it("17. today's unresolved absence renders in the active section", () => {
+    useAppStore.setState({
+      students: [{ id: STUDENT_ID, name: 'Test Student', phone: '0100000000' }],
+      groups: [{ id: GROUP_ID, name: 'Test Group' }],
+      attendance: [{ id: ATT_ID, studentId: STUDENT_ID, groupId: GROUP_ID, date: todayStr(), status: 'absent' }],
+      absenceFollowup: [],
+    });
+    renderPage();
+    expect(screen.getByText('متابعة تحتاج إجراء')).toBeInTheDocument();
+    expect(screen.getByText('Test Student')).toBeInTheDocument();
+    expect(screen.getByText('لا توجد متابعات متأخرة')).toBeInTheDocument();
+    expect(screen.getByText('لا توجد متابعات مكتملة بعد')).toBeInTheDocument();
+  });
+
+  it('18. an older unresolved absence renders in the overdue section, not the active one', () => {
+    useAppStore.setState({
+      students: [{ id: STUDENT_ID, name: 'Test Student', phone: '0100000000' }],
+      groups: [{ id: GROUP_ID, name: 'Test Group' }],
+      attendance: [{ id: ATT_ID, studentId: STUDENT_ID, groupId: GROUP_ID, date: pastStr(3), status: 'absent' }],
+      absenceFollowup: [],
+    });
+    renderPage();
+    expect(screen.getByText('لا توجد غيابات اليوم تحتاج متابعة')).toBeInTheDocument();
+    expect(screen.getByText('متابعات متأخرة')).toBeInTheDocument();
+    expect(screen.getByText('Test Student')).toBeInTheDocument();
+  });
+
+  it('19. a completed follow-up renders in the history section, and stays out of active/overdue', () => {
+    useAppStore.setState({
+      students: [{ id: STUDENT_ID, name: 'Test Student', phone: '0100000000' }],
+      groups: [{ id: GROUP_ID, name: 'Test Group' }],
+      attendance: [{ id: ATT_ID, studentId: STUDENT_ID, groupId: GROUP_ID, date: pastStr(5), status: 'absent' }],
+      absenceFollowup: [{ id: 'f1', attendanceId: ATT_ID, followStatus: 'excused' }],
+    });
+    renderPage();
+    expect(screen.getByText('لا توجد غيابات اليوم تحتاج متابعة')).toBeInTheDocument();
+    expect(screen.getByText('لا توجد متابعات متأخرة')).toBeInTheDocument();
+    expect(screen.getByText('سجل المتابعة')).toBeInTheDocument();
+    expect(screen.getByText('Test Student')).toBeInTheDocument();
+  });
+
+  it('an old unresolved absence remains fully accessible and actionable in the overdue section (never hidden/deleted/auto-completed)', () => {
+    useAppStore.setState({
+      students: [{ id: STUDENT_ID, name: 'Test Student', phone: '0100000000', parentPhone: '0111111111' }],
+      groups: [{ id: GROUP_ID, name: 'Test Group' }],
+      attendance: [{ id: ATT_ID, studentId: STUDENT_ID, groupId: GROUP_ID, date: pastStr(200), status: 'absent' }],
+      absenceFollowup: [],
+    });
+    renderPage();
+    expect(screen.getByRole('button', { name: /⚡ متابعة/ })).toBeInTheDocument();
+    expect(useAppStore.getState().attendance).toHaveLength(1); // لم يُحذَف
+    expect(useAppStore.getState().absenceFollowup).toEqual([]); // لم يُكتمَل تلقائياً
+  });
+});
+
 describe.each([
   ['pending',   'لم تتم المتابعة'],
   ['contacted', 'تم التواصل'],

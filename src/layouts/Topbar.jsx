@@ -10,7 +10,7 @@ const PAGE_LABELS = NAV_ITEMS.reduce((acc, item) => {
 }, {});
 
 export default function Topbar({ onMenuToggle, sidebarWidth }) {
-  const { currentPage, unreadNotifs, navigate, theme, setTheme, notifications } = useUI();
+  const { currentPage, unreadNotifs, navigate, theme, setTheme, notifications, markNotifRead } = useUI();
   const [searchOpen,  setSearchOpen]  = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [notifOpen,   setNotifOpen]   = useState(false);
@@ -247,12 +247,17 @@ export default function Topbar({ onMenuToggle, sidebarWidth }) {
                     gap:        10,
                     padding:    '11px 16px',
                     borderBottom: '1px solid var(--border)',
-                    cursor:     'pointer',
+                    cursor:     n.link ? 'pointer' : 'default',
                     transition: 'background 0.12s',
                     background: !n.read ? 'rgba(13,148,136,0.04)' : 'transparent',
                   }}
                     onMouseOver={e => e.currentTarget.style.background = 'var(--surface2)'}
                     onMouseOut={e  => e.currentTarget.style.background = !n.read ? 'rgba(13,148,136,0.04)' : 'transparent'}
+                    onClick={n.link ? () => {
+                      markNotifRead(n.id);
+                      setNotifOpen(false);
+                      navigate(n.link.page, { view: n.link.view, attendanceId: n.link.attendanceId });
+                    } : undefined}
                   >
                     <span style={{ fontSize: '1.1rem', flexShrink: 0 }}>
                       {n.type === 'absence' ? '🚫' : n.type === 'payment' ? '💰' : n.type === 'exam' ? '📝' : '📢'}

@@ -1,5 +1,5 @@
 // src/modules/student-report/StudentReportPage.jsx
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo, useCallback, useEffect } from 'react';
 import { useAppStore } from '../../store/app.store';
 import { useAuth } from '../../store/auth.context';
 import { useToast } from '../../components/Toast';
@@ -8,9 +8,23 @@ import { openStudentReportPrint } from './buildPrintReport';
 import { generateStudentReport } from './buildStudentReport';
 import { generateMessage, copyMessage, openWhatsapp } from './studentWhatsappService';
 import WhatsappPreviewModal from './WhatsappPreviewModal';
-import { pgCreateWaReportLog } from '../../services/api';
-import { deriveMatDist } from '../../services/materialService';
-import { getRefundedAmount } from '../../services/paymentService';
+import { pgCreateWaReportLog, pgGetStudentReportData } from '../../services/api';
+import { buildInteractiveReportData } from './reportData';
+import { useAsyncData } from '../../hooks/useAsyncData';
+import { isSectionVisible } from '../../reportEngine';
+
+// أي تاب من التابات أدناه يقابل أي علم في reportConfig — "نظرة عامة" وحدها بلا علم (تبقى
+// ظاهرة دائماً، هي لوحة التجميع الافتراضية لا قسم مستقل قابل للإخفاء؛ نفس معاملة بطاقة
+// هوية الطالب أعلى الصفحة — انظر تعليق REPORT_SECTIONS في reportMeta.js لشرح النطاق كاملاً).
+const TAB_SECTION_KEY = {
+  attendance: 'showAttendance',
+  exams:      'showExams',
+  recitation: 'showRecitation',
+  homeworks:  'showHomework',
+  materials:  'showBooklets',
+  payments:   'showPaymentHistory',
+  timeline:   'showAcademicTimeline',
+};
 
 // ─────────────────────────────────────────────────────────────
 // Helpers
@@ -150,38 +164,54 @@ function TimelineItem({ date, icon, title, sub, color, last }) {
 export default function StudentReportPage() {
   const students      = useAppStore(s => s.students);
   const groups        = useAppStore(s => s.groups);
-  const attendance    = useAppStore(s => s.attendance);
+  // absenceFollowup: لا نقطة نهاية مُصفّاة (scoped) لهذه الـ collection حتى الآن — تبقى
+  // مقروءة من الـ store الكامل عمداً (خارج نطاق هذه المرحلة، انظر تقرير التنفيذ).
   const absFollowup   = useAppStore(s => s.absenceFollowup);
-  const payments      = useAppStore(s => s.payments);
-  const exams         = useAppStore(s => s.exams);
-  const grades        = useAppStore(s => s.grades);
-  const homeworks     = useAppStore(s => s.homeworks);
-  const hwSubmissions = useAppStore(s => s.hwSubmissions);
-  const materials     = useAppStore(s => s.invMaterials);
   const centerProfile = useAppStore(s => s.centerProfile);
-  const communications = useAppStore(s => s.communications);
-  const inventoryTxn   = useAppStore(s => s.inventoryTxn);
-  const treasuryTxn    = useAppStore(s => s.treasuryTxn);
   // إعدادات أقسام التقرير الاحترافي (Settings ← أقسام التقرير) — محلية، منظّمة الأصل
   // (نفس نمط centerProfile)، انظر src/store/slices/reportSettings.slice.js.
   const reportConfig   = useAppStore(s => s.reportConfig);
-  // matDist مُشتَق من inventoryTxn (المُزامَن إقلاعياً بالفعل) — لا حالة مستقلة بعد الآن.
-  const matDist = useMemo(() => deriveMatDist(inventoryTxn), [inventoryTxn]);
   const { currentUser } = useAuth();
   const toast = useToast();
   const currentUserName = currentUser?.name || currentUser?.id || 'النظام';
-  // تجميع الـ store للتقرير الاحترافي (المحرّك الجديد يقرأ منه) — treasuryTxn مطلوبة
-  // لكشف الاسترداد الفعلي في gatherStudentData (BUG-02، انظر reportData.js).
-  const fullStore = { students, groups, attendance, payments, exams, grades, communications, inventoryTxn, treasuryTxn };
   const addWaReportLog = useAppStore(s => s.addWaReportLog);
+
+  // Phase 2 (Scalability Architecture) — التقرير الاحترافي ورسالة واتساب كلاهما يستهلكان
+  // gatherStudentData (reportData.js)، وكانا يُغذَّيان بـ "fullStore" محلي مُجمَّع يدوياً من
+  // شرائح الـ store هنا — لكنه كان ناقصاً hwSubmissions/invMaterials (لم يُضافا إليه قط رغم
+  // أن gatherStudentData تقرأهما)، فكانت درجة الواجبات في التقرير المطبوع تصل null دائماً
+  // والمذكرات المسلَّمة تصل بلا اسم/سعر/متبقٍّ دائماً — بصرف النظر عن البيانات الحقيقية.
+  // يُستبدَل الآن بحزمة مصغَّرة حقيقية من الخادم (GET /students/:id/report-data) تشمل
+  // الحقلين الناقصين — تصحيح صريح موثَّق هنا، لا استبدال صامت لسلوك آخر.
+  const [reportBusy, setReportBusy] = useState(false); // يُعطِّل زرّي "تقرير احترافي"/"واتساب" أثناء الجلب فقط
 
   // ── workflow معاينة رسالة واتساب (المنطق كله في الـ service) ──
   const [waPreview, setWaPreview] = useState(null);
 
-  const handleOpenPreview = () => {
-    const result = generateMessage(student.id, fullStore, { profile: centerProfile });
-    if (!result) { toast.error('تعذّر توليد الرسالة'); return; }
-    setWaPreview(result);
+  const handleOpenPreview = async () => {
+    setReportBusy(true);
+    try {
+      const bundle = await pgGetStudentReportData(student.id);
+      const result = generateMessage(student.id, bundle, { profile: centerProfile });
+      if (!result) { toast.error('تعذّر توليد الرسالة'); return; }
+      setWaPreview(result);
+    } catch (err) {
+      toast.error(err.message || 'تعذّر جلب بيانات التقرير');
+    } finally {
+      setReportBusy(false);
+    }
+  };
+
+  const handleGenerateProfessionalReport = async () => {
+    setReportBusy(true);
+    try {
+      const bundle = await pgGetStudentReportData(student.id);
+      generateStudentReport(student.id, bundle, { profile: centerProfile, generatedBy: currentUserName, config: reportConfig });
+    } catch (err) {
+      toast.error(err.message || 'تعذّر جلب بيانات التقرير');
+    } finally {
+      setReportBusy(false);
+    }
   };
 
   const handleWaOpen = async () => {
@@ -230,105 +260,65 @@ export default function StudentReportPage() {
   const student = useMemo(() => students.find(s => s.id === selectedId), [students, selectedId]);
   const group   = useMemo(() => groups.find(g => g.id === student?.groupId), [groups, student]);
 
-  // ── All report data ──────────────────────────────────────
+  // ── All report data (Scalability Architecture Phase 4) ──────────────────
+  // بدل تسع مصفوفات كاملة من الـ store، يُجلَب تاريخ هذا الطالب فقط عبر GET /students/
+  // :id/report-data (نفس الحزمة المُستخدَمة بالفعل للتقرير الاحترافي/واتساب أدناه)، ثم
+  // buildInteractiveReportData (reportData.js) يحوّلها لنفس شكل data الحالي بالضبط —
+  // بلا أي تغيير على أي حساب، فقط تغيير مصدر البيانات. طلب واحد فقط لكل طالب مُختار
+  // (لا طلبات منفصلة للحضور/الامتحانات/الواجبات/إلخ).
+  const {
+    data:    reportBundle,
+    loading: reportDataLoading,
+    error:   reportDataError,
+  } = useAsyncData(
+    () => (student ? pgGetStudentReportData(student.id) : Promise.resolve(null)),
+    [student?.id],
+    null,
+  );
+
+  useEffect(() => {
+    if (reportDataError) toast.error(reportDataError.message || 'فشل تحميل بيانات التقرير');
+  }, [reportDataError]);
+
   const data = useMemo(() => {
-    if (!student) return null;
+    if (!student || !reportBundle) return null;
+    // حارس سباق: طالب جديد يُختار قبل اكتمال جلب سابق — الحزمة القديمة (لطالب آخر) لا
+    // تُعرَض أبداً حتى تصل الحزمة الصحيحة الخاصة بالطالب الحالي (بغضّ النظر عن توقيت
+    // تحديث علم loading نفسه)، فلا يظهر تقرير طالب سابق ولو للحظة.
+    if (reportBundle.students?.[0]?.id !== student.id) return null;
 
-    // Attendance
-    const attAll     = attendance.filter(r => r.studentId === student.id).sort((a,b)=>a.date.localeCompare(b.date));
-    const attPresent = attAll.filter(r=>r.status==='present').length;
-    const attAbsent  = attAll.filter(r=>r.status==='absent').length;
-    const attLate    = attAll.filter(r=>r.status==='late').length;
-    const attPct     = attAll.length ? Math.round(attPresent/attAll.length*100) : null;
+    const built = buildInteractiveReportData(student.id, reportBundle);
+    if (!built) return null;
 
-    // Monthly attendance trend
-    const monthlyMap = {};
-    attAll.forEach(r => {
-      const k = r.date.slice(0,7);
-      if (!monthlyMap[k]) monthlyMap[k] = {present:0,absent:0,late:0,total:0};
-      monthlyMap[k].total++;
-      monthlyMap[k][r.status]++;
-    });
-    const attTrend = Object.entries(monthlyMap).sort(([a],[b])=>a.localeCompare(b))
-      .map(([m,d]) => ({ label:m.slice(5), val:d.total?Math.round(d.present/d.total*100):0 }));
+    // متابعة الغياب: لا نقطة نهاية مُصفّاة لهذه الـ collection بعد (خارج نطاق هذه
+    // المرحلة) — تبقى مُشتَقّة من absFollowup الكامل من الـ store، بنفس المنطق الحالي.
+    const absentIds = built.attAll.filter(r => r.status === 'absent').map(r => r.id);
+    const followups = absFollowup?.filter(f => absentIds.includes(f.attendanceId)) || [];
 
-    // Exams
-    const myGrades = grades.filter(g=>g.studentId===student.id);
-    const examRows = myGrades.map(g=>{
-      const exam = exams.find(e=>e.id===g.examId);
-      if (!exam) return null;
-      const pct = g.absent ? null : Math.round(g.score/exam.total*100);
-      return { exam, score:g.score, total:exam.total, pct, absent:g.absent, pass:exam.pass };
-    }).filter(Boolean).sort((a,b)=>a.exam.date.localeCompare(b.exam.date));
-    const validExams  = examRows.filter(r=>!r.absent && r.pct!=null);
-    const avgExamPct  = validExams.length ? Math.round(validExams.reduce((s,r)=>s+r.pct,0)/validExams.length) : null;
-    const passedExams = validExams.filter(r=>r.score>=r.pass).length;
+    return { ...built, followups };
+  }, [student, reportBundle, absFollowup]);
 
-    // Homeworks
-    const myGroupHW = homeworks.filter(h=>h.groupId===student.groupId);
-    const hwRows = myGroupHW.map(hw=>{
-      const sub = hwSubmissions.find(s=>s.hwId===hw.id&&s.studentId===student.id);
-      return { hw, status: sub?.status||'missing', submittedAt:sub?.submittedAt, score:sub?.score };
-    }).sort((a,b)=>a.hw.dueDate.localeCompare(b.hw.dueDate));
-    const hwSubmitted = hwRows.filter(r=>r.status==='submitted').length;
-    const hwLate      = hwRows.filter(r=>r.status==='late').length;
-    const hwMissing   = hwRows.filter(r=>r.status==='missing').length;
-
-    // Materials
-    const matRows = matDist.filter(d=>d.studentId===student.id).map(d=>{
-      const mat = materials.find(m=>m.id===d.matId);
-      return mat ? {...d, mat} : null;
-    }).filter(Boolean);
-    const matReceived = matRows.filter(r=>r.received).length;
-    const matPaid     = matRows.filter(r=>r.payStatus==='paid').length;
-    const matTotal    = matRows.reduce((s,r)=>s+(r.paidAmount||0), 0);
-
-    // Payments
-    // NEEDS BUSINESS DECISION (المُغلق الآن) — بيان مطبوع: الجدول أدناه (payRows) يعرض
-    // المبالغ الأصلية التاريخية لكل معاملة كما هي (لا تعديل). totalPaid يبقى إجمالياً
-    // خاماً (Gross) مطابقاً لمجموع تلك الصفوف بالضبط؛ الاسترداد الفعلي يُشتقّ من
-    // treasury_txn في حقلين منفصلين (refundedTotal/netPaid) بدل استبدال الإجمالي برقم
-    // صافٍ يناقض الجدول المطابق له تماماً. Net = Gross − Refunded دائماً.
-    const payRows  = payments.filter(p=>p.studentId===student.id).sort((a,b)=>a.date.localeCompare(b.date));
-    const totalPaid= payRows.reduce((s,p)=>s+p.amount, 0);
-    const refundedTotal = payRows.reduce((s,p)=>s+getRefundedAmount(p.id, treasuryTxn), 0);
-    const netPaid  = totalPaid - refundedTotal;
-    const paidCount= payRows.filter(p=>p.status==='paid').length;
-
-    // Timeline — merge all events
-    const timeline = [
-      { date:student.enrollDate, icon:'🎓', title:'التسجيل في المركز', sub:group?.name, color:'#0d9488', type:'enroll' },
-      ...payRows.map(p=>({ date:p.date, icon:'💰', title:`دفع ${formatCurrency(p.amount)}`, sub:MONTHS_AR[(p.month||1)-1], color:'#10b981', type:'payment' })),
-      ...attAll.filter(r=>r.status!=='present').map(r=>({ date:r.date, icon:r.status==='absent'?'✗':'⏱', title:r.status==='absent'?'غياب':'حضور متأخر', sub:null, color:r.status==='absent'?'#ef4444':'#f59e0b', type:'attendance' })),
-      ...examRows.map(r=>({ date:r.exam.date, icon:'📝', title:r.exam.name, sub:r.absent?'غائب':`${r.score}/${r.total}`, color:r.pct>=60?'#8b5cf6':'#ef4444', type:'exam' })),
-      ...hwRows.filter(r=>r.submittedAt).map(r=>({ date:r.submittedAt, icon:'📋', title:`تسليم: ${r.hw.title}`, sub:HW_META[r.status]?.label, color:HW_META[r.status]?.c||'#94a3b8', type:'hw' })),
-      ...matRows.filter(r=>r.receivedAt).map(r=>({ date:r.receivedAt, icon:'📚', title:`استلام: ${r.mat.name}`, sub:r.mat.subject, color:'#3b82f6', type:'material' })),
-    ].filter(t=>t.date).sort((a,b)=>b.date.localeCompare(a.date));
-
-    // Absence followup
-    const absentIds = attAll.filter(r=>r.status==='absent').map(r=>r.id);
-    const followups = absFollowup?.filter(f=>absentIds.includes(f.attendanceId)) || [];
-
-    return {
-      attAll, attPresent, attAbsent, attLate, attPct, attTrend,
-      examRows, avgExamPct, passedExams, validExams,
-      hwRows, hwSubmitted, hwLate, hwMissing,
-      matRows, matReceived, matPaid, matTotal,
-      payRows, totalPaid, refundedTotal, netPaid, paidCount,
-      timeline, followups,
-    };
-  }, [student, attendance, absFollowup, grades, exams, homeworks, hwSubmissions, matDist, materials, payments, group, treasuryTxn]);
+  // يميّز "لا يوجد طالب مُختار بعد" عن "طالب مُختار، لسّه بيتحمّل" عن "فشل التحميل" —
+  // الجسم الرئيسي أدناه يعرض واحداً من الثلاث بلا أي بيانات ناقصة/طالب سابق.
+  const reportIsLoading = !!student && reportDataLoading;
+  const reportHasError  = !!student && !reportDataLoading && !!reportDataError;
 
   // ── Tab definitions ──────────────────────────────────────
+  // كل تاب مربوط بعلمه في TAB_SECTION_KEY (عدا "نظرة عامة" — دائماً ظاهرة). تصفية حسب
+  // reportConfig هنا فقط: لو صار التاب النشط الحالي مخفياً (تغيير إعداد أثناء العرض)،
+  // effectiveTab أدناه يتراجع تلقائياً لـ "نظرة عامة" بدل عرض محتوى تاب لا يملك زراً.
   const TABS = [
     { id:'overview',    icon:'📊', label:'نظرة عامة' },
     { id:'attendance',  icon:'✓',  label:'الحضور'     },
     { id:'exams',       icon:'📝', label:'الامتحانات' },
+    { id:'recitation',  icon:'🎤', label:'التسميع'    },
     { id:'homeworks',   icon:'📋', label:'الواجبات'   },
     { id:'materials',   icon:'📚', label:'المذكرات'   },
     { id:'payments',    icon:'💰', label:'المدفوعات'  },
     { id:'timeline',    icon:'🕐', label:'التاريخ'    },
-  ];
+  ].filter(t => !TAB_SECTION_KEY[t.id] || isSectionVisible(reportConfig, TAB_SECTION_KEY[t.id]));
+
+  const effectiveTab = TABS.some(t => t.id === activeTab) ? activeTab : 'overview';
 
   // ── Student avatar ───────────────────────────────────────
   const studentAv = student ? av(student.name) : null;
@@ -348,22 +338,22 @@ export default function StudentReportPage() {
         </div>
         {student && (
           <div style={{ display:'flex', gap:8 }} className="no-print">
-            <button onClick={() => openStudentReportPrint({ student, group, data, profile: centerProfile })}
+            <button onClick={() => openStudentReportPrint({ student, group, data, profile: centerProfile, config: reportConfig })}
               style={{ display:'flex', alignItems:'center', gap:7, padding:'9px 18px', borderRadius:10, border:'1px solid var(--border)', background:'var(--surface2)', color:'var(--text2)', fontSize:'0.88rem', fontWeight:700, cursor:'pointer', transition:'all .15s' }}
               onMouseOver={e=>{e.currentTarget.style.background='var(--surface3)';e.currentTarget.style.color='var(--text)';}}
               onMouseOut={e =>{e.currentTarget.style.background='var(--surface2)';e.currentTarget.style.color='var(--text2)';}}>
               🖨 طباعة / PDF
             </button>
-            <button onClick={() => generateStudentReport(student.id, fullStore, { profile: centerProfile, generatedBy: currentUserName, config: reportConfig })}
-              style={{ display:'flex', alignItems:'center', gap:7, padding:'9px 18px', borderRadius:10, border:'none', background:'#2563eb', color:'#fff', fontSize:'0.88rem', fontWeight:700, cursor:'pointer', transition:'opacity .15s' }}
-              onMouseOver={e=>{e.currentTarget.style.opacity='0.9';}}
-              onMouseOut={e =>{e.currentTarget.style.opacity='1';}}>
+            <button onClick={handleGenerateProfessionalReport} disabled={reportBusy}
+              style={{ display:'flex', alignItems:'center', gap:7, padding:'9px 18px', borderRadius:10, border:'none', background:'#2563eb', color:'#fff', fontSize:'0.88rem', fontWeight:700, cursor: reportBusy ? 'wait' : 'pointer', opacity: reportBusy ? 0.7 : 1, transition:'opacity .15s' }}
+              onMouseOver={e=>{if(!reportBusy)e.currentTarget.style.opacity='0.9';}}
+              onMouseOut={e =>{if(!reportBusy)e.currentTarget.style.opacity='1';}}>
               ⭐ تقرير احترافي (PDF)
             </button>
-            <button onClick={handleOpenPreview}
-              style={{ display:'flex', alignItems:'center', gap:7, padding:'9px 18px', borderRadius:10, border:'none', background:'#25D366', color:'#fff', fontSize:'0.88rem', fontWeight:700, cursor:'pointer', transition:'opacity .15s' }}
-              onMouseOver={e=>{e.currentTarget.style.opacity='0.9';}}
-              onMouseOut={e =>{e.currentTarget.style.opacity='1';}}>
+            <button onClick={handleOpenPreview} disabled={reportBusy}
+              style={{ display:'flex', alignItems:'center', gap:7, padding:'9px 18px', borderRadius:10, border:'none', background:'#25D366', color:'#fff', fontSize:'0.88rem', fontWeight:700, cursor: reportBusy ? 'wait' : 'pointer', opacity: reportBusy ? 0.7 : 1, transition:'opacity .15s' }}
+              onMouseOver={e=>{if(!reportBusy)e.currentTarget.style.opacity='0.9';}}
+              onMouseOut={e =>{if(!reportBusy)e.currentTarget.style.opacity='1';}}>
               📲 إرسال ملخص لولي الأمر
             </button>
           </div>
@@ -433,6 +423,22 @@ export default function StudentReportPage() {
         </div>
       )}
 
+      {/* ── Loading state (جلب بيانات التقرير المُصفّاة لهذا الطالب) ─── */}
+      {reportIsLoading && (
+        <div style={{ textAlign:'center', padding:'80px 20px', color:'var(--text3)' }}>
+          <div style={{ fontSize:40, opacity:.4, marginBottom:12 }}>⏳</div>
+          <div style={{ fontWeight:700, fontSize:'0.95rem' }}>...جارِ تحميل تقرير الطالب</div>
+        </div>
+      )}
+
+      {/* ── Error state ──────────────────────────────── */}
+      {reportHasError && (
+        <div style={{ textAlign:'center', padding:'80px 20px', color:'var(--red)' }}>
+          <div style={{ fontSize:40, opacity:.4, marginBottom:12 }}>⚠</div>
+          <div style={{ fontWeight:700, fontSize:'0.95rem' }}>تعذّر تحميل تقرير الطالب</div>
+        </div>
+      )}
+
       {/* ═══════ REPORT BODY ═══════════════════════════════ */}
       {student && data && (
         <div style={{ padding:'0 28px', display:'flex', flexDirection:'column', gap:20 }}>
@@ -463,7 +469,7 @@ export default function StudentReportPage() {
                     ['🆔','الكود',        student.code,         true  ],
                     ['📚','السنة الدراسية', student.grade,        false ],
                     ['◈', 'المجموعة',      group?.name||'—',     false ],
-                    ['👤','المدرس',         group?.teacher||'—',  false ],
+                    ['👤','المدرس',         group?.teacherName||'—',  false ],
                     ['📞','هاتف الطالب',   student.phone,        true  ],
                     ['👨‍👩‍👦','ولي الأمر',   student.parentPhone||'—', true],
                     ['🏫','المدرسة',        student.school||'—',  false ],
@@ -477,39 +483,51 @@ export default function StudentReportPage() {
                   ))}
                 </div>
               </div>
-              {/* Overall score ring */}
-              <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:8, flexShrink:0 }} className="no-print">
-                <Ring pct={data.avgExamPct||0} color={pctColor(data.avgExamPct)} size={84} strokeW={7}/>
-                <div style={{ textAlign:'center' }}>
-                  <div style={{ fontSize:'1.3rem', fontWeight:900, color:pctColor(data.avgExamPct), lineHeight:1 }}>
-                    {data.avgExamPct!=null ? `${data.avgExamPct}%` : '—'}
+              {/* Overall score ring — بيانات امتحانات (exam average)، ليست هوية، فتتبع
+                  showExams مثل أي مكان آخر تظهر فيه؛ اسم/كود/حالة الطالب أعلاه تبقى ظاهرة
+                  دائماً (هوية التقرير، لا قسم قابل للإخفاء). */}
+              {isSectionVisible(reportConfig, 'showExams') && (
+                <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:8, flexShrink:0 }} className="no-print">
+                  <Ring pct={data.avgExamPct||0} color={pctColor(data.avgExamPct)} size={84} strokeW={7}/>
+                  <div style={{ textAlign:'center' }}>
+                    <div style={{ fontSize:'1.3rem', fontWeight:900, color:pctColor(data.avgExamPct), lineHeight:1 }}>
+                      {data.avgExamPct!=null ? `${data.avgExamPct}%` : '—'}
+                    </div>
+                    <div style={{ fontSize:'0.62rem', color:'var(--text3)', marginTop:3 }}>متوسط الامتحانات</div>
                   </div>
-                  <div style={{ fontSize:'0.62rem', color:'var(--text3)', marginTop:3 }}>متوسط الامتحانات</div>
                 </div>
-              </div>
+              )}
             </div>
           </div>
 
-          {/* ── Quick KPIs ───────────────────────────── */}
-          <div style={{ display:'grid', gridTemplateColumns:'repeat(6,1fr)', gap:12 }}>
-            {[
-              { icon:'✓',  label:'نسبة الحضور',    value:data.attPct!=null?`${data.attPct}%`:'—',    color:pctColor(data.attPct)   },
-              { icon:'📝', label:'متوسط الامتحانات', value:data.avgExamPct!=null?`${data.avgExamPct}%`:'—', color:pctColor(data.avgExamPct) },
-              { icon:'📋', label:'إنجاز الواجبات',  value:data.hwRows.length?`${Math.round((data.hwSubmitted+data.hwLate)/data.hwRows.length*100)}%`:'—', color:'#8b5cf6' },
-              { icon:'💰', label:'صافي المدفوع',  value:formatCurrency(data.netPaid), color:'#10b981' },
-              { icon:'📚', label:'مذكرات استُلمت',  value:`${data.matReceived}/${data.matRows.length}`, color:'#3b82f6' },
-              { icon:'🕐', label:'جلسات الحضور',    value:data.attAll.length, color:'var(--text)' },
-            ].map(k => <KpiCard key={k.label} {...k}/>)}
-          </div>
+          {/* ── Quick KPIs ─────────────────────────────
+              كل KPI مربوط بعلم قسمه (flag، ليس prop لـ KpiCard — يُستبعَد قبل map عبر
+              destructuring) — إخفاء قسم يُخفي مؤشّراته هنا أيضاً، لا فقط تابه، فلا يتسرّب
+              أي رقم مالي/دراسي عبر لوحة النظرة العامة بينما قسمه مُطفَأ من الإعدادات. */}
+          {(() => {
+            const kpis = [
+              { icon:'✓',  label:'نسبة الحضور',    value:data.attPct!=null?`${data.attPct}%`:'—',    color:pctColor(data.attPct),   flag:'showAttendance' },
+              { icon:'📝', label:'متوسط الامتحانات', value:data.avgExamPct!=null?`${data.avgExamPct}%`:'—', color:pctColor(data.avgExamPct), flag:'showExams' },
+              { icon:'📋', label:'إنجاز الواجبات',  value:data.hwRows.length?`${Math.round((data.hwSubmitted+data.hwLate)/data.hwRows.length*100)}%`:'—', color:'#8b5cf6', flag:'showHomework' },
+              { icon:'💰', label:'صافي المدفوع',  value:formatCurrency(data.netPaid), color:'#10b981', flag:'showFinancialSummary' },
+              { icon:'📚', label:'مذكرات استُلمت',  value:`${data.matReceived}/${data.matRows.length}`, color:'#3b82f6', flag:'showBooklets' },
+              { icon:'🕐', label:'جلسات الحضور',    value:data.attAll.length, color:'var(--text)', flag:'showAttendance' },
+            ].filter(k => isSectionVisible(reportConfig, k.flag));
+            return kpis.length ? (
+              <div style={{ display:'grid', gridTemplateColumns:`repeat(${kpis.length},1fr)`, gap:12 }}>
+                {kpis.map(({ flag, ...k }) => <KpiCard key={k.label} {...k}/>)}
+              </div>
+            ) : null;
+          })()}
 
           {/* ── Tabs ─────────────────────────────────── */}
           <div className="no-print" style={{ display:'flex', gap:2, background:'var(--surface2)', border:'1px solid var(--border)', borderRadius:14, padding:4, overflowX:'auto', flexShrink:0 }}>
             {TABS.map(t => (
               <button key={t.id} onClick={()=>setActiveTab(t.id)}
-                style={{ display:'flex', alignItems:'center', gap:6, padding:'9px 18px', borderRadius:10, fontSize:'0.88rem', fontWeight:activeTab===t.id?800:500, cursor:'pointer', transition:'all .15s', border:'none', whiteSpace:'nowrap',
-                  background:  activeTab===t.id ? 'var(--surface)' : 'transparent',
-                  color:       activeTab===t.id ? 'var(--accent)'   : 'var(--text3)',
-                  boxShadow:   activeTab===t.id ? '0 2px 8px rgba(0,0,0,.15)' : 'none',
+                style={{ display:'flex', alignItems:'center', gap:6, padding:'9px 18px', borderRadius:10, fontSize:'0.88rem', fontWeight:effectiveTab===t.id?800:500, cursor:'pointer', transition:'all .15s', border:'none', whiteSpace:'nowrap',
+                  background:  effectiveTab===t.id ? 'var(--surface)' : 'transparent',
+                  color:       effectiveTab===t.id ? 'var(--accent)'   : 'var(--text3)',
+                  boxShadow:   effectiveTab===t.id ? '0 2px 8px rgba(0,0,0,.15)' : 'none',
                 }}>
                 {t.icon} {t.label}
               </button>
@@ -519,99 +537,125 @@ export default function StudentReportPage() {
           {/* ══════════════════════════════════════════════════
               OVERVIEW TAB
           ══════════════════════════════════════════════════ */}
-          {(activeTab==='overview') && (
-            <div style={{ display:'flex', flexDirection:'column', gap:16 }}>
-              <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:16 }}>
-
-                {/* Attendance summary */}
-                <Section icon="✓" title="ملخص الحضور" accentColor="#10b981">
-                  <div style={{ display:'flex', alignItems:'center', gap:16, marginBottom:14 }}>
-                    <div style={{ position:'relative', flexShrink:0 }}>
-                      <Ring pct={data.attPct||0} color={pctColor(data.attPct)} size={72} strokeW={6}/>
-                      <div style={{ position:'absolute', inset:0, display:'flex', alignItems:'center', justifyContent:'center', flexDirection:'column' }}>
-                        <span style={{ fontSize:'0.85rem', fontWeight:900, color:pctColor(data.attPct) }}>{data.attPct??'—'}%</span>
+          {(effectiveTab==='overview') && (() => {
+            // نفس منطق "نظرة عامة" مُصغَّر لكل قسم من مؤشرات "المدفوعات السريعة" أعلاه —
+            // بطاقات هذا التاب تُلخِّص الحضور/الامتحانات/المالية/الواجبات بصورة مصغَّرة
+            // مستقلة تماماً عن التابات المخصَّصة (Attendance/Exams/… تابات)، فتحتاج نفس
+            // التصفية بعلمها الخاص هنا أيضاً — وإلا يتسرّب نفس النوع من البيانات (مثال:
+            // مالية) عبر هذا التاب حتى لو تاب "المدفوعات" نفسه مُخفى بالكامل.
+            const summaryCards = [
+              {
+                flag: 'showAttendance',
+                node: (
+                  <Section icon="✓" title="ملخص الحضور" accentColor="#10b981">
+                    <div style={{ display:'flex', alignItems:'center', gap:16, marginBottom:14 }}>
+                      <div style={{ position:'relative', flexShrink:0 }}>
+                        <Ring pct={data.attPct||0} color={pctColor(data.attPct)} size={72} strokeW={6}/>
+                        <div style={{ position:'absolute', inset:0, display:'flex', alignItems:'center', justifyContent:'center', flexDirection:'column' }}>
+                          <span style={{ fontSize:'0.85rem', fontWeight:900, color:pctColor(data.attPct) }}>{data.attPct??'—'}%</span>
+                        </div>
+                      </div>
+                      <div style={{ flex:1 }}>
+                        <StatRow label="حاضر"  value={data.attPresent} color="#10b981"/>
+                        <StatRow label="غائب"  value={data.attAbsent}  color="#ef4444"/>
+                        <StatRow label="متأخر" value={data.attLate}    color="#f59e0b"/>
+                        <StatRow label="الإجمالي" value={data.attAll.length}/>
                       </div>
                     </div>
-                    <div style={{ flex:1 }}>
-                      <StatRow label="حاضر"  value={data.attPresent} color="#10b981"/>
-                      <StatRow label="غائب"  value={data.attAbsent}  color="#ef4444"/>
-                      <StatRow label="متأخر" value={data.attLate}    color="#f59e0b"/>
-                      <StatRow label="الإجمالي" value={data.attAll.length}/>
-                    </div>
-                  </div>
-                </Section>
-
-                {/* Exams summary */}
-                <Section icon="📝" title="ملخص الامتحانات" accentColor="#8b5cf6">
-                  <div style={{ display:'flex', alignItems:'center', gap:16, marginBottom:14 }}>
-                    <div style={{ position:'relative', flexShrink:0 }}>
-                      <Ring pct={data.avgExamPct||0} color={pctColor(data.avgExamPct)} size={72} strokeW={6}/>
-                      <div style={{ position:'absolute', inset:0, display:'flex', alignItems:'center', justifyContent:'center', flexDirection:'column' }}>
-                        <span style={{ fontSize:'0.72rem', fontWeight:900, color:pctColor(data.avgExamPct) }}>{pctGrade(data.avgExamPct)}</span>
+                  </Section>
+                ),
+              },
+              {
+                flag: 'showExams',
+                node: (
+                  <Section icon="📝" title="ملخص الامتحانات" accentColor="#8b5cf6">
+                    <div style={{ display:'flex', alignItems:'center', gap:16, marginBottom:14 }}>
+                      <div style={{ position:'relative', flexShrink:0 }}>
+                        <Ring pct={data.avgExamPct||0} color={pctColor(data.avgExamPct)} size={72} strokeW={6}/>
+                        <div style={{ position:'absolute', inset:0, display:'flex', alignItems:'center', justifyContent:'center', flexDirection:'column' }}>
+                          <span style={{ fontSize:'0.72rem', fontWeight:900, color:pctColor(data.avgExamPct) }}>{pctGrade(data.avgExamPct)}</span>
+                        </div>
+                      </div>
+                      <div style={{ flex:1 }}>
+                        <StatRow label="نجح"    value={data.passedExams}                        color="#10b981"/>
+                        <StatRow label="رسب"    value={data.validExams.length-data.passedExams}  color="#ef4444"/>
+                        <StatRow label="غاب"    value={data.examRows.filter(r=>r.absent).length} color="#f59e0b"/>
+                        <StatRow label="الإجمالي" value={data.examRows.length}/>
                       </div>
                     </div>
-                    <div style={{ flex:1 }}>
-                      <StatRow label="نجح"    value={data.passedExams}                        color="#10b981"/>
-                      <StatRow label="رسب"    value={data.validExams.length-data.passedExams}  color="#ef4444"/>
-                      <StatRow label="غاب"    value={data.examRows.filter(r=>r.absent).length} color="#f59e0b"/>
-                      <StatRow label="الإجمالي" value={data.examRows.length}/>
+                  </Section>
+                ),
+              },
+              {
+                flag: 'showFinancialSummary',
+                node: (
+                  <Section icon="💰" title="ملخص المالية" accentColor="#10b981">
+                    <div style={{ marginBottom:8 }}>
+                      <div style={{ fontSize:'1.6rem', fontWeight:900, color:'#10b981', marginBottom:4 }}>{formatCurrency(data.netPaid)}</div>
+                      <div style={{ fontSize:'0.72rem', color:'var(--text3)' }}>صافي المدفوع</div>
                     </div>
-                  </div>
-                </Section>
+                    {data.refundedTotal > 0 && (
+                      <>
+                        <StatRow label="إجمالي قبل الاسترداد" value={formatCurrency(data.totalPaid)}/>
+                        <StatRow label="المسترد" value={formatCurrency(data.refundedTotal)} color="#ef4444"/>
+                      </>
+                    )}
+                    <StatRow label="عدد الدفعات" value={data.paidCount}/>
+                    <StatRow label="مذكرات مدفوعة" value={`${data.matPaid}/${data.matRows.length}`} color="#3b82f6"/>
+                    <StatRow label="إجمالي المذكرات" value={formatCurrency(data.matTotal)} color="#10b981"/>
+                  </Section>
+                ),
+              },
+            ].filter(c => isSectionVisible(reportConfig, c.flag));
 
-                {/* Finance summary */}
-                <Section icon="💰" title="ملخص المالية" accentColor="#10b981">
-                  <div style={{ marginBottom:8 }}>
-                    <div style={{ fontSize:'1.6rem', fontWeight:900, color:'#10b981', marginBottom:4 }}>{formatCurrency(data.netPaid)}</div>
-                    <div style={{ fontSize:'0.72rem', color:'var(--text3)' }}>صافي المدفوع</div>
-                  </div>
-                  {data.refundedTotal > 0 && (
-                    <>
-                      <StatRow label="إجمالي قبل الاسترداد" value={formatCurrency(data.totalPaid)}/>
-                      <StatRow label="المسترد" value={formatCurrency(data.refundedTotal)} color="#ef4444"/>
-                    </>
-                  )}
-                  <StatRow label="عدد الدفعات" value={data.paidCount}/>
-                  <StatRow label="مذكرات مدفوعة" value={`${data.matPaid}/${data.matRows.length}`} color="#3b82f6"/>
-                  <StatRow label="إجمالي المذكرات" value={formatCurrency(data.matTotal)} color="#10b981"/>
-                </Section>
-              </div>
-
-              {/* Homework summary */}
-              <Section icon="📋" title="ملخص الواجبات" accentColor="#f59e0b">
-                <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:12 }}>
-                  {[
-                    {l:'إجمالي الواجبات', v:data.hwRows.length,    c:'var(--text)' },
-                    {l:'سُلِّم في الوقت', v:data.hwSubmitted,      c:'#10b981'     },
-                    {l:'تسليم متأخر',     v:data.hwLate,           c:'#f59e0b'     },
-                    {l:'لم يُسلَّم',      v:data.hwMissing,        c:'#ef4444'     },
-                  ].map(s=>(
-                    <div key={s.l} style={{ textAlign:'center', padding:'12px', background:'var(--surface2)', borderRadius:12 }}>
-                      <div style={{ fontSize:'1.4rem', fontWeight:900, color:s.c }}>{s.v}</div>
-                      <div style={{ fontSize:'0.68rem', color:'var(--text3)', marginTop:4 }}>{s.l}</div>
-                    </div>
-                  ))}
-                </div>
-                {data.hwRows.length > 0 && (
-                  <div style={{ marginTop:12 }}>
-                    <MiniBar value={data.hwSubmitted+data.hwLate} max={data.hwRows.length} color="#f59e0b"/>
+            return (
+              <div style={{ display:'flex', flexDirection:'column', gap:16 }}>
+                {summaryCards.length > 0 && (
+                  <div style={{ display:'grid', gridTemplateColumns:`repeat(${summaryCards.length},1fr)`, gap:16 }}>
+                    {summaryCards.map((c, i) => <div key={i}>{c.node}</div>)}
                   </div>
                 )}
-              </Section>
 
-              {/* Recent activity */}
-              <Section icon="⏱" title="آخر النشاطات" accentColor="#0d9488">
-                {data.timeline.slice(0,6).map((t,i)=>(
-                  <TimelineItem key={i} {...t} last={i===Math.min(5,data.timeline.length-1)}/>
-                ))}
-              </Section>
-            </div>
-          )}
+                {/* Homework summary */}
+                {isSectionVisible(reportConfig, 'showHomework') && (
+                  <Section icon="📋" title="ملخص الواجبات" accentColor="#f59e0b">
+                    <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:12 }}>
+                      {[
+                        {l:'إجمالي الواجبات', v:data.hwRows.length,    c:'var(--text)' },
+                        {l:'سُلِّم في الوقت', v:data.hwSubmitted,      c:'#10b981'     },
+                        {l:'تسليم متأخر',     v:data.hwLate,           c:'#f59e0b'     },
+                        {l:'لم يُسلَّم',      v:data.hwMissing,        c:'#ef4444'     },
+                      ].map(s=>(
+                        <div key={s.l} style={{ textAlign:'center', padding:'12px', background:'var(--surface2)', borderRadius:12 }}>
+                          <div style={{ fontSize:'1.4rem', fontWeight:900, color:s.c }}>{s.v}</div>
+                          <div style={{ fontSize:'0.68rem', color:'var(--text3)', marginTop:4 }}>{s.l}</div>
+                        </div>
+                      ))}
+                    </div>
+                    {data.hwRows.length > 0 && (
+                      <div style={{ marginTop:12 }}>
+                        <MiniBar value={data.hwSubmitted+data.hwLate} max={data.hwRows.length} color="#f59e0b"/>
+                      </div>
+                    )}
+                  </Section>
+                )}
+
+                {/* Recent activity — نفس بيانات تاب "التاريخ" (data.timeline)، فيتبع علمه */}
+                {isSectionVisible(reportConfig, 'showAcademicTimeline') && (
+                  <Section icon="⏱" title="آخر النشاطات" accentColor="#0d9488">
+                    {data.timeline.slice(0,6).map((t,i)=>(
+                      <TimelineItem key={i} {...t} last={i===Math.min(5,data.timeline.length-1)}/>
+                    ))}
+                  </Section>
+                )}
+              </div>
+            );
+          })()}
 
           {/* ══════════════════════════════════════════════════
               ATTENDANCE TAB
           ══════════════════════════════════════════════════ */}
-          {(activeTab==='attendance') && (
+          {(effectiveTab==='attendance') && (
             <div style={{ display:'flex', flexDirection:'column', gap:16 }}>
               {/* Trend chart */}
               {data.attTrend.length > 0 && (
@@ -691,7 +735,7 @@ export default function StudentReportPage() {
           {/* ══════════════════════════════════════════════════
               EXAMS TAB
           ══════════════════════════════════════════════════ */}
-          {(activeTab==='exams') && (
+          {(effectiveTab==='exams') && (
             <div style={{ display:'flex', flexDirection:'column', gap:16 }}>
               {data.examRows.length === 0 ? (
                 <Section icon="📝" title="الامتحانات" accentColor="#8b5cf6"><EmptySection msg="لا توجد امتحانات مسجّلة"/></Section>
@@ -780,9 +824,72 @@ export default function StudentReportPage() {
           )}
 
           {/* ══════════════════════════════════════════════════
+              RECITATION TAB — نفس نمط تبويب الامتحانات أعلاه بالضبط، بلا رسم اتجاه
+              (غير مطلوب هنا). كل سجل recitationRows هو جلسة تاريخية مستقلة — لا دمج.
+          ══════════════════════════════════════════════════ */}
+          {(effectiveTab==='recitation') && (
+            <div style={{ display:'flex', flexDirection:'column', gap:16 }}>
+              {data.recitationRows.length === 0 ? (
+                <Section icon="🎤" title="التسميع" accentColor="#8b5cf6"><EmptySection msg="لا توجد جلسات تسميع مسجّلة"/></Section>
+              ) : (
+                <Section icon="🎤" title="تفاصيل التسميع" count={data.recitationRows.length} accentColor="#8b5cf6" noPad>
+                  <div style={{ overflowX:'auto' }}>
+                    <table style={{ width:'100%', borderCollapse:'collapse', fontSize:'0.83rem' }}>
+                      <thead style={{ background:'var(--surface2)' }}>
+                        <tr>{['التاريخ','المجموعة','الحصة','الدرجة','من','النسبة','ملاحظة'].map(h=>(
+                          <th key={h} style={{ padding:'10px 18px', textAlign:'right', fontSize:'0.65rem', fontWeight:700, color:'var(--text3)', textTransform:'uppercase', letterSpacing:'0.07em', borderBottom:'1px solid var(--border)', whiteSpace:'nowrap' }}>{h}</th>
+                        ))}</tr>
+                      </thead>
+                      <tbody>
+                        {data.recitationRows.map((r,i)=>{
+                          const color = r.pct===null?'#94a3b8':pctColor(r.pct);
+                          return (
+                            <tr key={i}
+                              style={{ background:i%2===0?'':'var(--surface2)' }}
+                              onMouseOver={e=>Array.from(e.currentTarget.cells).forEach(td=>td.style.background='var(--hover-row)')}
+                              onMouseOut={e=>Array.from(e.currentTarget.cells).forEach(td=>td.style.background='')}
+                            >
+                              <td style={{ padding:'10px 18px', borderBottom:'1px solid var(--border)', color:'var(--text3)' }}>{formatDate(r.date,{month:'short',day:'numeric'})}</td>
+                              <td style={{ padding:'10px 18px', borderBottom:'1px solid var(--border)', color:'var(--text2)' }}>{r.groupName || '—'}</td>
+                              <td style={{ padding:'10px 18px', borderBottom:'1px solid var(--border)', color:'var(--text3)' }}>{r.sessionTime || '—'}</td>
+                              <td style={{ padding:'10px 18px', borderBottom:'1px solid var(--border)', fontWeight:900, color }}>{r.score}</td>
+                              <td style={{ padding:'10px 18px', borderBottom:'1px solid var(--border)', color:'var(--text3)' }}>{r.maxScore}</td>
+                              <td style={{ padding:'10px 18px', borderBottom:'1px solid var(--border)' }}>
+                                {r.pct!==null && (
+                                  <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+                                    <div style={{ width:48, height:5, background:'var(--surface3)', borderRadius:99, overflow:'hidden' }}>
+                                      <div style={{ height:'100%', width:`${r.pct}%`, background:color }}/>
+                                    </div>
+                                    <span style={{ fontSize:'0.75rem', fontWeight:700, color }}>{r.pct}%</span>
+                                  </div>
+                                )}
+                              </td>
+                              <td style={{ padding:'10px 18px', borderBottom:'1px solid var(--border)', color:'var(--text3)', maxWidth:200, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{r.note || '—'}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                      {data.avgRecitationPct!==null && (
+                        <tfoot>
+                          <tr style={{ background:'var(--surface2)' }}>
+                            <td colSpan={5} style={{ padding:'10px 18px', fontWeight:800, color:'var(--text3)', fontSize:'0.8rem' }}>المتوسط العام</td>
+                            <td colSpan={2} style={{ padding:'10px 18px', fontWeight:900, color:pctColor(data.avgRecitationPct), fontSize:'0.95rem' }}>
+                              {data.avgRecitationPct}%
+                            </td>
+                          </tr>
+                        </tfoot>
+                      )}
+                    </table>
+                  </div>
+                </Section>
+              )}
+            </div>
+          )}
+
+          {/* ══════════════════════════════════════════════════
               HOMEWORKS TAB
           ══════════════════════════════════════════════════ */}
-          {(activeTab==='homeworks') && (
+          {(effectiveTab==='homeworks') && (
             <Section icon="📋" title="الواجبات" count={data.hwRows.length} accentColor="#f59e0b" noPad>
               {data.hwRows.length===0 ? <EmptySection msg="لا توجد واجبات"/> : (
                 <div style={{ overflowX:'auto' }}>
@@ -827,13 +934,13 @@ export default function StudentReportPage() {
           {/* ══════════════════════════════════════════════════
               MATERIALS TAB
           ══════════════════════════════════════════════════ */}
-          {(activeTab==='materials') && (
+          {(effectiveTab==='materials') && (
             <Section icon="📚" title="المذكرات الدراسية" count={data.matRows.length} accentColor="#3b82f6" noPad>
               {data.matRows.length===0 ? <EmptySection msg="لا توجد مذكرات"/> : (
                 <div style={{ overflowX:'auto' }}>
                   <table style={{ width:'100%', borderCollapse:'collapse', fontSize:'0.83rem' }}>
                     <thead style={{ background:'var(--surface2)' }}>
-                      <tr>{['المذكرة','المادة','السعر','استلم','تاريخ الاستلام','حالة الدفع','المدفوع'].map(h=>(
+                      <tr>{['المذكرة','المادة','السعر','استلم','تاريخ الاستلام','حالة الدفع','المدفوع','المتبقي'].map(h=>(
                         <th key={h} style={{ padding:'10px 18px', textAlign:'right', fontSize:'0.65rem', fontWeight:700, color:'var(--text3)', textTransform:'uppercase', letterSpacing:'0.07em', borderBottom:'1px solid var(--border)', whiteSpace:'nowrap' }}>{h}</th>
                       ))}</tr>
                     </thead>
@@ -861,6 +968,9 @@ export default function StudentReportPage() {
                             <td style={{ padding:'10px 18px', borderBottom:'1px solid var(--border)', fontWeight:700, color:'#10b981' }}>
                               {r.paidAmount>0?`${r.paidAmount} ج.م`:'—'}
                             </td>
+                            <td style={{ padding:'10px 18px', borderBottom:'1px solid var(--border)', fontWeight:700, color:r.remaining>0?'#ef4444':'var(--text3)' }}>
+                              {r.remaining>0?`${r.remaining} ج.م`:'—'}
+                            </td>
                           </tr>
                         );
                       })}
@@ -874,7 +984,7 @@ export default function StudentReportPage() {
           {/* ══════════════════════════════════════════════════
               PAYMENTS TAB
           ══════════════════════════════════════════════════ */}
-          {(activeTab==='payments') && (
+          {(effectiveTab==='payments') && (
             <div style={{ display:'flex', flexDirection:'column', gap:16 }}>
               {/* Totals — Gross/Refunded/Net (BUG-02: الجدول أدناه يعرض المبالغ الأصلية
                   التاريخية كما هي، فالإجمالي هنا يبقى خاماً مطابقاً لمجموعها؛ الاسترداد
@@ -945,7 +1055,7 @@ export default function StudentReportPage() {
           {/* ══════════════════════════════════════════════════
               TIMELINE TAB
           ══════════════════════════════════════════════════ */}
-          {(activeTab==='timeline') && (
+          {(effectiveTab==='timeline') && (
             <Section icon="🕐" title={`التاريخ الكامل للطالب`} count={data.timeline.length} accentColor="#0d9488">
               {data.timeline.length === 0 ? <EmptySection msg="لا توجد أحداث مسجّلة"/> : (
                 <div style={{ maxHeight:600, overflowY:'auto', paddingLeft:8 }}>

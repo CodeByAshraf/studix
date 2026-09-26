@@ -35,15 +35,22 @@ const StatChip = memo(function StatChip({ label, value, color = 'var(--text2)' }
 });
 
 // ── GroupCard ─────────────────────────────────────────────────
-const GroupCard = memo(function GroupCard({ group, onEdit, onDelete, onViewStudents, onTransfer }) {
+// Scalability Architecture Phase 4 Cutover 2: payments يصل الآن كـ prop من GroupsPage
+// (GET /api/payments?month=&year= لشهر/سنة "الآن" الحقيقيَّين، مُجلَب مرة واحدة لكل
+// المجموعات معاً) بدل قراءة مصفوفة payments الكاملة من الـ store هنا مباشرة — نفس مصدر
+// البيانات ونفس getGroupStats المُستخدَمَين في عرض القائمة وGroupStatistics.jsx (P9)،
+// بلا أي تغيير على الدالة نفسها أو على fallback السنة/التاريخ الحالي.
+// C4 Attendance migration Phase 2: attendanceStats يصل الآن أيضاً كـ prop من GroupsPage
+// (GET /api/attendance/aggregate?groupBy=group، نداء واحد فقط لكل المجموعات معاً، نفس
+// مبدأ payments أعلاه بالضبط) بدل قراءة مصفوفة attendance الكاملة من الـ store هنا —
+// getGroupStats نفسها غير مُعدَّلة في جوهرها، فقط تستقبل صفاً مُجمَّعاً بدل مصفوفة خام.
+const GroupCard = memo(function GroupCard({ group, payments, attendanceStats, onEdit, onDelete, onViewStudents, onTransfer }) {
   const students   = useAppStore(s => s.students);
-  const payments   = useAppStore(s => s.payments);
-  const attendance = useAppStore(s => s.attendance);
   const treasuryTxn = useAppStore(s => s.treasuryTxn);
 
   const stats = useMemo(
-    () => getGroupStats(group, students, payments, attendance, treasuryTxn),
-    [group, students, payments, attendance, treasuryTxn]
+    () => getGroupStats(group, students, payments, attendanceStats, treasuryTxn),
+    [group, students, payments, attendanceStats, treasuryTxn]
   );
 
   const capacityPct     = stats.activeCount > 0 ? Math.round(stats.activeCount / group.max * 100) : 0;
