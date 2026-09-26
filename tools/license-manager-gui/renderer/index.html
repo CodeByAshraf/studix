@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none';" />
+<title>Studix License Manager</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="app-header">
+      <div class="brand">
+        <div class="brand-mark">🔐</div>
+        <div>
+          <div class="brand-title">Studix License Manager</div>
+          <div class="brand-subtitle">أداة إصدار تراخيص Studix — للمالك فقط، تعمل بلا اتصال بالإنترنت</div>
+        </div>
+      </div>
+      <div class="app-version" id="app-version">—</div>
+    </header>
+
+    <main class="app-main">
+      <!-- Key section -->
+      <section class="card" id="card-key">
+        <div class="card-header">
+          <h2>١. مفتاح التوقيع</h2>
+          <span class="badge" id="key-status-badge">مغلق</span>
+        </div>
+        <div class="card-body">
+          <div id="key-locked-view" class="stack">
+            <p class="hint">افتح خزنة مفاتيح محمية بكلمة مرور، أو استورد ملف مفتاح خاص خارجي، أو أنشئ زوج مفاتيح جديد.</p>
+            <div class="row wrap">
+              <button class="btn btn-primary" id="btn-open-keystore">فتح خزنة مفاتيح موجودة</button>
+              <button class="btn btn-secondary" id="btn-import-external">استيراد مفتاح خاص خارجي</button>
+              <button class="btn btn-ghost" id="btn-generate-new">إنشاء زوج مفاتيح جديد (متقدّم)</button>
+            </div>
+
+            <div id="passphrase-panel" class="panel hidden">
+              <div class="field">
+                <label id="passphrase-panel-label">كلمة مرور خزنة المفاتيح</label>
+                <input type="password" id="passphrase-input" placeholder="أدخل كلمة المرور" autocomplete="off" />
+              </div>
+              <div id="new-keystore-extra" class="hidden stack">
+                <div class="field">
+                  <label>تأكيد كلمة المرور</label>
+                  <input type="password" id="passphrase-confirm-input" placeholder="أعد إدخال كلمة المرور" autocomplete="off" />
+                </div>
+              </div>
+              <div id="peek-info" class="peek-info hidden"></div>
+              <div class="row">
+                <button class="btn btn-primary" id="btn-confirm-passphrase">تأكيد</button>
+                <button class="btn btn-ghost" id="btn-cancel-passphrase">إلغاء</button>
+              </div>
+            </div>
+          </div>
+
+          <div id="key-unlocked-view" class="stack hidden">
+            <div class="kv">
+              <span class="kv-label">البصمة (Fingerprint)</span>
+              <span class="kv-value mono" id="key-fingerprint">—</span>
+            </div>
+            <div class="kv">
+              <span class="kv-label">المصدر</span>
+              <span class="kv-value" id="key-source">—</span>
+            </div>
+            <div class="row">
+              <button class="btn btn-secondary" id="btn-protect-session-key">حفظ في خزنة محمية</button>
+              <button class="btn btn-ghost" id="btn-lock-key">قفل المفتاح</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Request code section -->
+      <section class="card" id="card-request">
+        <div class="card-header"><h2>٢. رمز طلب التفعيل</h2></div>
+        <div class="card-body stack">
+          <textarea id="request-code-input" rows="3" placeholder="الصق رمز طلب التفعيل هنا" spellcheck="false"></textarea>
+          <div class="row">
+            <button class="btn btn-primary" id="btn-parse-code">تحليل الرمز</button>
+          </div>
+          <div id="request-info" class="request-info hidden">
+            <div class="kv"><span class="kv-label">رقم التثبيت</span><span class="kv-value mono" id="req-installation">—</span></div>
+            <div class="kv"><span class="kv-label">بصمة الجهاز</span><span class="kv-value mono" id="req-machine">—</span></div>
+            <div class="kv"><span class="kv-label">المنتج</span><span class="kv-value mono" id="req-product">—</span></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- License terms section -->
+      <section class="card" id="card-terms">
+        <div class="card-header"><h2>٣. شروط الترخيص</h2></div>
+        <div class="card-body stack">
+          <div class="field">
+            <label>معرّف الترخيص (اختياري — يُولَّد تلقائياً إن تُرك فارغاً)</label>
+            <input type="text" id="license-id-input" placeholder="lic_..." />
+          </div>
+
+          <div class="field">
+            <label class="checkbox-row">
+              <input type="checkbox" id="perpetual-checkbox" checked />
+              <span>ترخيص دائم (بلا انتهاء)</span>
+            </label>
+          </div>
+          <div class="field" id="expiry-field">
+            <label>تاريخ الانتهاء</label>
+            <input type="date" id="expiry-date-input" />
+          </div>
+
+          <div class="field">
+            <label>الميزات (اختياري)</label>
+            <div class="tag-input" id="features-tag-input">
+              <div class="tags" id="features-tags"></div>
+              <input type="text" id="feature-entry-input" placeholder="اكتب اسم الميزة ثم Enter" />
+            </div>
+          </div>
+
+          <div class="field">
+            <label>ملاحظات (اختياري — لمرجعيتك الخاصة فقط)</label>
+            <input type="text" id="notes-input" placeholder="مثال: اسم العميل" />
+          </div>
+
+          <div class="row">
+            <button class="btn btn-primary btn-lg" id="btn-issue">إصدار شهادة الترخيص</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Result section -->
+      <section class="card hidden" id="card-result">
+        <div class="card-header"><h2>٤. شهادة الترخيص</h2></div>
+        <div class="card-body stack">
+          <textarea id="artifact-output" rows="4" readonly spellcheck="false"></textarea>
+          <div class="row wrap">
+            <button class="btn btn-primary" id="btn-copy-artifact">نسخ الشهادة</button>
+            <button class="btn btn-secondary" id="btn-save-artifact">حفظ كملف .lic</button>
+            <label class="checkbox-row inline">
+              <input type="checkbox" id="clipboard-autoclear-checkbox" checked />
+              <span>مسح الحافظة تلقائياً بعد <span id="autoclear-seconds">30</span> ثانية</span>
+            </label>
+          </div>
+          <div class="kv-grid">
+            <div class="kv"><span class="kv-label">معرّف الترخيص</span><span class="kv-value mono" id="res-license-id">—</span></div>
+            <div class="kv"><span class="kv-label">تاريخ الإصدار</span><span class="kv-value" id="res-issued-at">—</span></div>
+            <div class="kv"><span class="kv-label">تاريخ الانتهاء</span><span class="kv-value" id="res-expires-at">—</span></div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <div id="status-bar" class="status-bar hidden">
+      <span id="status-message"></span>
+    </div>
+
+    <footer class="app-footer">
+      <button class="btn btn-danger-ghost" id="btn-clear-session">مسح الجلسة (البيانات الحسّاسة)</button>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

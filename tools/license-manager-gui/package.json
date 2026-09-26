@@ -1,0 +1,51 @@
+{
+  "name": "studix-license-manager",
+  "productName": "Studix License Manager",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Studix License Manager — standalone, owner-only GUI for issuing Studix license artifacts. Reuses the existing Studix licensing core (Ed25519, unchanged) via tools/license-manager-gui/core/licenseCore.js. Never shipped to customers, never bundled into the Studix installer.",
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "bundle": "node scripts/bundle.mjs",
+    "prestart": "npm run bundle",
+    "start": "electron .",
+    "prebuild:portable": "npm run bundle",
+    "build:portable": "electron-builder --win portable --publish never"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0",
+    "esbuild": "^0.24.2"
+  },
+  "build": {
+    "appId": "com.studix.licensemanager",
+    "productName": "Studix License Manager",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/main.js",
+      "main/preload.cjs",
+      "renderer/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "signAndEditExecutable": false,
+      "signDlls": false
+    },
+    "portable": {
+      "artifactName": "StudixLicenseManager.exe"
+    },
+    "asar": true
+  }
+}
