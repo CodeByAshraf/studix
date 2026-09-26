@@ -18,12 +18,61 @@ import { pgGetCollection, pgCheckHealth } from '../services/api';
 // مباشرة بلا أي تعديل — تحقّقنا من هذا صراحةً قبل الإضافة (انظر تقرير قرار Phase 3B-13A).
 // Phase 3B-14D: admissionPayments أُضيفت — مصدر الحقيقة PostgreSQL الآن (كانت
 // admissionPaymentsLocal، محلية بحتة قبل هذه المرحلة، بلا أي مصدر PostgreSQL).
+// Scalability Architecture Phase 4 (الإغلاق) — 'payments' أُزيلت من هنا صراحةً: مصفوفة
+// الدفعات الكاملة لم تعد تُحمَّل عند الإقلاع/تسجيل الدخول إطلاقاً. كل مستهلك حي هاجَر
+// مسبقاً لواجهات payments المُفلترة/المُجمَّعة (pgGetPayments بفلاتر، pgGetPaymentAggregates،
+// GET /api/payments/search) — PaymentsPage/PaymentHistory/PaymentForm/PaymentReports/
+// UnpaidStudents/Dashboard/GroupsPage/GroupStudents/StudentsPage/FinancialAnalytics/
+// GroupStatistics/StudentReportPage جميعها مُتحقَّقة صراحة. النسخة الاحتياطية اليدوية
+// (exportBackup) تجلب المجموعة الكاملة طازجة عند الطلب فقط عبر GET /api/payments غير
+// المُفلتَرة (pgGetPayments({}))، لا عند الإقلاع — النسخة التلقائية (saveAutoBackup) لا
+// تتضمّن payments إطلاقاً بعد الآن (قرار مُنتَج صريح، انظر app.store.js). state.payments
+// يبقى موجوداً كشريحة Zustand فارغة افتراضياً (createPaymentsSlice) لمن لا يزال يكتب
+// إليها محلياً بعد نجاح عمليات الخادم (setPayments في PaymentsPage.jsx بعد إنشاء دفعة) —
+// لا قراءة حيّة تعتمد على تعبئتها الكاملة بعد الآن.
+// Scalability Architecture Phase 4 (activityLogs) — 'activityLogs' أُزيلت من هنا صراحةً:
+// لم تعد تُحمَّل كاملة عند الإقلاع/تسجيل الدخول إطلاقاً — أسرع collection نمواً في النظام
+// (كل عملية إنشاء/تعديل/حذف في أي مكان تُسجِّل صفاً). المستهلكان الحيّان الوحيدان
+// (ActivityLogPage.jsx، Dashboard.jsx) هاجَرا لـ GET /api/activityLogs?limit=&offset=
+// المُصفّى (backend/src/routes/activityLogs.js) — ترتيب حتمي (timestamp DESC, id DESC)
+// + عدّ حقيقي لكامل الجدول، بدل GET العام غير المُرتَّب. useActivityLog.js/useActivityLogs
+// (hooks/selector قديمان) بلا أي مستدعٍ حي — لم يُمَسّا. exportBackup/saveAutoBackup
+// (app.store.js) لا تقرآن activityLogs إطلاقاً، فلا تبعية نسخ احتياطي هنا (بعكس
+// attendance/exams/grades/homeworks/hwSubmissions).
+// Scalability Architecture Phase 4 (admissionPayments) — 'admissionPayments' أُزيلت من
+// هنا صراحةً: لم تعد تُحمَّل كاملة عند الإقلاع/تسجيل الدخول إطلاقاً. المستهلك الحي الوحيد
+// (AdmissionsPage.jsx composeAdmission) هاجَر لـ GET /api/admissionPayments (بلا فلتر —
+// جلب واحد فقط عند تحميل الصفحة نفسها، لا عند الإقلاع، ولا طلب منفصل لكل سجل قبول) عبر
+// pgGetAdmissionPayments (src/services/api.js)، ثم يُزرَع في نفس admissionPayments state
+// (setAdmissionPayments) — composeAdmission ومساراته الكتابة (addPayment/
+// doCancelWithRefund) لم يتغيّرا؛ الحقل المفلتَر admissionId على GET /api/admissionPayments
+// (backend/src/routes/admissionPayments.js) غير مُستخدَم من أي مستهلك حالي حتى الآن (كل
+// دفعات كل سجلات القبول تُجلَب معاً في الطلب الواحد أعلاه). لا تبعية نسخ احتياطي هنا
+// (exportBackup/saveAutoBackup لا تقرآن admissionPayments إطلاقاً — تحقّق فعلي حيّ).
+// Pre-Installer Audit C4 — 'communications'/'commTasks' أُزيلتا من هنا صراحةً بنفس منطق
+// admissionPayments أعلاه بالضبط: تتبّع كل المستهلكين الحيّين لهما (grep شامل عبر src/)
+// أظهر مستهلكاً حيّاً وحيداً لكليهما — CommunicationPage.jsx (شاشة CRM كاملة تحتاج فعلاً
+// كل السجلات دفعة واحدة عند فتحها، لا جزءاً منها) — والذي هاجَر لجلب واحد عند تحميل
+// الصفحة نفسها (pgGetCollection('communications'/'commTasks') + setCommunications/
+// setCommTasks الجديدتان في communication.slice.js)، بدل الاعتماد على تحميل الإقلاع.
+// الاستهلاكان الآخران الوحيدان لـ communications (فحص عدد سجلات التواصل قبل حذف طالب/
+// مجموعة في StudentsPage.jsx/GroupsPage.jsx) هاجَرا لنفس المسار المُفلتَر server-side
+// (GET /api/communications?studentId=/&groupId=، مبني مسبقاً في Phase 4 السابقة) بدل
+// الاعتماد على المصفوفة الكاملة المحمَّلة إقلاعياً. لا تبعية نسخ احتياطي هنا
+// (exportBackup/saveAutoBackup لا تقرآن communications/commTasks إطلاقاً — تحقّق فعلي حيّ).
+// waReportLog لم تُمَسّ عمداً — خارج نطاق هذا الفحص (لا مستهلك حيّ تحقّقنا منه بعد).
+// Grades + Homework global-read migration, Phase 3 (final cutover) — 'grades'/'homeworks'/
+// 'hwSubmissions' removed: every live consumer now reads a scoped/aggregate route
+// (pgGetGrades/pgGetGradesAggregate/pgGetHomeworks/pgGetHwSubmissions/
+// pgGetHwSubmissionsAggregate) or the student report server bundle. exportBackup fetches all
+// three fresh at export time (same mechanism as payments). The store state + write-through
+// remain as the persisted local snapshot (saveAutoBackup's grades — unchanged, product-owned).
 const PG_COLLECTIONS = [
-  'parents', 'students', 'groups', 'teachers', 'exams', 'homeworks', 'centerProfile',
-  'cashboxes', 'treasuryTxn', 'payments', 'attendance', 'absenceFollowup',
-  'grades', 'hwSubmissions', 'invMaterials', 'inventoryTxn', 'inventorySettings',
-  'admissions', 'admissionFollowups', 'admissionSystemLog', 'admissionPayments',
-  'communications', 'commTasks', 'activityLogs', 'waReportLog',
+  'parents', 'students', 'groups', 'teachers', 'exams', 'centerProfile',
+  'cashboxes', 'treasuryTxn', 'attendance', 'absenceFollowup',
+  'invMaterials', 'inventoryTxn', 'inventorySettings',
+  'admissions', 'admissionFollowups', 'admissionSystemLog',
+  'waReportLog',
 ];
 
 // دمج آمن بالـ id: أي سجل محلي بـ id غير موجود في نسخة PostgreSQL يبقى كما هو،
@@ -37,27 +86,19 @@ const PG_COLLECTIONS = [
 //   ("2000-01-01T00:00:00.000Z") لأن عمود @db.Date يُسلسَل عبر JSON.stringify كـ Date
 //   كامل — بينما كل مكان آخر بالتطبيق (SessionMarking, ExamsPage, التقارير) يقارن date
 //   كنص "YYYY-MM-DD" مباشرة.
-// - exams.total/pass و grades.score: أعمدة Decimal في Prisma — caseMapper.js (غير
-//   مُعدَّل عمداً) يحفظها كما هي، فتصل عبر المسار العام (GET /api/exams، /api/grades)
-//   كنص وليس رقماً (لها toJSON خاص). حسابات examService.js (خصوصاً "+" في scores.reduce)
-//   تتحوّل لدمج نصوص لا جمع أرقام لو بقيت نصاً — نفس المشكلة التي طُبِّعت فعلاً في نقطة
-//   نهاية الدرجات المخصّصة (examGrades.js)، هنا فقط لمسار القراءة/الدمج العام.
-// - homeworks.dueDate/assignedDate و hwSubmissions.submittedAt: نفس مشكلة التاريخ
-//   أعلاه. assignedDate (عمود assigned_date) هو ما تعرضه الواجهة كـ "createdAt"
-//   (تاريخ الإنشاء الذي يُدخله المستخدم) — نُعيد تسميته هنا أيضاً حتى تتطابق سجلات
-//   القراءة/الدمج مع ما يُنتجه pgCreateHomework/pgUpdateHomework بالضبط، بدل ترك
-//   createdAt الخام (طابع created_at الفعلي من الخادم) يظهر بالخطأ.
-// - homeworks.totalScore و hwSubmissions.score: نفس مشكلة Decimal-كنص أعلاه.
-// - hwSubmissions.homeworkId: المسار العام (GET /api/hwSubmissions → snakeToCamel)
-//   يُعيد homeworkId (من عمود homework_id) — بينما كل التطبيق (HomeworkPage,
-//   HomeworkTracking, StudentReportPage) يقرأ حصراً حقلاً اسمه "hwId". نُعيد تسميته
-//   هنا أيضاً حتى تتطابق سجلات القراءة/الدمج مع ما يُنتجه pgSaveHwSubmissions بالضبط.
+// - exams.total/pass: أعمدة Decimal في Prisma — caseMapper.js (غير مُعدَّل عمداً)
+//   يحفظها كما هي، فتصل عبر المسار العام (GET /api/exams) كنص وليس رقماً (لها toJSON
+//   خاص). حسابات examService.js (خصوصاً "+" في scores.reduce) تتحوّل لدمج نصوص لا جمع
+//   أرقام لو بقيت نصاً.
+// - grades/homeworks/hwSubmissions: لم تعد تُحمَّل إقلاعياً (Phase 3 cutover) — تطبيعها
+//   (score/dueDate/totalScore، homeworkId→hwId…) يتمّ الآن حصراً في api.js
+//   (normalizeGradeResponse/normalizeHomeworkResponse/normalizeHwSubmissionResponse).
 // - communications.followupDate / commTasks.dueDate: نفس مشكلة التاريخ أعلاه.
 // - communications.legacyParentName: العمود الفعلي legacy_parent_name (لا parent_name) —
 //   pgCreateCommunication (api.js) يُعيد تسميته لـ parentName في استجابته؛ نفس الشيء
 //   هنا لمسار القراءة/الدمج حتى لا يختلف شكل السجل حسب مصدره (إنشاء الآن مقابل قراءة
 //   لاحقة) — parentService.js/CommRecordCard يقرآن حصراً "parentName".
-// - commTasks.communicationId: نفس نمط hwSubmissions.homeworkId أعلاه — يُعاد تسميته
+// - commTasks.communicationId: إعادة تسمية مرجع (مثل homeworkId→hwId في api.js) — يُعاد تسميته
 //   لـ "commId" ليطابق ما يُنتجه pgCreateCommTask بالضبط.
 const COLLECTION_FIXUPS = {
   // Phase 3B-14A: opening_balance يصل كـ Decimal من Prisma على مسار المزامنة أيضاً —
@@ -83,27 +124,18 @@ const COLLECTION_FIXUPS = {
   // ts/description/user هي الأسماء التي تقرأها ActivityLogPage.jsx/Dashboard.jsx فعلياً،
   // لا timestamp/details/userName الخام من الخادم.
   activityLogs: (r) => ({ ...r, ts: r.timestamp, user: r.userName || 'النظام', description: r.details ?? '' }),
+  // Pre-installer defect audit — groups.teacher_name يصل هنا كـ "teacherName" (snakeToCamel
+  // الخام، بلا أي تطبيع سابقاً — لم يكن لِـ groups أي إدخال في COLLECTION_FIXUPS إطلاقاً).
+  // GroupForm.jsx/GroupsPage.jsx/GroupCard.jsx تقرأ جميعها "teacher" حصراً (الحقل المحلي
+  // القديم)، لا "teacherName" — وmergeById (أعلاه) يستبدل الصف المحلي بالكامل بصف الخادم
+  // الخام عند أي مزامنة، فتُفقَد "teacher" كلياً، فيظهر حقل "المدرس" فارغاً في نموذج
+  // التعديل رغم وجود اسم حقيقي، وحفظ التعديل بلا إعادة كتابته يدوياً يُرسِل teacherName:''
+  // فيمحو الاسم الحقيقي من القاعدة صامتاً. نفس مبدأ communications.legacyParentName أعلاه
+  // بالضبط: إعادة تسمية على مسار القراءة/الدمج فقط، لا تغيير على pgCreateGroup/
+  // pgUpdateGroup (api.js) ولا على أي حقل آخر.
+  groups: (r) => ({ ...r, teacher: r.teacherName ?? '' }),
   attendance: (r) => ({ ...r, date: normalizeDateOnly(r.date) }),
   exams: (r) => ({ ...r, date: normalizeDateOnly(r.date), total: toNum(r.total), pass: toNum(r.pass) }),
-  grades: (r) => ({ ...r, score: r.score === null || r.score === undefined ? null : toNum(r.score) }),
-  homeworks: (r) => {
-    const { assignedDate, ...rest } = r;
-    return {
-      ...rest,
-      dueDate:    normalizeDateOnly(r.dueDate),
-      createdAt:  assignedDate ? normalizeDateOnly(assignedDate) : r.createdAt,
-      totalScore: toNum(r.totalScore),
-    };
-  },
-  hwSubmissions: (r) => {
-    const { homeworkId, ...rest } = r;
-    return {
-      ...rest,
-      hwId:        homeworkId ?? r.hwId,
-      score:       r.score === null || r.score === undefined ? null : toNum(r.score),
-      submittedAt: r.submittedAt ? normalizeDateOnly(r.submittedAt) : r.submittedAt,
-    };
-  },
   communications: (r) => {
     const { legacyParentName, ...rest } = r;
     return {
@@ -124,16 +156,6 @@ const COLLECTION_FIXUPS = {
   },
   // inv_materials.price/cost/min_stock أعمدة Decimal — نفس مشكلة exams.total/pass أعلاه.
   // material.price يُستخدَم حسابياً (ضرب/مقارنة) في MaterialDistribution.jsx/
-  // Pre-installer defect audit — groups.teacher_name يصل هنا كـ "teacherName" (snakeToCamel
-  // الخام، بلا أي تطبيع سابقاً — لم يكن لِـ groups أي إدخال في COLLECTION_FIXUPS إطلاقاً).
-  // GroupForm.jsx/GroupsPage.jsx/GroupCard.jsx تقرأ جميعها "teacher" حصراً (الحقل المحلي
-  // القديم)، لا "teacherName" — وmergeById (أعلاه) يستبدل الصف المحلي بالكامل بصف الخادم
-  // الخام عند أي مزامنة، فتُفقَد "teacher" كلياً، فيظهر حقل "المدرس" فارغاً في نموذج
-  // التعديل رغم وجود اسم حقيقي، وحفظ التعديل بلا إعادة كتابته يدوياً يُرسِل teacherName:''
-  // فيمحو الاسم الحقيقي من القاعدة صامتاً. نفس مبدأ communications.legacyParentName أعلاه
-  // بالضبط: إعادة تسمية على مسار القراءة/الدمج فقط، لا تغيير على pgCreateGroup/
-  // pgUpdateGroup (api.js) ولا على أي حقل آخر.
-  groups: (r) => ({ ...r, teacher: r.teacherName ?? '' }),
   // MaterialReports.jsx، فنص هنا يعني NaN أو مقارنة نصّية خاطئة — التطبيع ضروري فعلاً.
   // addedAt عمود @db.Date جديد (added_at) — نفس مشكلة attendance.date/exams.date أعلاه
   // (يصل كطابع زمني كامل عبر المسار العام)، نفس normalizeDateOnly.
@@ -268,22 +290,29 @@ export async function loadFromPostgres(set) {
 
   // 2) اجلب كل collection؛ طبّق فقط غير الفارغة (القاعدة الحرجة) — فشل الجلب لا يُعامَل
   // كـ "فارغ" أبداً بعد الآن، حتى لو كان الأثر المحلي متطابقاً (لا لمس) في كلتا الحالتين.
+  // Pre-Installer Audit C4 (safe part): كانت هذه الحلقة تنتظر كل collection تباعاً
+  // (for...await) — 21 رحلة HTTP ذهاب-وعودة متسلسلة بدل متوازية، رغم استقلال كل طلب عن
+  // الآخر تماماً (لا اعتماد بيانات بين أي اثنين منها). Promise.allSettled يُطلقها معاً
+  // ويجمع كل نتيجة (نجاح/فشل) بلا تغيير في التصنيف/الرسائل/سلوك عدم-اللمس أعلاه إطلاقاً —
+  // فقط زمن الإقلاع الكلي يصبح أقرب لأبطأ طلب واحد بدل مجموع كل الطلبات.
   const fetched = {};
   const empty = [];
   const failed = [];
-  for (const name of PG_COLLECTIONS) {
-    try {
-      const data = await pgGetCollection(name);
+  const results = await Promise.allSettled(PG_COLLECTIONS.map((name) => pgGetCollection(name)));
+  PG_COLLECTIONS.forEach((name, i) => {
+    const result = results[i];
+    if (result.status === 'fulfilled') {
+      const data = result.value;
       if (Array.isArray(data) && data.length > 0) {
         fetched[name] = normalizeCollectionForMerge(name, data); // فقط لو فيه بيانات فعلية
       } else {
         empty.push(name);                    // نجح الطلب، فاضي فعلاً → لا نلمس localStorage
       }
-    } catch (err) {
-      console.warn(`[PG] فشل جلب ${name}:`, err.message);
+    } else {
+      console.warn(`[PG] فشل جلب ${name}:`, result.reason?.message);
       failed.push(name);                      // فشل الطلب نفسه → لا نلمس هذا الـ collection
     }
-  }
+  });
 
   // 3) طبّق فقط الـ collections غير الفارغة، وبالدمج بالـ id — لا استبدال شامل أبداً
   const appliedNames = Object.keys(fetched);

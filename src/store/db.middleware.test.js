@@ -88,37 +88,37 @@ describe('normalizeCollectionForMerge', () => {
     ]);
   });
 
-  it('coerces grades.score (Decimal-as-string) to a number, preserving null', () => {
+  // Grades + Homework global-read migration, Phase 3: the grades/homeworks/hwSubmissions fixups
+  // were removed along with their bootstrap load (their normalization cases moved to
+  // services/api.test.js, on the pgGet* read path). No fixup entry → passed through untouched.
+  it('grades/homeworks/hwSubmissions have no bootstrap fixup any more (pass through unchanged)', () => {
+    for (const name of ['grades', 'homeworks', 'hwSubmissions']) {
+      const data = [{ id: 'x', score: '1' }];
+      expect(normalizeCollectionForMerge(name, data)).toBe(data);
+    }
+  });
+
+  it('communications: trims followupDate and renames legacyParentName to parentName', () => {
     const data = [
-      { id: '1', examId: 'e1', studentId: 's1', score: '87', absent: false },
-      { id: '2', examId: 'e1', studentId: 's2', score: null, absent: true },
+      { id: 'c1', followupDate: '2026-04-01T00:00:00.000Z', legacyParentName: 'Ahmed', type: 'phoneCall' },
+      { id: 'c2', followupDate: null, legacyParentName: null, type: 'whatsapp' },
     ];
-    expect(normalizeCollectionForMerge('grades', data)).toEqual([
-      { id: '1', examId: 'e1', studentId: 's1', score: 87, absent: false },
-      { id: '2', examId: 'e1', studentId: 's2', score: null, absent: true },
+    expect(normalizeCollectionForMerge('communications', data)).toEqual([
+      { id: 'c1', followupDate: '2026-04-01', parentName: 'Ahmed', type: 'phoneCall' },
+      { id: 'c2', followupDate: null, parentName: null, type: 'whatsapp' },
     ]);
   });
 
-  it('homeworks: trims dueDate, renames assignedDate to createdAt, coerces totalScore to a number', () => {
-    const data = [{ id: 'h1', dueDate: '2026-03-15T00:00:00.000Z', assignedDate: '2026-03-01T00:00:00.000Z', totalScore: '10', title: 'x' }];
-    expect(normalizeCollectionForMerge('homeworks', data)).toEqual([
-      { id: 'h1', dueDate: '2026-03-15', createdAt: '2026-03-01', totalScore: 10, title: 'x' },
-    ]);
-  });
-
-  it('homeworks: falls back to raw createdAt when assignedDate is absent', () => {
-    const data = [{ id: 'h1', dueDate: '2026-03-15', totalScore: '10', createdAt: '2026-01-01T00:00:00.000Z' }];
-    expect(normalizeCollectionForMerge('homeworks', data)).toEqual([
-      { id: 'h1', dueDate: '2026-03-15', totalScore: 10, createdAt: '2026-01-01T00:00:00.000Z' },
-    ]);
-  });
-
-  it('hwSubmissions: renames homeworkId to hwId, coerces score, trims submittedAt', () => {
+  it('commTasks: trims dueDate and renames communicationId to commId', () => {
     const data = [
-      { id: 's1', homeworkId: 'h1', studentId: 'st1', score: '8.5', submittedAt: '2026-03-10T00:00:00.000Z', status: 'submitted' },
-      { id: 's2', homeworkId: 'h1', studentId: 'st2', score: null, submittedAt: null, status: 'missing' },
+      { id: 't1', communicationId: 'c1', dueDate: '2026-04-05T00:00:00.000Z', title: 'x' },
+      { id: 't2', communicationId: null, dueDate: null, title: 'y' },
     ];
-    expect(normalizeCollectionForMerge('hwSubmissions', data)).toEqual([
+    expect(normalizeCollectionForMerge('commTasks', data)).toEqual([
+      { id: 't1', commId: 'c1', dueDate: '2026-04-05', title: 'x' },
+      { id: 't2', commId: null, dueDate: null, title: 'y' },
+    ]);
+  });
 
   // Pre-installer defect audit — groups.teacher_name arrives from PostgreSQL as
   // "teacherName" (raw snakeToCamel), but GroupForm.jsx/GroupsPage.jsx/GroupCard.jsx
@@ -142,32 +142,6 @@ describe('normalizeCollectionForMerge', () => {
   it('groups: falls back to an empty string (never undefined/null) when teacherName is absent', () => {
     const data = [{ id: 'g2', name: 'مجموعة ب', teacherName: null }];
     expect(normalizeCollectionForMerge('groups', data)[0].teacher).toBe('');
-  });
-      { id: 's1', hwId: 'h1', studentId: 'st1', score: 8.5, submittedAt: '2026-03-10', status: 'submitted' },
-      { id: 's2', hwId: 'h1', studentId: 'st2', score: null, submittedAt: null, status: 'missing' },
-    ]);
-  });
-
-  it('communications: trims followupDate and renames legacyParentName to parentName', () => {
-    const data = [
-      { id: 'c1', followupDate: '2026-04-01T00:00:00.000Z', legacyParentName: 'Ahmed', type: 'phoneCall' },
-      { id: 'c2', followupDate: null, legacyParentName: null, type: 'whatsapp' },
-    ];
-    expect(normalizeCollectionForMerge('communications', data)).toEqual([
-      { id: 'c1', followupDate: '2026-04-01', parentName: 'Ahmed', type: 'phoneCall' },
-      { id: 'c2', followupDate: null, parentName: null, type: 'whatsapp' },
-    ]);
-  });
-
-  it('commTasks: trims dueDate and renames communicationId to commId', () => {
-    const data = [
-      { id: 't1', communicationId: 'c1', dueDate: '2026-04-05T00:00:00.000Z', title: 'x' },
-      { id: 't2', communicationId: null, dueDate: null, title: 'y' },
-    ];
-    expect(normalizeCollectionForMerge('commTasks', data)).toEqual([
-      { id: 't1', commId: 'c1', dueDate: '2026-04-05', title: 'x' },
-      { id: 't2', commId: null, dueDate: null, title: 'y' },
-    ]);
   });
 });
 
@@ -374,5 +348,49 @@ describe('loadFromPostgres — inventorySettings singleton (Phase 3B-11 regressi
     // inventorySettings: object، والقيم مُطبَّعة بشكل صحيح، بلا تداخل مع centerProfile
     expect(Array.isArray(next.inventorySettings)).toBe(false);
     expect(next.inventorySettings).toEqual({ defaultMinStock: 30, allowNegativeStock: true, reservationExpiryDays: 5 });
+  });
+});
+
+// Grades + Homework global-read migration, Phase 3 (final cutover) — the central success
+// criterion: loadFromPostgres (used by BOTH initial boot — useDB.jsx — and post-login re-sync —
+// auth.context.jsx) must never issue a global GET for grades/homeworks/hwSubmissions, while
+// still loading every other collection exactly as before.
+describe('loadFromPostgres — Grades/Homework cutover (bootstrap exclusion)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    pgCheckHealth.mockResolvedValue({ ok: true });
+    pgGetCollection.mockResolvedValue([]);
+  });
+
+  it('never requests grades, homeworks or hwSubmissions', async () => {
+    await loadFromPostgres(() => {});
+    const requested = pgGetCollection.mock.calls.map(([name]) => name);
+    expect(requested).not.toContain('grades');
+    expect(requested).not.toContain('homeworks');
+    expect(requested).not.toContain('hwSubmissions');
+  });
+
+  it('still requests exactly the remaining bootstrap collections, each once', async () => {
+    await loadFromPostgres(() => {});
+    const requested = pgGetCollection.mock.calls.map(([name]) => name);
+    expect(requested.sort()).toEqual([
+      'parents', 'students', 'groups', 'teachers', 'exams', 'centerProfile',
+      'cashboxes', 'treasuryTxn', 'attendance', 'absenceFollowup',
+      'invMaterials', 'inventoryTxn', 'inventorySettings',
+      'admissions', 'admissionFollowups', 'admissionSystemLog',
+      'waReportLog',
+    ].sort());
+  });
+
+  it('leaves any existing grades/homeworks/hwSubmissions snapshot state untouched', async () => {
+    pgGetCollection.mockImplementation((name) =>
+      Promise.resolve(name === 'students' ? [{ id: 's1' }] : []));
+    const initial = { students: [], grades: [{ id: 'g' }], homeworks: [{ id: 'h' }], hwSubmissions: [{ id: 'x' }] };
+    let next = initial;
+    await loadFromPostgres((updater) => { next = typeof updater === 'function' ? updater(initial) : updater; });
+    expect(next.students).toEqual([{ id: 's1' }]);
+    expect(next.grades).toBe(initial.grades);
+    expect(next.homeworks).toBe(initial.homeworks);
+    expect(next.hwSubmissions).toBe(initial.hwSubmissions);
   });
 });

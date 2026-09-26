@@ -8,7 +8,10 @@ import { PageHeader }  from '../../components/shared';
 import { SectionBoundary } from '../../components/ErrorBoundary';
 import { ConfirmModal } from '../../components/ui/Modal';
 import { useToast } from '../../components/Toast';
-import { pgCheckHealth, pgUpdateCenterProfile } from '../../services/api';
+import {
+  pgCheckHealth, pgUpdateCenterProfile, pgTriggerDatabaseSwitch, pgGetDatabaseIdentity,
+} from '../../services/api';
+import { checkDatabaseIdentityAndInvalidate } from '../../store/dbIdentity';
 import ReportSettingsSection from './ReportSettingsSection';
 
 // ── حالة الاتصال: نفس منطق الألوان المستخدَم في DBStatusBadge (src/hooks/useDB.jsx) ──
@@ -90,10 +93,66 @@ export default function SettingsPage() {
   const dbStatusKey = dbTesting ? 'checking' : dbInfo?.ok ? 'connected' : dbInfo ? 'disconnected' : 'checking';
   const dbStatusMeta = DB_STATUS_META[dbStatusKey];
 
-  const handleExport = useCallback(
-    () => exportFn(currentUser?.id),
-    [exportFn, currentUser],
-  );
+  // ── Phase 2C-3C Part 4 — تبديل/تراجع قاعدة البيانات (Admin فقط) ──────────────────
+  // confirmSwitchAction يحمل 'switch' | 'rollback' | null — مودال واحد مُعاد استخدامه
+  // لكلا الإجراءين (عنوان/رسالة/تسمية تختلف حسب القيمة)، بدل تكرار المودال بالكامل مرتين.
+  const [confirmSwitchAction, setConfirmSwitchAction] = useState(null);
+  const [switchBusy, setSwitchBusy] = useState(false);
+
+  const handleDatabaseSwitchAction = useCallback(async (action) => {
+    setSwitchBusy(true);
+    let switchError = null;
+    try {
+      await pgTriggerDatabaseSwitch(action); // POST /api/db-switch — { action } فقط
+    } catch (err) {
+      switchError = err;
+    }
+
+    // يُعاد فحص الهوية دائماً بعد المحاولة، سواء نجحت استجابة POST أم فشلت — العملية
+    // الحقيقية على الخادم قد توقف/تعيد تشغيل عملية StudixApp نفسها أثناء تنفيذها، فقد
+    // ينقطع الاتصال دون استجابة نظيفة حتى لو نجحت العملية فعلياً على الخادم (موثَّق في
+    // تقرير Part 2's own §"Locking design"). GET /api/db-identity هو المرجع الوحيد
+    // الموثوق لحالة قاعدة البيانات الفعلية، لا نجاح/فشل استجابة POST وحدها.
+    let identityChanged = false;
+    try {
+      const identityResult = await pgGetDatabaseIdentity();
+      if (identityResult.ok) {
+        identityChanged = checkDatabaseIdentityAndInvalidate(identityResult.identity).changed;
+      }
+    } catch { /* best-effort */ }
+
+    setSwitchBusy(false);
+    setConfirmSwitchAction(null);
+
+    if (switchError) {
+      // رسالة الخادم آمنة ومُنقَّحة مسبقاً (backend/src/routes/dbSwitch.js's own
+      // redaction) — تُعرَض كما هي، بلا أي تفاصيل خام إضافية من هذا الملف.
+      toast.error(switchError.message || 'فشلت عملية قاعدة البيانات');
+    } else {
+      toast.success(action === 'switch' ? 'اكتمل تبديل قاعدة البيانات بنجاح' : 'اكتمل التراجع بنجاح');
+    }
+
+    if (identityChanged) {
+      // نفس نمط "مسح جميع بيانات النظام" الحالي في هذا الملف بالضبط (handleClearAll
+      // أدناه) — إعادة تحميل كاملة تُشغِّل تسلسل الإقلاع الحقيقي من الصفر (DBInit ←
+      // useDB ← loadFromPostgres)، بدل اختراع مزامنة جزئية جديدة يدوياً لكل collection.
+      window.location.reload();
+    }
+  }, [toast]);
+
+  // exportBackup أصبحت async (تجلب payments طازجة من الخادم) — انتظار/خطأ محليان هنا،
+  // بنفس نمط dbTesting أعلاه في هذا الملف بالضبط.
+  const [exportBusy, setExportBusy] = useState(false);
+  const handleExport = useCallback(async () => {
+    setExportBusy(true);
+    try {
+      await exportFn(currentUser?.id);
+    } catch (err) {
+      toast.error(err.message || 'فشل تصدير النسخة الاحتياطية');
+    } finally {
+      setExportBusy(false);
+    }
+  }, [exportFn, currentUser, toast]);
 
   // ── Logo upload ───────────────────────────────────────────
   const handleLogoChange = useCallback((e) => {
@@ -331,7 +390,9 @@ export default function SettingsPage() {
               <p style={{ fontSize: 13, color: 'var(--text2)', marginBottom: 14, lineHeight: 1.7 }}>
                 تصدير جميع بيانات النظام (الطلاب، المجموعات، المدفوعات، الحضور، الامتحانات) كملف JSON.
               </p>
-              <button className="btn btn-primary" onClick={handleExport}>⬇ تصدير نسخة احتياطية</button>
+              <button className="btn btn-primary" onClick={handleExport} disabled={exportBusy}>
+                {exportBusy ? '...جارِ التصدير' : '⬇ تصدير نسخة احتياطية'}
+              </button>
 
               {/* ── مسح بيانات التجربة ──────────────────── */}
               <div style={{ padding:'16px 20px', borderTop:'1px solid var(--border)', background:'rgba(239,68,68,.04)', marginTop:16 }}>
@@ -435,7 +496,57 @@ export default function SettingsPage() {
           </SectionBoundary>
         )}
 
+        {/* ══ تبديل/تراجع قاعدة البيانات (Admin فقط) — Phase 2C-3C Part 4 ══════ */}
+        {isAdmin && (
+          <SectionBoundary label="Database Switch">
+            <div className="card">
+              <div className="card-header">
+                <div className="card-title">🔁 تبديل/استعادة قاعدة البيانات</div>
+                <div style={{ fontSize: 12, color: 'var(--text3)', marginTop: 2 }}>
+                  تبديل القاعدة النشطة إلى نسخة مُستعادة مُتحقَّق منها، أو التراجع عن تبديل سابق
+                </div>
+              </div>
+              <div className="card-body" style={{ display:'flex', flexDirection:'column', gap:14 }}>
+                <p style={{ fontSize:13, color:'var(--text2)', lineHeight:1.7 }}>
+                  إجراء حسّاس يوقف تطبيق Studix مؤقتاً أثناء التنفيذ. لا تستخدمه إلا بعد التأكد من وجود
+                  نسخة مُرشَّحة مُتحقَّق منها جاهزة للتبديل.
+                </p>
+                <div style={{ display:'flex', gap:10, flexWrap:'wrap' }}>
+                  <button className="btn btn-primary" disabled={switchBusy}
+                    onClick={() => setConfirmSwitchAction('switch')}>
+                    🔁 تبديل قاعدة البيانات
+                  </button>
+                  <button disabled={switchBusy} onClick={() => setConfirmSwitchAction('rollback')}
+                    style={{
+                      padding:'10px 20px', borderRadius:9, border:'1px solid var(--red)',
+                      background:'rgba(239,68,68,.08)', color:'var(--red)', fontSize:13, fontWeight:700,
+                      cursor: switchBusy ? 'default' : 'pointer', fontFamily:'Cairo,sans-serif',
+                      opacity: switchBusy ? 0.6 : 1,
+                    }}>
+                    ↩ التراجع عن التبديل
+                  </button>
+                </div>
+              </div>
+            </div>
+          </SectionBoundary>
+        )}
+
       </div>
+
+      {/* مودال: تبديل/تراجع قاعدة البيانات — واحد مُعاد استخدامه لكلا الإجراءين */}
+      <ConfirmModal
+        isOpen={!!confirmSwitchAction}
+        onClose={() => { if (!switchBusy) setConfirmSwitchAction(null); }}
+        onConfirm={() => handleDatabaseSwitchAction(confirmSwitchAction)}
+        loading={switchBusy}
+        title={confirmSwitchAction === 'switch' ? 'تبديل قاعدة البيانات' : 'التراجع عن التبديل'}
+        message={
+          confirmSwitchAction === 'switch'
+            ? 'سيتم إيقاف تطبيق Studix مؤقتاً وتبديل قاعدة البيانات النشطة إلى النسخة المُرشَّحة المُتحقَّق منها. هل أنت متأكد؟'
+            : 'سيتم إيقاف تطبيق Studix مؤقتاً والتراجع عن آخر عملية تبديل، واستعادة قاعدة البيانات السابقة. هل أنت متأكد؟'
+        }
+        confirmLabel={confirmSwitchAction === 'switch' ? 'نعم، بدِّل' : 'نعم، تراجع'}
+      />
 
       {/* مودال: مسح بيانات الطباعة */}
       <ConfirmModal

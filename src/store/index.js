@@ -37,7 +37,7 @@ export { useData, DataProvider } from './data.context';
 export {
   useCashboxes,
   useStudents, useGroups, usePayments, useAttendance, useAbsFollowup,
-  useExams, useGrades, useHomeworks, useHwSubmissions,
+  useExams,
   useMaterials, useMatDist, useTreasuryTxn, useTreasuryMeta,
   useActivityLogs, useStoreActions,
 } from './app.store';

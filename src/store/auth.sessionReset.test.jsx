@@ -14,6 +14,17 @@
 // mechanism, not ad-hoc per-screen guards. This test exercises the real login()/logout()
 // functions against a mocked backend (services/api.js), asserting on the real useAppStore
 // contents — not a re-implementation of the fix's logic.
+//
+// Scalability Architecture Phase 4 (payments PG_COLLECTIONS cutover) — 'payments' no longer
+// boot-syncs at all (db.middleware.js's PG_COLLECTIONS), so it can no longer stand in as the
+// "permission-gated financial collection loaded on login" example below; treasuryTxn (still
+// boot-synced, still gated by the 'treasury' permission) now carries that role alone. The
+// underlying BUG-04 property under test — session-boundary reset prevents any stale
+// financial data leak across users — is unaffected and still fully exercised via
+// treasuryTxn. payments stays in COLLECTION_DATA only for the last test below, which seeds
+// state directly (simulating an already-persisted localStorage rehydration, independent of
+// login()/boot-sync) — payments is still part of the persisted store schema (persist's
+// partialize in app.store.js), just no longer boot-synced.
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import '@testing-library/jest-dom';
@@ -95,37 +106,37 @@ describe('BUG-04 — session-boundary reset (real login()/logout() against a moc
     fireEvent.click(screen.getByText('login-admin'));
 
     await waitFor(() => expect(screen.getByTestId('current-user')).toHaveTextContent('admin-a'));
-    await waitFor(() => expect(useAppStore.getState().payments).toHaveLength(1));
-    expect(useAppStore.getState().treasuryTxn).toHaveLength(1);
+    await waitFor(() => expect(useAppStore.getState().treasuryTxn).toHaveLength(1));
   });
 
   it('logging out clears financial/business data immediately, synchronously with logout() itself', async () => {
     renderHarness();
     fireEvent.click(screen.getByText('login-admin'));
-    await waitFor(() => expect(useAppStore.getState().payments).toHaveLength(1));
+    await waitFor(() => expect(useAppStore.getState().treasuryTxn).toHaveLength(1));
 
     act(() => { fireEvent.click(screen.getByText('logout')); });
 
     // مزامَن (resetAppStore يُستدعى مباشرة داخل logout()، لا ينتظر أي شيء) — يجب أن
     // يكون فارغاً فوراً، لا بعد انتظار غير محدَّد.
-    expect(useAppStore.getState().payments).toEqual([]);
     expect(useAppStore.getState().treasuryTxn).toEqual([]);
     expect(useAppStore.getState().students).toEqual([]);
+    // payments لم تعد تُحمَّل عند الإقلاع إطلاقاً (خارج PG_COLLECTIONS) — تبقى [] دائماً
+    // هنا بصرف النظر عن logout()، لكن resetAppStore تمسحها أيضاً لأي بقايا محلية سابقة.
+    expect(useAppStore.getState().payments).toEqual([]);
   });
 
-  it('the failure scenario: Teacher B (no payments/treasury permission) logging in after Admin A never sees Admin A\'s stale financial data, but does receive their own legitimately-permitted data (students/groups)', async () => {
+  it('the failure scenario: Teacher B (no treasury permission) logging in after Admin A never sees Admin A\'s stale financial data, but does receive their own legitimately-permitted data (students/groups)', async () => {
     renderHarness();
 
-    // Admin A: يملك صلاحيات payments/treasury، يسجّل دخول، تُحمَّل بياناته.
+    // Admin A: يملك صلاحية treasury، يسجّل دخول، تُحمَّل بياناته.
     fireEvent.click(screen.getByText('login-admin'));
-    await waitFor(() => expect(useAppStore.getState().payments).toHaveLength(1));
-    expect(useAppStore.getState().treasuryTxn).toHaveLength(1);
+    await waitFor(() => expect(useAppStore.getState().treasuryTxn).toHaveLength(1));
 
     // Admin A يسجّل خروج.
     act(() => { fireEvent.click(screen.getByText('logout')); });
-    expect(useAppStore.getState().payments).toEqual([]);
+    expect(useAppStore.getState().treasuryTxn).toEqual([]);
 
-    // Teacher B: لا يملك payments/treasury، يسجّل دخول على نفس المتصفح.
+    // Teacher B: لا يملك treasury، يسجّل دخول على نفس المتصفح.
     fireEvent.click(screen.getByText('login-teacher'));
     await waitFor(() => expect(screen.getByTestId('current-user')).toHaveTextContent('teacher-b'));
 
@@ -133,11 +144,10 @@ describe('BUG-04 — session-boundary reset (real login()/logout() against a moc
     await waitFor(() => expect(useAppStore.getState().students).toHaveLength(1));
     expect(useAppStore.getState().groups).toHaveLength(1);
 
-    // ...لكن payments/treasuryTxn تبقيان فارغتين تماماً — لا بيانات Admin A المتبقية
-    // ظهرت أبداً، حتى مؤقتاً، رغم أن جلبهما فشل (403) تماماً كما يفشل في db.middleware.js
-    // الحقيقي (لا يُعاد لمسهما عند الفشل — لكن الآن يبدآن أصلاً من [] بعد المسح، لا من
-    // بيانات Admin A القديمة).
-    expect(useAppStore.getState().payments).toEqual([]);
+    // ...لكن treasuryTxn تبقى فارغة تماماً — لا بيانات Admin A المتبقية ظهرت أبداً، حتى
+    // مؤقتاً، رغم أن جلبها فشل (403) تماماً كما يفشل في db.middleware.js الحقيقي (لا
+    // يُعاد لمسها عند الفشل — لكن الآن تبدأ أصلاً من [] بعد المسح، لا من بيانات Admin A
+    // القديمة).
     expect(useAppStore.getState().treasuryTxn).toEqual([]);
   });
 
@@ -145,15 +155,14 @@ describe('BUG-04 — session-boundary reset (real login()/logout() against a moc
     renderHarness();
 
     fireEvent.click(screen.getByText('login-admin'));
-    await waitFor(() => expect(useAppStore.getState().payments).toHaveLength(1));
+    await waitFor(() => expect(useAppStore.getState().treasuryTxn).toHaveLength(1));
 
     act(() => { fireEvent.click(screen.getByText('logout')); });
     expect(screen.getByTestId('current-user')).toHaveTextContent('none');
 
     fireEvent.click(screen.getByText('login-admin'));
     await waitFor(() => expect(screen.getByTestId('current-user')).toHaveTextContent('admin-a'));
-    await waitFor(() => expect(useAppStore.getState().payments).toHaveLength(1));
-    expect(useAppStore.getState().treasuryTxn).toHaveLength(1);
+    await waitFor(() => expect(useAppStore.getState().treasuryTxn).toHaveLength(1));
   });
 
   it('an ordinary refresh for the SAME still-logged-in user does not destroy legitimate persisted state (resetAppStore is only ever called from login()/logout(), never on mount)', async () => {

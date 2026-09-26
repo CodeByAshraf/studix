@@ -16,6 +16,7 @@ import { createCenterProfileSlice } from './slices/centerProfile.slice';
 import { createAdmissionsSlice } from './slices/admissions.slice';
 import { createReportSettingsSlice } from './slices/reportSettings.slice';
 import { storage }              from '../hooks/useErrorHandler';
+import { pgGetPayments, pgGetGrades, pgGetHomeworks, pgGetHwSubmissions } from '../services/api';
 
 // ── Store ─────────────────────────────────────────────────────
 export const useAppStore = create()(
@@ -38,18 +39,32 @@ export const useAppStore = create()(
         ...createAdmissionsSlice(set, get),
         ...createReportSettingsSlice(set, get),
 
-        // ── Backup ────────────────────────────────────────────────
-        exportBackup: (currentUserId) => {
+        // ── Backup (Scalability Architecture — payments PG_COLLECTIONS cutover prep) ──
+        // payments لم يعد يُضمَّن ضمن boot-sync الكامل بالضرورة (المرحلة التالية تُزيله من
+        // PG_COLLECTIONS) — state.payments الشامل لم يعد مصدر حقيقة موثوقاً لعدد/تاريخ كل
+        // الدفعات. exportBackup (تصدير يدوي، نادر — زر واحد في الإعدادات) يجلب المجموعة
+        // الكاملة طازجة من GET /api/payments (بلا فلاتر، نفس الشكل الذي كان boot-sync
+        // يوفّره بالضبط) بدل قراءتها من الـ store — يحافظ على محتوى/شكل الملف المُصدَّر
+        // حرفياً كما كان. غير متزامنة الآن (fetch شبكة) — المُستدعي (SettingsPage.jsx)
+        // يتولّى حالة الانتظار/الخطأ.
+        // Grades + Homework global-read migration, Phase 3 (final cutover): grades/homeworks/
+        // hwSubmissions left PG_COLLECTIONS too, so the store copies are no longer a complete
+        // snapshot (empty on a fresh browser) — fetched fresh here by the exact same mechanism
+        // as payments (unfiltered scoped GETs, same normalized shape boot-sync used to produce).
+        exportBackup: async (currentUserId) => {
           const s = get();
+          const [payments, grades, homeworks, hwSubmissions] = await Promise.all([
+            pgGetPayments({}), pgGetGrades({}), pgGetHomeworks(), pgGetHwSubmissions({}),
+          ]);
           const data = {
             students:      s.students,
             groups:        s.groups,
-            payments:      s.payments,
+            payments,
             attendance:    s.attendance,
             exams:         s.exams,
-            grades:        s.grades,
-            homeworks:     s.homeworks,
-            hwSubmissions: s.hwSubmissions,
+            grades,
+            homeworks,
+            hwSubmissions,
             exportedAt:    new Date().toISOString(),
           };
           const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -68,6 +83,11 @@ export const useAppStore = create()(
         },
 
         // ── Auto-backup ───────────────────────────────────────────
+        // قرار مُنتَج صريح (لا يجب تغييره بلا مراجعة): تُستدعى مرة عند كل mount للتطبيق
+        // (DataProvider) — جلب مصفوفة payments الكاملة هنا كان سيُعيد بالضبط مشكلة "تحميل
+        // كل شيء عند كل تسجيل دخول" التي تُزيلها هذه الهجرة أصلاً. payments مُستبعَدة عمداً
+        // من هذه النسخة التلقائية الخفيفة — النسخة الكاملة والحديثة تبقى عبر "تصدير نسخة
+        // احتياطية" اليدوي أعلاه (exportBackup)، الذي يجلبها طازجة عند الطلب فقط.
         saveAutoBackup: () => {
           const s = get();
           try {
@@ -76,7 +96,6 @@ export const useAppStore = create()(
               data: {
                 students:   s.students,
                 groups:     s.groups,
-                payments:   s.payments,
                 attendance: s.attendance,
                 exams:      s.exams,
                 grades:     s.grades,
@@ -160,9 +179,15 @@ export const usePayments     = () => useAppStore((s) => s.payments);
 export const useAttendance   = () => useAppStore((s) => s.attendance);
 export const useAbsFollowup  = () => useAppStore((s) => s.absenceFollowup);
 export const useExams        = () => useAppStore((s) => s.exams);
-export const useGrades       = () => useAppStore((s) => s.grades);
-export const useHomeworks    = () => useAppStore((s) => s.homeworks);
-export const useHwSubmissions= () => useAppStore((s) => s.hwSubmissions);
+// Phase 1E (Grades global-read migration) — useGrades removed: proven to have zero callers
+// anywhere in the app (every real Grades consumer reads `useAppStore((s) => s.grades)`
+// directly or, post-migration, a scoped/aggregate fetch — never this selector). It was
+// already dead before this migration, not made dead by it; `grades` itself stays in
+// PG_COLLECTIONS and the slice's write actions (setGrades/addGrade/updateGrade/
+// saveExamGrades) are untouched — only this one unused read selector is removed.
+// Phase 2G (Homework global-read migration) — useHomeworks/useHwSubmissions removed: proven to
+// have zero callers anywhere in the repo (same situation as useGrades above). homeworks/
+// hwSubmissions stay in PG_COLLECTIONS and the slice's state + write actions are untouched.
 export const useMaterials    = () => useAppStore((s) => s.materials);
 export const useCashboxes    = () => useAppStore((s) => s.cashboxes);
 export const useTreasuryTxn  = () => useAppStore((s) => s.treasuryTxn);
