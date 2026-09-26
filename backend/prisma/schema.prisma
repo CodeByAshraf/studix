@@ -223,24 +223,24 @@ model communications {
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model exams {
-  id                 String    @id
-  name               String
-  group_id           String?
-  grade              String?
-  academic_year      String?
-  subject            String?
-  date               DateTime  @db.Date
-  total              Decimal   @db.Decimal(6, 2)
-  pass               Decimal   @default(50) @db.Decimal(6, 2)
-  created_at         DateTime  @default(now()) @db.Timestamptz(6)
-  type               String    @default("monthly")
-  teacher            String?
-  status             String    @default("upcoming")
-  scheduled_time     String?
-  duration_minutes   Int?
-  actual_started_at  DateTime? @db.Timestamptz(6)
-  groups             groups?   @relation(fields: [group_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
-  grades             grades[]
+  id                String    @id
+  name              String
+  group_id          String?
+  grade             String?
+  academic_year     String?
+  subject           String?
+  date              DateTime  @db.Date
+  total             Decimal   @db.Decimal(6, 2)
+  pass              Decimal   @default(50) @db.Decimal(6, 2)
+  created_at        DateTime  @default(now()) @db.Timestamptz(6)
+  type              String    @default("monthly")
+  teacher           String?
+  status            String    @default("upcoming")
+  scheduled_time    String?
+  duration_minutes  Int?
+  actual_started_at DateTime? @db.Timestamptz(6)
+  groups            groups?   @relation(fields: [group_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  grades            grades[]
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
@@ -276,11 +276,13 @@ model groups {
   notes                     String?
   admissions                admissions[]
   attendance                attendance[]
+  attendance_sessions       attendance_sessions[]
   communications            communications[]
   exams                     exams[]
   teachers                  teachers?                   @relation(fields: [teacher_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
   homeworks                 homeworks[]
   payments                  payments[]
+  recitations               recitations[]
   student_group_enrollments student_group_enrollments[]
   students                  students[]
 }
@@ -478,6 +480,7 @@ model students {
   hw_submissions            hw_submissions[]
   inventory_txn             inventory_txn[]
   payments                  payments[]
+  recitations               recitations[]
   student_group_enrollments student_group_enrollments[]
   groups                    groups?                     @relation(fields: [group_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
   parents                   parents?                    @relation(fields: [parent_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
@@ -544,26 +547,29 @@ model treasury_txn {
 }
 
 model users {
-  id                                            String          @id
-  name                                          String
-  role_id                                       String?
-  teacher_id                                    BigInt?
-  password_hash                                 String?
-  is_admin                                      Boolean         @default(false)
-  active                                        Boolean         @default(true)
-  permissions                                   Json?
-  email                                         String?
-  last_login                                    DateTime?       @db.Timestamptz(6)
-  created_at                                    DateTime        @default(now()) @db.Timestamptz(6)
-  auth_version                                  Int             @default(1)
-  activity_logs                                 activity_logs[]
-  admissions_admissions_created_byTousers       admissions[]    @relation("admissions_created_byTousers")
-  admissions_admissions_last_modified_byTousers admissions[]    @relation("admissions_last_modified_byTousers")
-  inventory_txn                                 inventory_txn[]
-  treasury_txn                                  treasury_txn[]
-  roles                                         roles?          @relation(fields: [role_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
-  teachers                                      teachers?       @relation(fields: [teacher_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
-  wa_report_log                                 wa_report_log[]
+  id                                                 String                @id
+  name                                               String
+  role_id                                            String?
+  teacher_id                                         BigInt?
+  password_hash                                      String?
+  is_admin                                           Boolean               @default(false)
+  active                                             Boolean               @default(true)
+  permissions                                        Json?
+  email                                              String?
+  last_login                                         DateTime?             @db.Timestamptz(6)
+  created_at                                         DateTime              @default(now()) @db.Timestamptz(6)
+  auth_version                                       Int                   @default(1)
+  activity_logs                                      activity_logs[]
+  admissions_admissions_created_byTousers            admissions[]          @relation("admissions_created_byTousers")
+  admissions_admissions_last_modified_byTousers      admissions[]          @relation("admissions_last_modified_byTousers")
+  attendance_sessions_completed_byTousers            attendance_sessions[] @relation("attendance_sessions_completed_byTousers")
+  attendance_sessions_recitation_completed_byTousers attendance_sessions[] @relation("attendance_sessions_recitation_completed_byTousers")
+  inventory_txn                                      inventory_txn[]
+  recitations                                        recitations[]
+  treasury_txn                                       treasury_txn[]
+  roles                                              roles?                @relation(fields: [role_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  teachers                                           teachers?             @relation(fields: [teacher_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  wa_report_log                                      wa_report_log[]
 }
 
 model wa_report_log {
@@ -595,4 +601,64 @@ model student_group_enrollments {
   updated_at  DateTime  @default(now()) @db.Timestamptz(6)
   groups      groups    @relation(fields: [group_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
   students    students  @relation(fields: [student_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+// Recitation Assessment, Phase 1 (data layer only) — attendance_sessions gives the
+// existing, previously-implicit (group_id, date) attendance session a real persisted
+// identity, so it can carry a lock/status. status ('draft'|'completed') is Attendance's
+// own lock; recitation_status ('not_started'|'in_progress'|'completed') is a fully
+// independent lock for Recitation on the SAME row — both lifecycles were confirmed
+// explicitly independent (completing attendance must never require recitation
+// coverage). max_score is nullable because it is chosen later, when the teacher opens
+// the separate Recitation screen for this session — not at attendance-save time.
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model attendance_sessions {
+  id                                                       String        @id
+  group_id                                                 String
+  date                                                     DateTime      @db.Date
+  session_time                                             String?
+  max_score                                                Decimal?      @db.Decimal(6, 2)
+  status                                                   String        @default("draft")
+  completed_at                                             DateTime?     @db.Timestamptz(6)
+  completed_by                                             String?
+  recitation_status                                        String        @default("not_started")
+  recitation_completed_at                                  DateTime?     @db.Timestamptz(6)
+  recitation_completed_by                                  String?
+  created_at                                               DateTime      @default(now()) @db.Timestamptz(6)
+  updated_at                                               DateTime      @default(now()) @db.Timestamptz(6)
+  recitations                                              recitations[]
+  groups                                                   groups        @relation(fields: [group_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users_attendance_sessions_completed_byTousers            users?        @relation("attendance_sessions_completed_byTousers", fields: [completed_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users_attendance_sessions_recitation_completed_byTousers users?        @relation("attendance_sessions_recitation_completed_byTousers", fields: [recitation_completed_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([group_id, date], map: "uq_attendance_sessions_group_date")
+}
+
+// recitations — one historical row per (session, student), never overwritten across
+// sessions (a new session is always a new attendance_sessions row, so re-saving one
+// session's scores can only ever touch that session's own rows). group_id/date are
+// denormalized copies of the parent session's, and max_score is a snapshot taken at
+// write time — both exist so a later change to a future session's max score can never
+// alter the meaning of an already-recorded historical row.
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model recitations {
+  id                  String              @id
+  session_id          String
+  student_id          String
+  group_id            String
+  date                DateTime            @db.Date
+  score               Decimal             @db.Decimal(6, 2)
+  max_score           Decimal             @db.Decimal(6, 2)
+  note                String?
+  created_by          String?
+  created_at          DateTime            @default(now()) @db.Timestamptz(6)
+  updated_at          DateTime            @default(now()) @db.Timestamptz(6)
+  attendance_sessions attendance_sessions @relation(fields: [session_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  groups              groups              @relation(fields: [group_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  students            students            @relation(fields: [student_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users               users?              @relation(fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([session_id, student_id], map: "uq_recitations_session_student")
+  @@index([student_id], map: "idx_recitations_student")
+  @@index([group_id, date], map: "idx_recitations_group_date")
 }

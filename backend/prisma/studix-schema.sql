@@ -2,14 +2,14 @@
 -- تم توليده تلقائياً بواسطة backend/scripts/generateSchemaArtifact.js — لا تُعدِّله يدوياً.
 -- لإعادة التوليد بعد أي تغيير حقيقي في schema.prisma أو الـ triggers/constraints:
 --   node backend/scripts/generateSchemaArtifact.js
--- تاريخ التوليد: 2026-09-19T13:54:29.479Z
+-- تاريخ التوليد: 2026-09-23T09:59:35.013Z
 -- المصدر: قاعدة scratch معزولة (db push + DDL كامل)، وليس أي قاعدة تطوير حقيقية — لا بيانات إطلاقاً.
 
 --
 -- PostgreSQL database dump
 --
 
-\restrict OCWGWwGUxDEDMOtfR4mKHN93za512LrM7lgcbucHjU4LJ785HVb0HZG1crgZ1od
+\restrict gwVdul3wmC0k21hWZwcNk6oKXchkHfNgXt9GTcw1Tt9VezZ2YodFpA79cYSDLAe
 
 -- Dumped from database version 18.6
 -- Dumped by pg_dump version 18.6
@@ -243,6 +243,29 @@ CREATE TABLE public.attendance (
     session_time text,
     created_at timestamp(6) with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     CONSTRAINT chk_attendance_status CHECK ((status = ANY (ARRAY['present'::text, 'absent'::text, 'late'::text])))
+);
+
+
+--
+-- Name: attendance_sessions; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.attendance_sessions (
+    id text NOT NULL,
+    group_id text NOT NULL,
+    date date NOT NULL,
+    session_time text,
+    max_score numeric(6,2),
+    status text DEFAULT 'draft'::text NOT NULL,
+    completed_at timestamp(6) with time zone,
+    completed_by text,
+    recitation_status text DEFAULT 'not_started'::text NOT NULL,
+    recitation_completed_at timestamp(6) with time zone,
+    recitation_completed_by text,
+    created_at timestamp(6) with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at timestamp(6) with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT chk_attendance_sessions_recitation_status CHECK ((recitation_status = ANY (ARRAY['not_started'::text, 'in_progress'::text, 'completed'::text]))),
+    CONSTRAINT chk_attendance_sessions_status CHECK ((status = ANY (ARRAY['draft'::text, 'completed'::text])))
 );
 
 
@@ -611,6 +634,28 @@ CREATE TABLE public.payments (
 
 
 --
+-- Name: recitations; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.recitations (
+    id text NOT NULL,
+    session_id text NOT NULL,
+    student_id text NOT NULL,
+    group_id text NOT NULL,
+    date date NOT NULL,
+    score numeric(6,2) NOT NULL,
+    max_score numeric(6,2) NOT NULL,
+    note text,
+    created_by text,
+    created_at timestamp(6) with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at timestamp(6) with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT chk_recitations_max_score CHECK ((max_score > (0)::numeric)),
+    CONSTRAINT chk_recitations_score CHECK ((score >= (0)::numeric)),
+    CONSTRAINT chk_recitations_score_le_max CHECK ((score <= max_score))
+);
+
+
+--
 -- Name: roles; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -861,6 +906,14 @@ ALTER TABLE ONLY public.attendance
 
 
 --
+-- Name: attendance_sessions attendance_sessions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.attendance_sessions
+    ADD CONSTRAINT attendance_sessions_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: cashboxes cashboxes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -978,6 +1031,14 @@ ALTER TABLE ONLY public.parents
 
 ALTER TABLE ONLY public.payments
     ADD CONSTRAINT payments_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: recitations recitations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.recitations
+    ADD CONSTRAINT recitations_pkey PRIMARY KEY (id);
 
 
 --
@@ -1227,6 +1288,20 @@ CREATE INDEX idx_payments_treasury ON public.payments USING btree (treasury_txn_
 
 
 --
+-- Name: idx_recitations_group_date; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_recitations_group_date ON public.recitations USING btree (group_id, date);
+
+
+--
+-- Name: idx_recitations_student; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_recitations_student ON public.recitations USING btree (student_id);
+
+
+--
 -- Name: idx_students_group; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1332,6 +1407,13 @@ CREATE UNIQUE INDEX support_access_config_installation_id_key ON public.support_
 
 
 --
+-- Name: uq_attendance_sessions_group_date; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_attendance_sessions_group_date ON public.attendance_sessions USING btree (group_id, date);
+
+
+--
 -- Name: uq_attendance_student_date_group; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1350,6 +1432,13 @@ CREATE UNIQUE INDEX uq_grade_exam_student ON public.grades USING btree (exam_id,
 --
 
 CREATE UNIQUE INDEX uq_hwsub_hw_student ON public.hw_submissions USING btree (homework_id, student_id);
+
+
+--
+-- Name: uq_recitations_session_student; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_recitations_session_student ON public.recitations USING btree (session_id, student_id);
 
 
 --
@@ -1385,6 +1474,13 @@ CREATE UNIQUE INDEX uq_users_email ON public.users USING btree (email) WHERE (em
 --
 
 CREATE TRIGGER trg_admpay_needs_treasury BEFORE INSERT ON public.admission_payments FOR EACH ROW EXECUTE FUNCTION public.enforce_admpay_treasury();
+
+
+--
+-- Name: attendance_sessions trg_attendance_sessions_updated; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_attendance_sessions_updated BEFORE UPDATE ON public.attendance_sessions FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 
 --
@@ -1469,6 +1565,13 @@ CREATE TRIGGER trg_parents_updated BEFORE UPDATE ON public.parents FOR EACH ROW 
 --
 
 CREATE TRIGGER trg_payment_needs_treasury BEFORE INSERT ON public.payments FOR EACH ROW EXECUTE FUNCTION public.enforce_payment_treasury();
+
+
+--
+-- Name: recitations trg_recitations_updated; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_recitations_updated BEFORE UPDATE ON public.recitations FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 
 --
@@ -1586,6 +1689,30 @@ ALTER TABLE ONLY public.admissions
 
 ALTER TABLE ONLY public.attendance
     ADD CONSTRAINT attendance_group_id_fkey FOREIGN KEY (group_id) REFERENCES public.groups(id);
+
+
+--
+-- Name: attendance_sessions attendance_sessions_completed_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.attendance_sessions
+    ADD CONSTRAINT attendance_sessions_completed_by_fkey FOREIGN KEY (completed_by) REFERENCES public.users(id);
+
+
+--
+-- Name: attendance_sessions attendance_sessions_group_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.attendance_sessions
+    ADD CONSTRAINT attendance_sessions_group_id_fkey FOREIGN KEY (group_id) REFERENCES public.groups(id);
+
+
+--
+-- Name: attendance_sessions attendance_sessions_recitation_completed_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.attendance_sessions
+    ADD CONSTRAINT attendance_sessions_recitation_completed_by_fkey FOREIGN KEY (recitation_completed_by) REFERENCES public.users(id);
 
 
 --
@@ -1797,6 +1924,38 @@ ALTER TABLE ONLY public.payments
 
 
 --
+-- Name: recitations recitations_created_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.recitations
+    ADD CONSTRAINT recitations_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.users(id);
+
+
+--
+-- Name: recitations recitations_group_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.recitations
+    ADD CONSTRAINT recitations_group_id_fkey FOREIGN KEY (group_id) REFERENCES public.groups(id);
+
+
+--
+-- Name: recitations recitations_session_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.recitations
+    ADD CONSTRAINT recitations_session_id_fkey FOREIGN KEY (session_id) REFERENCES public.attendance_sessions(id);
+
+
+--
+-- Name: recitations recitations_student_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.recitations
+    ADD CONSTRAINT recitations_student_id_fkey FOREIGN KEY (student_id) REFERENCES public.students(id);
+
+
+--
 -- Name: student_group_enrollments student_group_enrollments_group_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1880,5 +2039,5 @@ ALTER TABLE ONLY public.wa_report_log
 -- PostgreSQL database dump complete
 --
 
-\unrestrict OCWGWwGUxDEDMOtfR4mKHN93za512LrM7lgcbucHjU4LJ785HVb0HZG1crgZ1od
+\unrestrict gwVdul3wmC0k21hWZwcNk6oKXchkHfNgXt9GTcw1Tt9VezZ2YodFpA79cYSDLAe
 
