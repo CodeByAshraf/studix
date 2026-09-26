@@ -65,6 +65,7 @@ import supportAccessRouter from './routes/supportAccess.js';
 import licenseRouter from './routes/license.js';
 import dbSwitchRouter from './routes/dbSwitch.js';
 import dbIdentityRouter from './routes/dbIdentity.js';
+import backupStatusRouter from './routes/backupStatus.js';
 import { COLLECTION_MODELS } from './routes/collections.js';
 import { notFound, errorHandler } from './middleware/errorHandler.js';
 import { requireAuth, requireRole } from './middleware/auth.js';
@@ -392,6 +393,11 @@ app.use('/api/db-switch', requireAuth, requireRole('admin'), dbSwitchRouter);
 // خارج نطاق هذه المرحلة). لا اتصال PostgreSQL من هذا المسار إطلاقاً — قراءة ملف فقط (انظر
 // dbIdentity.js). لا واجهة أمامية بعد تستخدم هذا المسار.
 app.use('/api/db-identity', requireAuth, requireRole('admin'), dbIdentityRouter);
+
+// ── P1-1: Routine database backup — read-only status (admin only, same guard as db-switch) ──
+// يقرأ ملف حالة النسخ الاحتياطي الدوري وقائمة ملفات النسخ فقط — لا يأخذ نسخة ولا يحذف شيئاً
+// ولا يتصل بـ PostgreSQL ولا يقرأ admin.env (انظر routes/backupStatus.js).
+app.use('/api/backup-status', requireAuth, requireRole('admin'), backupStatusRouter);
 
 // ── Grades + Homework Submissions Backend Read Foundation (spec 003) — scoped
 // GET /api/grades?studentId=&examId= + GET /api/hwSubmissions?studentId=&homeworkId= +

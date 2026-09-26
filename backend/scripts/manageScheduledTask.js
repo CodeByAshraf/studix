@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // backend/scripts/manageScheduledTask.js
 // ─────────────────────────────────────────────────────────────
-// Phase 4 — thin CLI over lib/scheduledTask.js's removeStartupTask(), mirroring
+// Phase 4 — thin CLI over lib/scheduledTask.js's removeStartupTask() (P1-1: applied to every
+// Studix task — boot orchestrator and daily backup, see STUDIX_TASK_NAMES), mirroring
 // manageWindowsServices.js's own shape exactly (decision #1, reused from INSTALL-06: keep Pascal
 // Script minimal, one Exec() call to bundled node.exe against a small Node-side CLI — never
 // reimplement schtasks logic in Pascal Script). All real logic (existence check, idempotency,
@@ -20,7 +21,13 @@
 // manageWindowsServices.js.
 // ─────────────────────────────────────────────────────────────
 import { pathToFileURL } from 'url';
-import { removeStartupTask, STUDIX_STARTUP_TASK_NAME, ScheduledTaskError } from '../src/lib/scheduledTask.js';
+import {
+  removeStartupTask, STUDIX_STARTUP_TASK_NAME, STUDIX_BACKUP_TASK_NAME, ScheduledTaskError,
+} from '../src/lib/scheduledTask.js';
+
+// P1-1 — every Studix scheduled task: the boot orchestrator (Phase 3) and the routine daily
+// database backup. Each is removed independently — one failing never skips the other.
+export const STUDIX_TASK_NAMES = Object.freeze([STUDIX_STARTUP_TASK_NAME, STUDIX_BACKUP_TASK_NAME]);
 
 function usageAndExit() {
   console.error('الاستخدام: node scripts/manageScheduledTask.js remove');
@@ -36,18 +43,20 @@ export async function run(action) {
     return;
   }
 
-  console.log(`\n=== Studix — إدارة المهمة المجدولة (${STUDIX_STARTUP_TASK_NAME}) — remove ===\n`);
+  for (const taskName of STUDIX_TASK_NAMES) {
+    console.log(`\n=== Studix — إدارة المهمة المجدولة (${taskName}) — remove ===\n`);
 
-  try {
-    const result = removeStartupTask();
-    console.log(JSON.stringify(result, null, 2));
-  } catch (err) {
-    if (err instanceof ScheduledTaskError) {
-      console.error(`❌ [${err.reason}] ${err.message}`);
-    } else {
-      console.error('❌ فشل غير متوقَّع:', err.message);
+    try {
+      const result = removeStartupTask({ taskName });
+      console.log(JSON.stringify(result, null, 2));
+    } catch (err) {
+      if (err instanceof ScheduledTaskError) {
+        console.error(`❌ [${err.reason}] ${err.message}`);
+      } else {
+        console.error('❌ فشل غير متوقَّع:', err.message);
+      }
+      process.exitCode = 1;
     }
-    process.exitCode = 1;
   }
 }
 

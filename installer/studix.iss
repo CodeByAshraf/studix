@@ -52,7 +52,8 @@
 ; No change to THIS file: registration/idempotent correction is fully self-contained inside
 ; backend/src/installer/firstInstall.js's own runFirstInstall() sequencing, invoked wholesale by
 ; this script's existing single RunFirstInstall() Exec() call below — no new Exec() call, no new
-; Pascal Script logic needed for registration.
+; Pascal Script logic needed for registration. P1-1's daily backup task (StudixDailyBackup) is
+; registered the same way (firstInstall.js step 12b) — no change to this file for registration.
 ;
 ; New-installer Phase 4 — best-effort Scheduled Task cleanup on uninstall (see
 ; BestEffortRemoveScheduledTask/CurUninstallStepChanged below). Removes Phase 3's task via a new
@@ -419,7 +420,8 @@ begin
 end;
 
 // ── New-installer Phase 4 — best-effort Scheduled Task cleanup ──────────────────────────────
-// Removes Phase 3's boot-time task (StudixStartupOrchestrator) during uninstall. Best-effort/
+// Removes Phase 3's boot-time task (StudixStartupOrchestrator) and P1-1's StudixDailyBackup task
+// (manageScheduledTask.js removes both, each independently) during uninstall. Best-effort/
 // non-fatal, exactly like BestEffortUnregisterServiceForUninstall above — a failure here never
 // blocks uninstall and never changes whether application data is deleted; it is intentionally
 // independent of D1-D5's fail-closed service-teardown/data-wipe gate (TeardownServiceForWipe),
@@ -439,10 +441,10 @@ begin
 
   if not Exec(NodeExe, '"' + ManageScript + '" remove', ExpandConstant('{app}'),
               SW_HIDE, ewWaitUntilTerminated, ResultCode) then
-    Log('Phase 4: could not even launch manageScheduledTask.js to remove StudixStartupOrchestrator ' +
+    Log('Phase 4: could not even launch manageScheduledTask.js to remove StudixStartupOrchestrator/StudixDailyBackup ' +
         '— continuing anyway (best-effort, non-fatal).')
   else
-    Log('Phase 4: remove of StudixStartupOrchestrator exited with code ' + IntToStr(ResultCode) +
+    Log('Phase 4: remove of StudixStartupOrchestrator/StudixDailyBackup exited with code ' + IntToStr(ResultCode) +
         ' (0/already-absent are both fine).');
 end;
 

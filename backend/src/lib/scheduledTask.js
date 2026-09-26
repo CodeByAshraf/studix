@@ -259,16 +259,23 @@ export function ensureStartupTask({
   scriptPath = resolveStartupOrchestratorPath(installRoot),
 } = {}, io = {}) {
   const desired = buildDesiredTaskConfig({ nodeExe, scriptPath, installRoot });
+  return ensureTaskDefinition({
+    taskName, xml: buildTaskXml(desired),
+    matchesFn: (existingXml) => taskConfigMatches(desired, parseTaskXml(existingXml)),
+  }, io);
+}
 
+// ensureTaskDefinition: the shared query -> compare -> (no-op | write UTF-16 XML + schtasks
+// /Create /F) path for every Studix scheduled task — one registration mechanism, not one per task.
+function ensureTaskDefinition({ taskName, xml, matchesFn }, io) {
   const existingXml = queryStartupTaskXml(taskName, io);
   const existed = existingXml !== null;
-  if (existed && taskConfigMatches(desired, parseTaskXml(existingXml))) {
+  if (existed && matchesFn(existingXml)) {
     return { status: 'already_registered', taskName };
   }
 
   const { writeFileSync: write, unlinkSync: unlink } = { ...REAL_IO, ...io };
   const xmlPath = (io.tmpFilePathFn || defaultTmpXmlPath)(taskName);
-  const xml = buildTaskXml(desired);
 
   try {
     // UTF-16LE with a leading BOM — confirmed against a real Windows machine as the encoding
@@ -279,7 +286,7 @@ export function ensureStartupTask({
   } catch (err) {
     throw new ScheduledTaskError(
       'write_definition_failed',
-      `تعذّر كتابة ملف تعريف مهمة الإقلاع المجدولة "${taskName}": ${err.message}`
+      `تعذّر كتابة ملف تعريف المهمة المجدولة "${taskName}": ${err.message}`
     );
   }
 
@@ -288,13 +295,151 @@ export function ensureStartupTask({
   } catch (err) {
     throw new ScheduledTaskError(
       'register_failed',
-      `فشل تسجيل/تصحيح مهمة الإقلاع المجدولة "${taskName}": ${err.message}`
+      `فشل تسجيل/تصحيح المهمة المجدولة "${taskName}": ${err.message}`
     );
   } finally {
     try { unlink(xmlPath); } catch { /* best-effort cleanup of the throwaway temp file */ }
   }
 
   return { status: existed ? 'corrected' : 'created', taskName };
+}
+
+// ── P1-1 — the routine daily database backup task ──────────────────────────────────────────
+// Same mechanism as the boot task above (XML definition, SYSTEM, verify-then-correct, removed
+// at uninstall by removeStartupTask({ taskName })), with a daily CalendarTrigger instead of a
+// BootTrigger. It runs backend/src/db/routineBackup.js, which reads the admin credential
+// (admin.env, SYSTEM-only ACL — the OD3 rule: only short-lived elevated processes read it),
+// waits for PostgreSQL, dumps, verifies, and applies retention. Independent of the UI and of
+// StudixApp: it only needs StudixPostgreSQL.
+//
+// StartWhenAvailable=true: a desktop PC is often switched off at the scheduled time; Task
+// Scheduler then runs the missed occurrence as soon as possible after the next boot (routine
+// Backup.js waits for PostgreSQL readiness itself). IgnoreNew: never two runs in parallel (the
+// script also holds its own lock for manual runs).
+export const STUDIX_BACKUP_TASK_NAME = 'StudixDailyBackup';
+export const STUDIX_BACKUP_TASK_TIME = '03:00:00';
+
+export function resolveRoutineBackupScriptPath(installRoot = resolveInstallRoot()) {
+  return path.join(installRoot, 'backend', 'src', 'db', 'routineBackup.js');
+}
+
+export function buildDesiredBackupTaskConfig({ nodeExe, scriptPath, installRoot }) {
+  return {
+    dailyTriggerEnabled: true,
+    dailyStartTime: STUDIX_BACKUP_TASK_TIME,
+    daysInterval: 1,
+    startWhenAvailable: true,
+    userId: 'S-1-5-18',
+    runLevel: 'HighestAvailable',
+    multipleInstancesPolicy: 'IgnoreNew',
+    executionTimeLimit: 'PT2H',
+    enabled: true,
+    runOnlyIfNetworkAvailable: false,
+    restartOnFailure: false,
+    command: nodeExe,
+    arguments: quoteArg(scriptPath),
+    workingDirectory: installRoot,
+  };
+}
+
+// Same UTF-16 declaration / no-<LogonType> shape as buildTaskXml (see its comment for why).
+export function buildBackupTaskXml({ command, arguments: args, workingDirectory }) {
+  return `<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Studix routine database backup: daily verified pg_dump of the Studix database into %ProgramData%\\Studix\\backups with retention.</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <CalendarTrigger>
+      <StartBoundary>2020-01-01T${STUDIX_BACKUP_TASK_TIME}</StartBoundary>
+      <Enabled>true</Enabled>
+      <ScheduleByDay>
+        <DaysInterval>1</DaysInterval>
+      </ScheduleByDay>
+    </CalendarTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>S-1-5-18</UserId>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <ExecutionTimeLimit>PT2H</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>${xmlEscape(command)}</Command>
+      <Arguments>${xmlEscape(args)}</Arguments>
+      <WorkingDirectory>${xmlEscape(workingDirectory)}</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+`;
+}
+
+export function parseBackupTaskXml(xmlText) {
+  const common = parseTaskXml(xmlText);
+  const triggersBlock = extractBlock(xmlText, 'Triggers') || '';
+  const calendarBlock = extractBlock(triggersBlock, 'CalendarTrigger');
+  const byDayBlock = calendarBlock ? extractBlock(calendarBlock, 'ScheduleByDay') : null;
+  const startBoundary = calendarBlock ? extractLeaf(calendarBlock, 'StartBoundary') : null;
+  const timeMatch = startBoundary ? startBoundary.match(/T(\d{2}:\d{2}:\d{2})/) : null;
+  const settingsBlock = extractBlock(xmlText, 'Settings') || '';
+  const swaRaw = extractLeaf(settingsBlock, 'StartWhenAvailable');
+  // A CalendarTrigger's own <Enabled> precedes <ScheduleByDay>, so extractLeaf's first match is it.
+  const calendarEnabledRaw = calendarBlock ? extractLeaf(calendarBlock, 'Enabled') : null;
+  return {
+    dailyTriggerEnabled: calendarBlock !== null && byDayBlock !== null
+      && (calendarEnabledRaw ?? 'true').toLowerCase() === 'true',
+    dailyStartTime: timeMatch ? timeMatch[1] : null,
+    daysInterval: byDayBlock ? Number(extractLeaf(byDayBlock, 'DaysInterval') ?? '1') : null,
+    startWhenAvailable: swaRaw !== null && swaRaw.toLowerCase() === 'true',
+    userId: common.userId,
+    runLevel: common.runLevel,
+    multipleInstancesPolicy: common.multipleInstancesPolicy,
+    executionTimeLimit: common.executionTimeLimit,
+    enabled: common.enabled,
+    runOnlyIfNetworkAvailable: common.runOnlyIfNetworkAvailable,
+    restartOnFailure: common.restartOnFailure,
+    command: common.command,
+    arguments: common.arguments,
+    workingDirectory: common.workingDirectory,
+  };
+}
+
+export function backupTaskConfigMatches(desired, actual) {
+  if (!actual) return false;
+  const { bootTriggerEnabled: _d, ...d } = normalizeForCompare(desired);
+  const { bootTriggerEnabled: _a, ...a } = normalizeForCompare(actual);
+  const commonMatch = Object.keys(d).every((key) => d[key] === a[key]);
+  return commonMatch
+    && !!actual.dailyTriggerEnabled === !!desired.dailyTriggerEnabled
+    && actual.dailyStartTime === desired.dailyStartTime
+    && actual.daysInterval === desired.daysInterval
+    && !!actual.startWhenAvailable === !!desired.startWhenAvailable;
+}
+
+export function ensureBackupTask({
+  installRoot = resolveInstallRoot(),
+  taskName = STUDIX_BACKUP_TASK_NAME,
+  nodeExe = resolveNodeExePath(installRoot),
+  scriptPath = resolveRoutineBackupScriptPath(installRoot),
+} = {}, io = {}) {
+  const desired = buildDesiredBackupTaskConfig({ nodeExe, scriptPath, installRoot });
+  return ensureTaskDefinition({
+    taskName, xml: buildBackupTaskXml(desired),
+    matchesFn: (existingXml) => backupTaskConfigMatches(desired, parseBackupTaskXml(existingXml)),
+  }, io);
 }
 
 // ── remove (Phase 4 — uninstall cleanup) ────────────────────────────────────────────────────
@@ -319,7 +464,7 @@ export function removeStartupTask({ taskName = STUDIX_STARTUP_TASK_NAME } = {}, 
   } catch (err) {
     throw new ScheduledTaskError(
       'remove_failed',
-      `فشل حذف مهمة الإقلاع المجدولة "${taskName}": ${err.message}`
+      `فشل حذف المهمة المجدولة "${taskName}": ${err.message}`
     );
   }
 

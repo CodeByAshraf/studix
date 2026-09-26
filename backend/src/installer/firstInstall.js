@@ -70,7 +70,7 @@ import {
   resolveInstallRoot, isPostgresServiceRegisteredFor,
   STUDIX_POSTGRES_SERVICE_NAME, STUDIX_APP_SERVICE_NAME,
 } from '../lib/windowsService.js';
-import { ensureStartupTask } from '../lib/scheduledTask.js';
+import { ensureStartupTask, ensureBackupTask } from '../lib/scheduledTask.js';
 import { readRestoreState, RestoreStateError } from '../db/restoreState.js';
 import { provisionLicensingPublicKey } from '../lib/licensingTrustAnchor.js';
 
@@ -151,6 +151,7 @@ export async function runFirstInstall({
     registerAppServiceFn = registerAppService,
     startServiceFn = startService,
     registerScheduledTaskFn = ensureStartupTask,
+    registerBackupTaskFn = ensureBackupTask,
     readRestoreStateFn = readRestoreState,
     isPostgresServiceOwnedFn = (pgDataDir) => isPostgresServiceRegisteredFor(pgDataDir),
     resolveInstallRootFn = resolveInstallRoot,
@@ -379,6 +380,17 @@ export async function runFirstInstall({
     registerScheduledTaskFn();
   } catch (err) {
     throw new FirstInstallError('register_scheduled_task', err);
+  }
+
+  // 12b. P1-1 — register/correct the routine daily database backup task (StudixDailyBackup):
+  // the same verify-then-correct mechanism as step 12, running backend/src/db/routineBackup.js as
+  // SYSTEM once a day (and at the next boot if the PC was off at the scheduled time). Only the
+  // task DEFINITION is maintained here — no backup is taken by this step. Fail-closed like step
+  // 12: an installation without its routine backup schedule is not a complete installation.
+  try {
+    registerBackupTaskFn();
+  } catch (err) {
+    throw new FirstInstallError('register_backup_task', err);
   }
 
   // 13. Wait for /health.

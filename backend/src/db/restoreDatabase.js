@@ -32,7 +32,7 @@ import {
   readProvisioningAdminUrl, resolveProvisioningAdminConfigPath,
 } from '../lib/provisioningAdminConfig.js';
 import { createDatabaseIfMissing, classifySchemaState } from './bootstrapDatabase.js';
-import { restoreBackup } from './backup.js';
+import { restoreBackup, listRoutineBackups } from './backup.js';
 import { checkMigrationsUpToDate } from './migrationRunner.js';
 import { transitionRestoreState, advanceToIdleIfTerminal, RestoreStateError } from './restoreState.js';
 
@@ -337,8 +337,10 @@ export async function runRestoreOrchestrator({
 
 // ── CLI entry point — mirrors backend/scripts/manageWindowsServices.js's own guard exactly ──
 // Never accepts an admin connection string as an argument: any token shaped like a postgres(ql)
-// :// URL is rejected outright before anything else is parsed. Only --backup-path and
-// --restore-id are recognized.
+// :// URL is rejected outright before anything else is parsed. Only --backup-path,
+// --restore-id and (P1-1) --latest are recognized. --latest selects the newest routine backup
+// (backup.js's listRoutineBackups — strict file-name match in the backups directory only); it
+// is never combined with --backup-path.
 export function parseCliArgs(argv) {
   // Every token — flag name AND value alike — is checked first, in one pass, before any flag
   // parsing happens. A connection-string-shaped VALUE (e.g. passed as `--backup-path`'s own
@@ -357,9 +359,22 @@ export function parseCliArgs(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i];
     if (token === '--backup-path') { args.backupPath = argv[i + 1]; i += 1; continue; }
-    if (token === '--restore-id') { args.restoreId = argv[i + 1]; i += 1; }
+    if (token === '--restore-id') { args.restoreId = argv[i + 1]; i += 1; continue; }
+    if (token === '--latest') args.latest = true;
+  }
+  if (args.latest && args.backupPath) {
+    throw new RestoreOrchestratorError('conflicting_backup_selection', 'استخدم إمّا --backup-path أو --latest، لا الاثنين معاً.');
   }
   return args;
+}
+
+// resolveLatestRoutineBackupPath: the newest routine backup, or a clear error if there is none.
+export function resolveLatestRoutineBackupPath({ listRoutineBackupsFn = listRoutineBackups } = {}) {
+  const [newest] = listRoutineBackupsFn();
+  if (!newest) {
+    throw new RestoreOrchestratorError('no_routine_backup', 'لا توجد أي نسخة احتياطية دورية في مجلد النسخ الاحتياطية.');
+  }
+  return newest.path;
 }
 
 async function main() {
@@ -371,8 +386,18 @@ async function main() {
     process.exitCode = 1;
     return;
   }
+  if (args.latest) {
+    try {
+      args.backupPath = resolveLatestRoutineBackupPath();
+      console.log(`استخدام أحدث نسخة احتياطية دورية: ${args.backupPath}`);
+    } catch (err) {
+      console.error(`❌ [${err.reason || 'unknown'}] ${err.message}`);
+      process.exitCode = 1;
+      return;
+    }
+  }
   if (!args.backupPath) {
-    console.error('الاستخدام: node restoreDatabase.js --backup-path <مسار ملف .dump> [--restore-id <معرّف>]');
+    console.error('الاستخدام: node restoreDatabase.js (--backup-path <مسار ملف .dump> | --latest) [--restore-id <معرّف>]');
     process.exitCode = 1;
     return;
   }

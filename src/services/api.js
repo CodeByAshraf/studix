@@ -2078,6 +2078,18 @@ export async function pgProbeActivation() {
 // استثناء يُوقِف تسلسل الإقلاع.
 // ═══════════════════════════════════════════════════════════════════════════
 
+// P1-1 — pgGetBackupStatus: GET /api/backup-status (admin only, read-only) — the routine
+// database backup's schedule, last run/last success, and the list of verified backup files.
+export async function pgGetBackupStatus() {
+  const res = await fetch(`${PG_API_BASE}/api/backup-status`, {
+    credentials: 'include',
+    signal: AbortSignal.timeout(10000),
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok || !json?.ok) throw new Error(json?.error || `PG GET /backup-status → ${res.status}`);
+  return json;
+}
+
 export async function pgGetDatabaseIdentity() {
   try {
     const res = await fetch(`${PG_API_BASE}/api/db-identity`, {

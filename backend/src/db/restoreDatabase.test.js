@@ -9,7 +9,7 @@ import os from 'os';
 import path from 'path';
 import {
   assertValidBackupPath, generateCandidateDatabaseName, assertSafeCandidateDatabaseName,
-  readAdminCredential, redactErrorMessage, runRestoreOrchestrator, parseCliArgs,
+  readAdminCredential, redactErrorMessage, runRestoreOrchestrator, parseCliArgs, resolveLatestRoutineBackupPath,
   RestoreOrchestratorError, PRODUCTION_DATABASE_NAME,
 } from './restoreDatabase.js';
 import { readRestoreState, RestoreStateError } from './restoreState.js';
@@ -212,6 +212,27 @@ describe('parseCliArgs — malformed invocation', () => {
 
   it('rejects a connection string even when passed as the value of --backup-path (defense in depth)', () => {
     expect(() => parseCliArgs(['--backup-path', 'postgres://x:y@h/db'])).toThrow(RestoreOrchestratorError);
+  });
+
+  it('P1-1: --latest selects the newest routine backup; it cannot be combined with --backup-path', () => {
+    expect(parseCliArgs(['--latest'])).toEqual({ backupPath: null, restoreId: null, latest: true });
+    expect(() => parseCliArgs(['--latest', '--backup-path', 'C:\\x.dump'])).toThrow(RestoreOrchestratorError);
+  });
+});
+
+describe('P1-1 — resolveLatestRoutineBackupPath', () => {
+  it('returns the newest routine backup path', () => {
+    const listRoutineBackupsFn = () => [{ path: 'C:\\b\\newest.dump' }, { path: 'C:\\b\\older.dump' }];
+    expect(resolveLatestRoutineBackupPath({ listRoutineBackupsFn })).toBe('C:\\b\\newest.dump');
+  });
+
+  it('no routine backup -> a clear RestoreOrchestratorError(no_routine_backup)', () => {
+    expect(() => resolveLatestRoutineBackupPath({ listRoutineBackupsFn: () => [] })).toThrow(RestoreOrchestratorError);
+    try {
+      resolveLatestRoutineBackupPath({ listRoutineBackupsFn: () => [] });
+    } catch (err) {
+      expect(err.reason).toBe('no_routine_backup');
+    }
   });
 });
 

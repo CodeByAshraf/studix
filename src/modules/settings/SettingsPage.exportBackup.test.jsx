@@ -1,7 +1,8 @@
 // src/modules/settings/SettingsPage.exportBackup.test.jsx
 // Scalability Architecture Phase 4 — exportBackup() became async (fetches payments fresh
-// from the server instead of reading the store). This proves the real "⬇ تصدير نسخة
-// احتياطية" button in Settings still works end-to-end with the new async implementation:
+// from the server instead of reading the store). This proves the real "⬇ تصدير البيانات
+// (JSON)" button in Settings (P1-1: relabeled — it is a partial data export, not a
+// restorable backup) still works end-to-end with the new async implementation:
 // it awaits the export, disables itself while in flight, and surfaces a toast instead of
 // crashing if the fetch fails — none of which existed as a concern with the old synchronous
 // version.
@@ -65,6 +66,9 @@ beforeEach(() => {
     if (String(url).includes('/health')) {
       return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true, database: { connected: true, tableCount: 27, error: null } }) });
     }
+    if (String(url).includes('/api/backup-status')) {
+      return Promise.resolve({ ok: false, status: 403, json: async () => ({ ok: false, error: 'forbidden' }) });
+    }
     if (String(url).includes('/api/activityLogs')) {
       return Promise.resolve({ ok: true, status: 201, json: async () => ({ ok: true, data: { id: 'log1' } }) });
     }
@@ -78,17 +82,36 @@ afterEach(() => {
   delete URL.revokeObjectURL;
 });
 
+describe('SettingsPage — JSON data export is not presented as a backup (P1-1)', () => {
+  it('the button is labeled as a data export and the card says it is not a complete, restorable backup', () => {
+    renderPage();
+    expect(screen.getByText('⬇ تصدير البيانات (JSON)')).toBeInTheDocument();
+    expect(screen.queryByText('⬇ تصدير نسخة احتياطية')).not.toBeInTheDocument();
+    expect(screen.getByText('هذا ليس نسخة احتياطية كاملة ولا يمكن استعادة النظام منه')).toBeInTheDocument();
+  });
+
+  it('the downloaded file is named as a data export, not a backup', async () => {
+    pgGetPayments.mockResolvedValue([]);
+    let downloadName = null;
+    HTMLAnchorElement.prototype.click.mockImplementation(function click() { downloadName = this.download; });
+    renderPage();
+    fireEvent.click(screen.getByText('⬇ تصدير البيانات (JSON)'));
+    await waitFor(() => expect(downloadName).not.toBeNull());
+    expect(downloadName).toMatch(/^studix-data-export-\d+\.json$/);
+  });
+});
+
 describe('SettingsPage — Export Backup (async, fetches payments fresh)', () => {
   it('a successful export downloads a file containing the fresh API payments and re-enables the button', async () => {
     const payments = [{ id: 'p1', studentId: 's1', amount: 300, status: 'paid' }];
     pgGetPayments.mockResolvedValue(payments);
 
     renderPage();
-    const btn = screen.getByText('⬇ تصدير نسخة احتياطية');
+    const btn = screen.getByText('⬇ تصدير البيانات (JSON)');
     fireEvent.click(btn);
 
     await waitFor(() => expect(pgGetPayments).toHaveBeenCalledWith({}));
-    await waitFor(() => expect(screen.getByText('⬇ تصدير نسخة احتياطية')).not.toBeDisabled());
+    await waitFor(() => expect(screen.getByText('⬇ تصدير البيانات (JSON)')).not.toBeDisabled());
 
     expect(blobParts).toHaveLength(1);
     const exported = JSON.parse(blobParts[0]);
@@ -100,23 +123,23 @@ describe('SettingsPage — Export Backup (async, fetches payments fresh)', () =>
     pgGetPayments.mockReturnValue(new Promise((resolve) => { resolveFetch = resolve; }));
 
     renderPage();
-    fireEvent.click(screen.getByText('⬇ تصدير نسخة احتياطية'));
+    fireEvent.click(screen.getByText('⬇ تصدير البيانات (JSON)'));
 
     expect(await screen.findByText('...جارِ التصدير')).toBeInTheDocument();
     expect(screen.getByText('...جارِ التصدير')).toBeDisabled();
 
     resolveFetch([]);
-    await waitFor(() => expect(screen.getByText('⬇ تصدير نسخة احتياطية')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('⬇ تصدير البيانات (JSON)')).toBeInTheDocument());
   });
 
   it('export failure shows an error toast, downloads nothing, and leaves the button usable again', async () => {
     pgGetPayments.mockRejectedValue(new Error('تعذّر الاتصال بالخادم'));
 
     renderPage();
-    fireEvent.click(screen.getByText('⬇ تصدير نسخة احتياطية'));
+    fireEvent.click(screen.getByText('⬇ تصدير البيانات (JSON)'));
 
     expect(await screen.findByText('تعذّر الاتصال بالخادم')).toBeInTheDocument(); // toast
     expect(blobParts).toHaveLength(0);
-    await waitFor(() => expect(screen.getByText('⬇ تصدير نسخة احتياطية')).not.toBeDisabled());
+    await waitFor(() => expect(screen.getByText('⬇ تصدير البيانات (JSON)')).not.toBeDisabled());
   });
 });

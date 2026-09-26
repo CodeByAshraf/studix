@@ -71,14 +71,14 @@ export const useAppStore = create()(
           const url  = URL.createObjectURL(blob);
           const a    = Object.assign(document.createElement('a'), {
             href: url,
-            download: `studix-backup-${Date.now()}.json`,
+            download: `studix-data-export-${Date.now()}.json`,
           });
           a.click();
           URL.revokeObjectURL(url);
           // لا toast متاح من داخل action الـ store نفسه (خارج React tree) — فشل
           // تسجيل الحدث هنا best-effort صامت فقط (console.error)، لا يُبتلَع محلياً
           // (لا localStorage fallback إطلاقاً — Phase 3B-15 الصريح).
-          s.addLog({ action: 'export', module: 'settings', description: 'تصدير نسخة احتياطية' })
+          s.addLog({ action: 'export', module: 'settings', description: 'تصدير البيانات (JSON)' })
             .catch((e) => console.error('[activityLog] فشل تسجيل حدث التصدير:', e.message));
         },
 
@@ -86,8 +86,9 @@ export const useAppStore = create()(
         // قرار مُنتَج صريح (لا يجب تغييره بلا مراجعة): تُستدعى مرة عند كل mount للتطبيق
         // (DataProvider) — جلب مصفوفة payments الكاملة هنا كان سيُعيد بالضبط مشكلة "تحميل
         // كل شيء عند كل تسجيل دخول" التي تُزيلها هذه الهجرة أصلاً. payments مُستبعَدة عمداً
-        // من هذه النسخة التلقائية الخفيفة — النسخة الكاملة والحديثة تبقى عبر "تصدير نسخة
-        // احتياطية" اليدوي أعلاه (exportBackup)، الذي يجلبها طازجة عند الطلب فقط.
+        // من هذه النسخة التلقائية الخفيفة — البيانات الحديثة (مع payments) تبقى عبر "تصدير
+        // البيانات (JSON)" اليدوي أعلاه (exportBackup)، الذي يجلبها طازجة عند الطلب فقط. (P1-1: لا
+        // هذا ولا ذاك نسخة احتياطية قابلة للاستعادة — النسخة الكاملة هي backend/src/db/routineBackup.js.)
         saveAutoBackup: () => {
           const s = get();
           try {

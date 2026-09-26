@@ -13,6 +13,7 @@ import {
 } from '../../services/api';
 import { checkDatabaseIdentityAndInvalidate } from '../../store/dbIdentity';
 import ReportSettingsSection from './ReportSettingsSection';
+import DatabaseBackupSection from './DatabaseBackupSection';
 
 // ── حالة الاتصال: نفس منطق الألوان المستخدَم في DBStatusBadge (src/hooks/useDB.jsx) ──
 const DB_STATUS_META = {
@@ -148,7 +149,7 @@ export default function SettingsPage() {
     try {
       await exportFn(currentUser?.id);
     } catch (err) {
-      toast.error(err.message || 'فشل تصدير النسخة الاحتياطية');
+      toast.error(err.message || 'فشل تصدير البيانات');
     } finally {
       setExportBusy(false);
     }
@@ -387,11 +388,22 @@ export default function SettingsPage() {
           <div className="card">
             <div className="card-header"><div className="card-title">💾 النسخ الاحتياطي</div></div>
             <div className="card-body">
+              {isAdmin && (
+                <div style={{ paddingBottom: 16, marginBottom: 16, borderBottom: '1px solid var(--border)' }}>
+                  <DatabaseBackupSection/>
+                </div>
+              )}
+
+              {/* P1-1 — هذا تصدير بيانات جزئي للاطلاع/النقل، لا نسخة احتياطية قابلة للاستعادة */}
+              <div style={{ fontWeight: 700, color: 'var(--text)', marginBottom: 6 }}>📄 تصدير البيانات (JSON)</div>
               <p style={{ fontSize: 13, color: 'var(--text2)', marginBottom: 14, lineHeight: 1.7 }}>
-                تصدير جميع بيانات النظام (الطلاب، المجموعات، المدفوعات، الحضور، الامتحانات) كملف JSON.
+                ملف JSON يحتوي بعض بيانات النظام (الطلاب، المجموعات، المدفوعات، الحضور، الامتحانات، الدرجات، الواجبات)
+                للاطلاع عليها أو نقلها إلى برنامج آخر.{' '}
+                <strong>هذا ليس نسخة احتياطية كاملة ولا يمكن استعادة النظام منه</strong> — النسخة الاحتياطية الكاملة هي
+                النسخ التلقائي اليومي لقاعدة البيانات.
               </p>
               <button className="btn btn-primary" onClick={handleExport} disabled={exportBusy}>
-                {exportBusy ? '...جارِ التصدير' : '⬇ تصدير نسخة احتياطية'}
+                {exportBusy ? '...جارِ التصدير' : '⬇ تصدير البيانات (JSON)'}
               </button>
 
               {/* ── مسح بيانات التجربة ──────────────────── */}

@@ -15,6 +15,13 @@ import {
   queryStartupTaskXml,
   ensureStartupTask,
   removeStartupTask,
+  STUDIX_BACKUP_TASK_NAME,
+  resolveRoutineBackupScriptPath,
+  buildDesiredBackupTaskConfig,
+  buildBackupTaskXml,
+  parseBackupTaskXml,
+  backupTaskConfigMatches,
+  ensureBackupTask,
 } from './scheduledTask.js';
 
 const INSTALL_ROOT = 'C:\\Program Files\\Studix';
@@ -500,5 +507,123 @@ describe('scheduledTask.js never touches StudixApp service registration', () => 
     const mod = await import('./scheduledTask.js');
     expect(mod.registerAppService).toBeUndefined();
     expect(mod.STUDIX_APP_SERVICE_NAME).toBeUndefined();
+  });
+});
+
+// ── P1-1 — the routine daily database backup task (StudixDailyBackup) ─────────────────────
+describe('P1-1 — ensureBackupTask (StudixDailyBackup)', () => {
+  const BACKUP_SCRIPT = 'C:\\Program Files\\Studix\\backend\\src\\db\\routineBackup.js';
+  const params = { installRoot: INSTALL_ROOT, nodeExe: NODE_EXE, scriptPath: BACKUP_SCRIPT };
+  const desired = () => buildDesiredBackupTaskConfig({ nodeExe: NODE_EXE, scriptPath: BACKUP_SCRIPT, installRoot: INSTALL_ROOT });
+
+  function ioWithExisting(existingXml) {
+    const writes = [];
+    const execFileSync = vi.fn((cmd, args) => {
+      if (args[0] === '/Query') {
+        if (existingXml === null) throw notFoundError();
+        return existingXml;
+      }
+      return '';
+    });
+    const writeFileSync = vi.fn((p, content, enc) => writes.push({ p, content, enc }));
+    const unlinkSync = vi.fn();
+    return { io: { execFileSync, writeFileSync, unlinkSync }, writes, execFileSync };
+  }
+
+  it('resolves the bundled routineBackup.js path under the install root', () => {
+    expect(resolveRoutineBackupScriptPath(INSTALL_ROOT)).toBe(BACKUP_SCRIPT);
+  });
+
+  it('desired config: daily at 03:00, catch-up after a missed run, SYSTEM, highest privileges, no parallel runs, 2h limit, bundled node + quoted script', () => {
+    expect(desired()).toEqual({
+      dailyTriggerEnabled: true,
+      dailyStartTime: '03:00:00',
+      daysInterval: 1,
+      startWhenAvailable: true,
+      userId: 'S-1-5-18',
+      runLevel: 'HighestAvailable',
+      multipleInstancesPolicy: 'IgnoreNew',
+      executionTimeLimit: 'PT2H',
+      enabled: true,
+      runOnlyIfNetworkAvailable: false,
+      restartOnFailure: false,
+      command: NODE_EXE,
+      arguments: `"${BACKUP_SCRIPT}"`,
+      workingDirectory: INSTALL_ROOT,
+    });
+    expect(STUDIX_BACKUP_TASK_NAME).toBe('StudixDailyBackup');
+  });
+
+  it('the XML carries a daily CalendarTrigger (no BootTrigger), StartWhenAvailable, SYSTEM, and no <LogonType>', () => {
+    const xml = buildBackupTaskXml(desired());
+    expect(xml).toMatch(/<CalendarTrigger>[\s\S]*<StartBoundary>2020-01-01T03:00:00<\/StartBoundary>[\s\S]*<DaysInterval>1<\/DaysInterval>/);
+    expect(xml).not.toMatch(/<BootTrigger>/);
+    expect(xml).toContain('<StartWhenAvailable>true</StartWhenAvailable>');
+    expect(xml).toContain('<UserId>S-1-5-18</UserId>');
+    expect(xml).toContain('<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>');
+    expect(xml).not.toMatch(/<LogonType>/);
+    expect(xml.startsWith('<?xml version="1.0" encoding="UTF-16"?>')).toBe(true);
+  });
+
+  it('round-trip: parseBackupTaskXml(buildBackupTaskXml(desired)) matches desired', () => {
+    expect(backupTaskConfigMatches(desired(), parseBackupTaskXml(buildBackupTaskXml(desired())))).toBe(true);
+  });
+
+  it.each([
+    ['a different time', (x) => x.replace('T03:00:00', 'T05:00:00')],
+    ['StartWhenAvailable off', (x) => x.replace('<StartWhenAvailable>true', '<StartWhenAvailable>false')],
+    ['the trigger removed', (x) => x.replace(/<Triggers>[\s\S]*?<\/Triggers>/, '<Triggers></Triggers>')],
+    ['a boot trigger instead of a daily one', (x) => x.replace(/<CalendarTrigger>[\s\S]*?<\/CalendarTrigger>/, '<BootTrigger><Enabled>true</Enabled></BootTrigger>')],
+    ['a disabled trigger', (x) => x.replace('<Enabled>true</Enabled>\n      <ScheduleByDay>', '<Enabled>false</Enabled>\n      <ScheduleByDay>')],
+    ['every 2 days', (x) => x.replace('<DaysInterval>1<', '<DaysInterval>2<')],
+    ['a drifted script path', (x) => x.replace('routineBackup.js', 'other.js')],
+    ['parallel instances', (x) => x.replace('IgnoreNew', 'Parallel')],
+    ['a non-SYSTEM user', (x) => x.replace('S-1-5-18', 'S-1-5-21-1-2-3-1001')],
+  ])('drift detected: %s', (_label, mutate) => {
+    expect(backupTaskConfigMatches(desired(), parseBackupTaskXml(mutate(buildBackupTaskXml(desired()))))).toBe(false);
+  });
+
+  it('missing task -> created via schtasks /Create /XML /F with UTF-16LE+BOM bytes, under its own task name', () => {
+    const { io, writes, execFileSync } = ioWithExisting(null);
+    expect(ensureBackupTask(params, io)).toEqual({ status: 'created', taskName: 'StudixDailyBackup' });
+    const create = execFileSync.mock.calls.find((c) => c[1][0] === '/Create');
+    expect(create[0]).toBe('schtasks.exe');
+    expect(create[1]).toEqual(['/Create', '/TN', 'StudixDailyBackup', '/XML', writes[0].p, '/F']);
+    expect(writes[0].enc).toBe('utf16le');
+    const bytes = Buffer.from(writes[0].content, 'utf16le');
+    expect([bytes[0], bytes[1]]).toEqual([0xff, 0xfe]);
+  });
+
+  it('matching task -> idempotent no-op (repeated installer runs never re-create it)', () => {
+    const { io, execFileSync } = ioWithExisting(buildBackupTaskXml(desired()));
+    expect(ensureBackupTask(params, io)).toEqual({ status: 'already_registered', taskName: 'StudixDailyBackup' });
+    expect(execFileSync.mock.calls.some((c) => c[1][0] === '/Create')).toBe(false);
+  });
+
+  it('drifted task (e.g. moved install root) -> corrected', () => {
+    const { io } = ioWithExisting(buildBackupTaskXml(desired()).replace(NODE_EXE, 'C:\\Old\\node.exe'));
+    expect(ensureBackupTask(params, io)).toEqual({ status: 'corrected', taskName: 'StudixDailyBackup' });
+  });
+
+  it('registration failure -> ScheduledTaskError(register_failed), never silent success', () => {
+    const { io } = ioWithExisting(null);
+    io.execFileSync = vi.fn((cmd, args) => {
+      if (args[0] === '/Query') throw notFoundError();
+      throw new Error('Access is denied.');
+    });
+    expect(() => ensureBackupTask(params, io)).toThrow(ScheduledTaskError);
+    try { ensureBackupTask(params, io); } catch (err) { expect(err.reason).toBe('register_failed'); }
+  });
+
+  it('the boot task is unaffected: its own XML still has a BootTrigger and no CalendarTrigger', () => {
+    const xml = buildTaskXml(desiredConfig());
+    expect(xml).toMatch(/<BootTrigger>/);
+    expect(xml).not.toMatch(/<CalendarTrigger>/);
+  });
+
+  it('removeStartupTask({ taskName: STUDIX_BACKUP_TASK_NAME }) deletes the backup task (uninstall)', () => {
+    const { io, execFileSync } = ioWithExisting(buildBackupTaskXml(desired()));
+    expect(removeStartupTask({ taskName: STUDIX_BACKUP_TASK_NAME }, io)).toEqual({ status: 'removed', taskName: 'StudixDailyBackup' });
+    expect(execFileSync).toHaveBeenCalledWith('schtasks.exe', ['/Delete', '/TN', 'StudixDailyBackup', '/F'], expect.anything());
   });
 });

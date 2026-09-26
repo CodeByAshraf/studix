@@ -85,7 +85,7 @@ In plain terms, here is exactly what happens behind the scenes, with real paths 
 - `config\.env` — the application's own runtime configuration: the restricted database connection (`studix_app` role), session secret, port. Read by the running app on every start.
 - `config\admin.env` — a **separate**, more privileged database connection (`studix_admin` role), used only during installation/upgrade for schema/migration work. The running application itself never reads this file.
 - `logs\` — `studix-YYYY-MM-DD.log` (daily application log), `studix-app-service-stdout.log` / `studix-app-service-stderr.log` (raw NSSM-captured console output).
-- `backups\` — pre-migration database backups (`pre-migration-<timestamp>.dump`), created automatically only when an upgrade is about to apply a pending schema migration (see §11). **Never automatically deleted, by anyone, including a full data wipe uninstall.**
+- `backups\` — verified full database backups: the **daily** routine backups (`studix-backup-<UTC timestamp>.dump`, kept 14 days / newest 7 always, older ones cleaned up automatically) and the pre-migration backups taken before an upgrade migrates the database (`pre-migration-<timestamp>.dump`, never cleaned up) — see §11. **The folder itself is never deleted, by anyone, including a full data wipe uninstall.**
 - `pg-startup.log` — PostgreSQL's own startup log from the very first, one-time ad-hoc initialization step (not written to again once the Windows service takes over — see §12 for why this matters on upgrades).
 
 **Windows services registered and started:**
@@ -93,6 +93,8 @@ In plain terms, here is exactly what happens behind the scenes, with real paths 
 - `StudixApp` — the Node application, wrapped by NSSM as a Windows service (also `LocalSystem`, `AUTO_START`), listening on `127.0.0.1:4000` only, configured with `DependOnService = StudixPostgreSQL` so Windows always starts PostgreSQL first.
 
 Both are set to **start automatically on every Windows boot** — no manual step, ever, for the customer (§10).
+
+**Scheduled task for backups:** `StudixDailyBackup` (runs as SYSTEM every day at 03:00, or right after the next boot if the PC was off) takes the verified daily database backup described in §11. Registered by the installer on every install/upgrade, removed by uninstall.
 
 **Database initialization (fresh install only):**
 1. `initdb` creates a brand-new PostgreSQL cluster in `pgdata\`, with a generated random password (never the customer's concern).
@@ -223,7 +225,9 @@ Run through this after every fresh install, upgrade, or reinstall, before consid
 [ ] Create one real test record               (e.g. a student) and confirm it saves
 [ ] Restart StudixApp (sc.exe stop/start) and confirm the app comes back up automatically
 [ ] Confirm the test record and license are still there after that restart
-[ ] Confirm C:\ProgramData\Studix\backups\ exists (created automatically on the first pending migration — may be empty on a brand-new install with no migrations to run yet, which is normal)
+[ ] Confirm the daily backup task exists       (schtasks /Query /TN StudixDailyBackup)
+[ ] Take a first backup now (elevated prompt): "C:\Program Files\Studix\node\node.exe" "C:\Program Files\Studix\backend\src\db\routineBackup.js"
+[ ] Settings -> Backup (admin) shows a successful, verified backup and no red warning (§11)
 [ ] Confirm C:\ProgramData\Studix\logs\ has today's studix-YYYY-MM-DD.log
 [ ] If an existing customer PostgreSQL is on this machine, confirm its service/PID/port are unchanged
 ```
@@ -245,7 +249,7 @@ Designed to require **zero technical steps** from the customer:
 | If Studix (the browser tab) is closed? | Nothing happens to the services — they keep running in the background regardless of whether any browser window is open. Reopening `http://localhost:4000/` picks up exactly where it left off. |
 | If the PC loses Internet? | No effect — everything (app, database, license verification) runs 100% locally. Internet has no role in Studix's daily operation at all. |
 | Where is the data? | `C:\ProgramData\Studix\pgdata\` (never edit these files directly). |
-| Where are backups? | `C:\ProgramData\Studix\backups\` — see §11; the customer does not need to interact with these day-to-day. |
+| Where are backups? | `C:\ProgramData\Studix\backups\` — taken automatically every day (§11); an admin can see the last backup in Settings. The only customer task is copying them to a USB drive/another PC regularly (§11.5). |
 
 The customer's entire normal workflow is: **turn on the PC → open the browser bookmark → log in.** Nothing else.
 
@@ -253,26 +257,71 @@ The customer's entire normal workflow is: **turn on the PC → open the browser 
 
 ## 11. Backup and Recovery
 
-Based directly on `backend/src/db/backup.js`.
+Based directly on `backend/src/db/routineBackup.js` (routine backups), `backend/src/db/backup.js` (dump/verify/file contract, pre-migration backups), `backend/src/db/restoreDatabase.js` (restore into a candidate) and `backend/src/db/databaseSwitch.js` (switch/rollback).
 
-- **Where stored:** `C:\ProgramData\Studix\backups\` (overridable only via the `STUDIX_BACKUP_DIR` environment variable, intended for development use, not customer machines).
-- **How created:** a full `pg_dump` in PostgreSQL's compressed **custom format** (`-F c`), named `pre-migration-<ISO-timestamp>.dump`.
-- **When created — automatically:** **only** immediately before an upgrade applies at least one pending database migration (`backend/src/db/migrationRunner.js` calls `createPreMigrationBackup` only when there is real migration work to do). A fresh install with no prior data has nothing to migrate, so it may create zero backups on day one — this is normal, not a bug.
-- **When created — manually (owner/operator procedure, not customer-facing):** there is no customer-facing "click to back up now" button anywhere in the current UI. If you want an on-demand backup outside the automatic pre-migration trigger, you (the operator) run `pg_dump` yourself the same way the code does, e.g.:
+### 11.1 Automatic daily backup (routine)
+
+- **What runs it:** the Windows Scheduled Task **`StudixDailyBackup`**, registered (and corrected if it drifted) by the installer on every install/upgrade, removed by uninstall. It runs `C:\Program Files\Studix\node\node.exe "C:\Program Files\Studix\backend\src\db\routineBackup.js"` as **SYSTEM** — it does not depend on the browser, on anyone being logged in, or on `StudixApp` running; it only needs `StudixPostgreSQL`.
+- **When:** every day at **03:00**. If the PC is off at 03:00, Task Scheduler runs the missed backup as soon as possible after the next boot (`StartWhenAvailable`); the script waits up to 5 minutes for PostgreSQL to accept connections. Two runs never overlap (task policy `IgnoreNew`, plus the script's own lock file `backups\.routine-backup.lock`).
+- **Where:** `C:\ProgramData\Studix\backups\`, named `studix-backup-YYYY-MM-DDTHH-MM-SS-mmmZ.dump` (UTC time). The folder inherits the installer's Administrators + SYSTEM-only ACL.
+- **What it is:** a full `pg_dump` (compressed custom format, `-F c`) of the complete `studix` database — schema and all data (students, groups, payments, cashboxes/treasury, attendance, exams, grades, homework, users, license, …). It does **not** contain `ProgramData\Studix\config\` (secrets) or `logs\`.
+- **Verified before it counts:** the dump is written to `<name>.partial` first and is only renamed to its final name after all of these pass: `pg_dump` exit code 0 → the file exists and is non-empty → it starts with the custom-format header `PGDMP` → `pg_restore --list` (with the bundled `pg_restore.exe`) reads its entire table of contents → that table of contents contains table data for `students`, `groups`, `payments`, `treasury_txn`, `attendance` and `_studix_migrations`. A file named `studix-backup-*.dump` therefore always passed verification. (This proves the archive is complete and readable; the restore procedure below proves it restores.)
+- **Retention:** every backup from the last **14 days** is kept, and the newest **7** are always kept regardless of age (a PC that was off for weeks never loses its last backups; the newest backup is never deleted). Older routine backups are deleted **only after a new backup has been verified** — a failed run never deletes anything. Retention only ever deletes regular files whose names match the exact `studix-backup-…Z.dump` pattern (plus its own abandoned `*.dump.partial` files older than a day); `pre-migration-*.dump`, anything you copy into the folder, and any unexpected file name are never touched.
+- **Status and failures:** every run writes `backups\backup-status.json` and a line to `C:\ProgramData\Studix\logs\studix-YYYY-MM-DD.log`. Results: `success`; `warning` (backup verified but deleting an expired backup failed — exit code 2, never reported as plain success); `failed` (PostgreSQL unavailable, `pg_dump` failed, or verification failed — exit code 1; the previous backups and the "last successful backup" are unchanged); `skipped` (another backup already running, or a database switch/rollback in progress). No password or connection string is ever passed on a command line, logged, or written to the status file.
+- **Where to see it:** **Settings → 💾 النسخ الاحتياطي** (admin users) shows the schedule and whether the task is registered, the last successful verified backup (time, file, size), the last attempt and its result, how many backups are kept and where. It shows a red warning when the last attempt failed, when no successful backup exists, when the last success is older than 2 days, when retention failed, or when the scheduled task is missing.
+- **Run one now / list / verify (elevated Command Prompt):**
   ```
-  "C:\Program Files\Studix\pgsql\bin\pg_dump.exe" "postgresql://studix_admin:<password>@127.0.0.1:55432/studix" -F c -f "C:\ProgramData\Studix\backups\manual-backup.dump"
+  "C:\Program Files\Studix\node\node.exe" "C:\Program Files\Studix\backend\src\db\routineBackup.js"
+  "C:\Program Files\Studix\node\node.exe" "C:\Program Files\Studix\backend\src\db\routineBackup.js" --list
+  "C:\Program Files\Studix\node\node.exe" "C:\Program Files\Studix\backend\src\db\routineBackup.js" --verify "<path to .dump>"
   ```
-  (the admin password lives in `C:\ProgramData\Studix\config\admin.env` on that machine).
-- **What they contain:** the complete `studix` database — schema and all data — at the moment of the backup. They do **not** contain `ProgramData\Studix\config\` (secrets/connection strings) or `logs\`.
-- **How to copy safely:** the `.dump` files are static, self-contained files once written — safe to copy to a USB drive or another location at any time using normal Windows file copy; no need to stop any service first.
-- **How to restore:** this is an **owner/operator procedure, not a customer procedure** — there is no restore button in the app. Use `pg_restore` against the target `studix` database, e.g.:
-  ```
-  "C:\Program Files\Studix\pgsql\bin\pg_restore.exe" -h 127.0.0.1 -p 55432 -U studix_admin -d studix --clean "C:\ProgramData\Studix\backups\pre-migration-<timestamp>.dump"
-  ```
-  Confirm you're restoring into the correct, intended database before running this — `--clean` drops existing objects first.
-- **What NOT to delete:** never delete `C:\ProgramData\Studix\backups\` or its contents manually unless you are certain you no longer need any of them — the installer itself never deletes this folder under any circumstance, including a full data-wipe uninstall (§13).
-- **During uninstall:** `backups\` is **always** preserved — both on a normal uninstall and on the explicit "delete all data" wipe path. This is a deliberate, tested guarantee (confirmed twice in the E2E run, including a hash comparison proving the backup file was byte-for-byte unchanged after a full destructive wipe).
-- **During upgrade:** untouched — upgrades never delete anything in `ProgramData\Studix\`; they may *add* a new pre-migration backup if the upgrade includes new migrations.
+  (or `schtasks /Run /TN StudixDailyBackup` to run the scheduled task itself).
+
+### 11.2 Pre-migration backups (automatic, upgrades only)
+
+Immediately before an upgrade applies at least one pending database migration, `migrationRunner.js` takes an extra full backup named `pre-migration-<ISO-timestamp>.dump` in the same folder. These are **never** deleted by retention. They hold the database schema of the **previous** Studix version (see 11.4 for what that means for restoring).
+
+### 11.3 "تصدير البيانات (JSON)" in Settings is NOT a backup
+
+The Settings button **⬇ تصدير البيانات (JSON)** downloads a JSON file (`studix-data-export-<time>.json`) with some of the data (students, groups, payments, attendance, exams, grades, homework) for viewing or moving to another program. It is **not** a complete backup (no cashboxes/treasury, users, licensing, settings, …) and **nothing can restore Studix from it**. The only restorable backups are the `.dump` files above.
+
+### 11.4 Restoring a backup (operator procedure)
+
+This is an owner/operator procedure. It never overwrites the current database: the backup is restored into a **new candidate database**, verified, and only then swapped in — the current database is kept (renamed, never dropped), and a switch that fails part-way can be rolled back.
+
+1. **Pick the backup.** Usually the newest routine backup (`--latest` below). To use a specific one, list them with `routineBackup.js --list`; if the backup came from a USB/another location, copy it into `C:\ProgramData\Studix\backups\` first.
+2. **Restore into a candidate** (elevated Command Prompt — it reads `config\admin.env`):
+   ```
+   "C:\Program Files\Studix\node\node.exe" "C:\Program Files\Studix\backend\src\db\restoreDatabase.js" --latest
+   ```
+   or `... restoreDatabase.js --backup-path "C:\ProgramData\Studix\backups\<file>.dump"`.
+   This creates `studix_restore_candidate_<…>`, restores the backup into it with the bundled `pg_restore.exe` (the candidate must be empty — nothing is overwritten), and verifies it (schema present, migrations match this Studix version). Success prints `"status": "verified"`. **Production is not touched by this step**; the app keeps running normally. If it fails, it prints the reason and records `failed` in `config\restore-state.json`; production is unchanged and you can simply run it again (a new attempt starts cleanly).
+3. **Switch to the restored database** — either **Settings → 🔁 تبديل/استعادة قاعدة البيانات → تبديل قاعدة البيانات** (admin), or from the elevated prompt:
+   ```
+   "C:\Program Files\Studix\node\node.exe" "C:\Program Files\Studix\backend\src\db\databaseSwitch.js" --action switch
+   ```
+   This stops StudixApp, renames the current database to `studix_previous_<restore id>`, renames the candidate to `studix`, starts StudixApp and runs a deep health check. Users are disconnected for the duration. If a step fails (for example the app does not come back healthy), the switch stops and reports the error with the restore state left at `switching` — run the rollback in step 4 to put the previous database back. If the PC loses power in the middle, the next boot (`StudixStartupOrchestrator`) resumes the interrupted switch or rollback from where it stopped before starting StudixApp.
+4. **Check the data** in the app. **↩ التراجع عن التبديل** (Settings) / `databaseSwitch.js --action rollback` only applies to a switch that did **not** complete (restore state `switching`/`rolling_back`); once the switch reports `"status": "active"` it is final. Nothing is lost either way: the database that was replaced is kept intact as `studix_previous_<restore id>` (see 5). So pick the backup deliberately in step 1 — when in doubt, use `routineBackup.js --list` and choose by date.
+5. **What is restored:** the complete database as it was at the backup time — everything entered after that backup is not in it (it remains in the `studix_previous_<…>` database, which is kept, never deleted automatically). License activation survives the restore on the same machine (same installation id, same machine).
+6. **After a successful restore,** the daily backups continue automatically against the restored database. Keep `studix_previous_<…>` until you are sure you no longer need it; Studix never removes it (owner-only: `DROP DATABASE "studix_previous_<…>"` via `psql.exe`, §15 — never `studix` itself).
+
+**Version rule:** the restore tool only accepts a backup whose database schema matches the installed Studix version (it refuses one with pending migrations — `candidate_migrations_pending`). Routine backups taken after an upgrade always match. A `pre-migration-*.dump` (or a routine backup from before an upgrade) matches the **previous** version and is refused by the newer version's restore tool (a clear `candidate_migrations_pending` error, production untouched) — after an upgrade, restore from a routine backup taken after it; the first one is taken the next night, or run `routineBackup.js` right after upgrading (§12). Never restore with `pg_restore --clean` directly into the live `studix` database — that bypasses verification, the kept previous copy, and rollback.
+
+### 11.5 Local-only limitation — copy backups off the machine
+
+All backups are on the **same disk** as the database. They protect against mistakes, bad data, a failed upgrade and database corruption, but **not** against disk failure, theft, fire, ransomware or loss of the PC. Copy the `.dump` files regularly (e.g. weekly) to a USB drive or another computer — they are static, self-contained files, safe to copy at any time with normal Windows copy, no service needs stopping. Studix has no off-machine backup of its own.
+
+### 11.6 When a backup fails
+
+1. Look at the red warning in **Settings → 💾 النسخ الاحتياطي** and the matching `routineBackup` line in `C:\ProgramData\Studix\logs\studix-YYYY-MM-DD.log`.
+2. `postgres_unavailable` → check `sc.exe query StudixPostgreSQL` (§14). `dump_failed` → the log line has `pg_dump`'s own (credential-free) error. `verification_failed` → the new dump was unreadable/incomplete and was discarded; usually disk full or disk errors — check free space on `C:`. `lock_failed` → a damaged `backups\.routine-backup.lock`; if no backup is running, delete that one file. Scheduled task missing → re-run the installer (it re-registers `StudixDailyBackup`).
+3. Run a backup manually (11.1) and confirm Settings shows a new successful backup.
+
+### 11.7 Uninstall and upgrade
+
+- **Uninstall:** `backups\` is **always** preserved — both on a normal uninstall and on the explicit "delete all data" wipe path (a deliberate, tested guarantee). The `StudixDailyBackup` task is removed together with the program.
+- **Upgrade:** never deletes anything in `ProgramData\Studix\`; it re-verifies the `StudixDailyBackup` task and may add a `pre-migration-*.dump`.
+- **Never delete** `C:\ProgramData\Studix\backups\` by hand; old routine backups are already cleaned up automatically by the retention rule above.
 
 ---
 
@@ -287,7 +336,7 @@ Directly verified in Phase 3 of the E2E test (a real upgrade over a live, in-use
 5. **What happens to the license?** Fully preserved — same `licenseId`, same payload, confirmed identical before and after.
 6. **What happens to PostgreSQL?** The *service* is stopped, its binaries are replaced with the new version's bundled ones, then it is re-registered (idempotent — a no-op if already correctly registered) and started again **through the Windows Service Control Manager**, never via a raw ad-hoc process — this exact interaction was specifically re-verified with direct log evidence during the final E2E pass.
 7. **What happens to configuration?** `ProgramData\Studix\config\.env` and `admin.env` are untouched by the upgrade's file copy (they live in `ProgramData`, not `Program Files`).
-8. **What happens to backups?** Untouched, and a new one may be added automatically if the upgrade ships new database migrations (§11).
+8. **What happens to backups?** Untouched, and a `pre-migration-*.dump` is added automatically if the upgrade ships new database migrations (§11.2). The `StudixDailyBackup` task is re-verified. Because the restore tool only accepts backups matching the installed version (§11.4), take one routine backup right after the upgrade (elevated prompt: `"C:\Program Files\Studix\node\node.exe" "C:\Program Files\Studix\backend\src\db\routineBackup.js"`) instead of waiting for the next night.
 9. **What if the upgrade fails partway through?** Every step in the install orchestrator is independently idempotent and safely re-runnable — per its own design, there is **no custom rollback logic**; the fix for a failed upgrade is to simply re-run the same installer again (§3, step 9). This is a deliberate design decision documented directly in `backend/src/installer/firstInstall.js`'s own header comment.
 10. **Is rollback to the previous version supported?** **No formal rollback mechanism exists.** If you need to revert to an older Studix version, you would need to keep that version's installer and re-run it — but be aware this does not automatically reverse any database migrations that were already applied by the newer version.
 
@@ -304,6 +353,7 @@ The uninstaller shows: *"هل تريد أيضاً حذف جميع بيانات S
 | Item | Result |
 |---|---|
 | `StudixApp` / `StudixPostgreSQL` services | **Removed** (unregistered) |
+| Scheduled tasks `StudixStartupOrchestrator` / `StudixDailyBackup` | **Removed** |
 | `C:\Program Files\Studix\` | **Fully removed**, including files, tools, and the previously-known-defective leftover empty folders — this exact scenario was directly re-tested and confirmed fixed |
 | `C:\ProgramData\Studix\pgdata\` | **Preserved** |
 | `C:\ProgramData\Studix\config\` | **Preserved** |
@@ -354,7 +404,8 @@ Use this when: replacing the program files (e.g. as a manual pre-step before a c
 | Upgrade problem | Message box names a failing step | See §12 | Re-run the same installer again — safe and expected to resolve most transient failures |
 | Uninstall problem | Message box during removal | A service could not be confirmed stopped/unregistered | The fail-closed guard means **no data was deleted** — verify service state manually, resolve, then retry |
 | Data appears missing | Students/payments not visible | Wrong install was reinstalled fresh instead of recovering existing `pgdata\` (a truly fresh install always starts empty), OR a full data wipe was performed by mistake (§13) | Check whether `C:\ProgramData\Studix\pgdata\` exists and has real content; if genuinely gone, only a backup in `backups\` (or one you copied elsewhere) can recover it |
-| Backup problem | `pg_restore`/`pg_dump` errors | Wrong credentials (`admin.env`), or the target database already has conflicting data | Confirm you're using the exact `STUDIX_DB_ADMIN_URL` from that machine's own `admin.env`; use `--clean` deliberately, understanding it drops existing data first |
+| Backup failed / red warning in Settings → Backup | "فشلت آخر محاولة نسخ احتياطي …", or last backup older than 2 days | PostgreSQL not running, PC off at night for days, disk full, or the `StudixDailyBackup` task missing | Follow §11.6; run `routineBackup.js` manually and confirm a new verified backup appears |
+| Restore refused | `restoreDatabase.js` prints `❌ [reason] …` | Corrupt/incomplete backup file, or a backup from a different Studix version (`candidate_migrations_pending`) | Production was not touched. Choose another backup (`routineBackup.js --list`, `--verify <file>`) and run it again (§11.4) — never fall back to `pg_restore --clean` into `studix` |
 
 ---
 
@@ -367,7 +418,7 @@ Use this when: replacing the program files (e.g. as a manual pre-step before a c
 | `C:\ProgramData\Studix\config\.env` | Runtime app config (restricted DB connection, session secret, port) | Do not hand-edit unless you know exactly what you're changing; deleting it will break the running app. |
 | `C:\ProgramData\Studix\config\admin.env` | Privileged DB connection, used only for install/upgrade/migration | Never share this file or its contents with anyone outside your own operational team. |
 | `C:\ProgramData\Studix\logs\` | Application + service logs | Safe to read/copy; safe to delete old log files if disk space is a concern (the app will just create new ones). |
-| `C:\ProgramData\Studix\backups\` | Pre-migration `.dump` backups | **Never delete** unless you're certain you don't need them; the installer itself never touches this folder under any circumstance. |
+| `C:\ProgramData\Studix\backups\` | Verified daily `studix-backup-*.dump`, `pre-migration-*.dump`, `backup-status.json`, `.routine-backup.lock` (only while a backup runs) | **Never delete** by hand — old daily backups are removed automatically by retention (§11.1); the installer/uninstaller never touches this folder. Copy `*.dump` files off the machine regularly (§11.5). |
 | `C:\ProgramData\Studix\pg-startup.log` | One-time ad-hoc PostgreSQL startup log (fresh-init only) | Diagnostic only, safe to delete. |
 
 | Command | When to use it |
@@ -376,8 +427,10 @@ Use this when: replacing the program files (e.g. as a manual pre-step before a c
 | `sc.exe stop StudixApp` / `sc.exe start StudixApp` | Manually restart the app service (troubleshooting, or persistence testing) — requires an elevated prompt |
 | `Get-FileHash <file> -Algorithm SHA256` (PowerShell) | Verify the installer before sending it to a customer (§2) |
 | `"C:\Program Files\Studix\pgsql\bin\psql.exe" -h 127.0.0.1 -p 55432 -U studix_admin -d studix` | Direct database access (owner-only — needs the password from `admin.env`) |
-| `"C:\Program Files\Studix\pgsql\bin\pg_dump.exe" ... -F c -f <path>` | Manual on-demand backup (§11) |
-| `"C:\Program Files\Studix\pgsql\bin\pg_restore.exe" ... --clean <dump file>` | Restore from a backup (owner-only, §11) |
+| `"C:\Program Files\Studix\node\node.exe" "C:\Program Files\Studix\backend\src\db\routineBackup.js"` (`--list`, `--verify <file>`) | Take a verified backup now / list / verify backups (elevated prompt, §11.1) |
+| `schtasks /Query /TN StudixDailyBackup` · `schtasks /Run /TN StudixDailyBackup` | Check / trigger the daily backup task (§11.1) |
+| `"C:\Program Files\Studix\node\node.exe" "C:\Program Files\Studix\backend\src\db\restoreDatabase.js" --latest` (or `--backup-path <file>`) | Restore a backup into a verified candidate database — owner-only, elevated (§11.4 step 2) |
+| `"C:\Program Files\Studix\node\node.exe" "C:\Program Files\Studix\backend\src\db\databaseSwitch.js" --action switch` / `rollback` | Switch to the verified candidate / roll back an incomplete switch — owner-only, elevated (§11.4 steps 3–4; same as the Settings buttons) |
 | `node tools/license-keygen.js` | One-time (or deliberate rotation) — generate your signing keypair (§6) |
 | `node tools/license-issuer.js` | Every time you issue/renew a customer license (§6) |
 
@@ -392,10 +445,11 @@ Use this when: replacing the program files (e.g. as a manual pre-step before a c
 | License generation (`license-issuer.js`) | ✅ Only you | ❌ Never — requires your private key, which never leaves your machine |
 | Public-key provisioning into a new install | N/A — automatic, done by the installer (§6) | N/A — automatic |
 | Activation (pasting the artifact) | Can do it if on-site | ✅ Normally the customer's admin, guided by you |
-| Database management (backup/restore) | ✅ | ❌ Not exposed in the UI at all |
-| Backup (automatic, pre-migration) | N/A — automatic | N/A — automatic, invisible to daily use |
-| Backup (manual, on-demand) | ✅ | ❌ |
-| Restore | ✅ Only | ❌ |
+| Backup (automatic, daily + pre-migration) | N/A — automatic | N/A — automatic; admin sees status in Settings |
+| Backup status / failure warning | ✅ Settings → Backup | Customer's admin sees the same Settings view |
+| Backup (manual, on-demand) | ✅ `routineBackup.js` | ❌ |
+| Copying backups off the machine | ✅ Arrange it | ✅ Copy `backups\*.dump` to USB regularly (§11.5) |
+| Restore (candidate + switch) | ✅ Only (§11.4) | ❌ |
 | Upgrade | ✅ (or walk the customer through §12) | Can run the new installer themselves if guided |
 | Uninstall (normal) | Either | Either, but should understand §13's distinction first |
 | Uninstall (full data wipe) | **Strongly recommend this is you, or done with your explicit direction** | Only with full understanding of §13 |
@@ -407,7 +461,9 @@ Use this when: replacing the program files (e.g. as a manual pre-step before a c
 
 - **Do not** answer "Yes" to the first uninstall dialog unless you genuinely intend a permanent data wipe — there is no "undo" (§13).
 - **Do not** hand-edit files inside `C:\ProgramData\Studix\pgdata\` directly — this is a live PostgreSQL data directory; manual edits can corrupt it beyond automatic recovery (the code deliberately fails closed rather than trying to repair a directory it doesn't fully trust).
-- **Do not** delete `C:\ProgramData\Studix\backups\` "to save space" — it is never regenerated on demand, and it's the only safety net for the full-wipe uninstall path.
+- **Do not** delete `C:\ProgramData\Studix\backups\` "to save space" — old daily backups are already cleaned up automatically (§11.1), and it's the only safety net for the full-wipe uninstall path.
+- **Do not** restore with `pg_restore --clean` (or any manual `pg_restore`) directly into the live `studix` database — always restore into a candidate and switch (§11.4).
+- **Do not** treat the Settings "تصدير البيانات (JSON)" file as a backup — it cannot restore Studix (§11.3).
 - **Do not** copy `pgdata\` from one physical machine to another expecting the license to keep working — machine-bound licensing will correctly reject it (`wrong_machine`); this requires a fresh Activation Request Code and a fresh artifact from you (§6).
 - **Do not** share, email, or store the licensing **private** key (`license-private-key.pem`) anywhere near the licensing **public** key or on any customer machine — losing control of it means anyone could issue valid licenses for every customer you have (§6).
 - **Do not** run `license-keygen.js --force` casually — licenses you sign with the new key will not activate anywhere until you ship a new Studix release that carries the new public key, and after customers install that release their existing licenses must be re-issued (§6, "Key rotation").
@@ -461,6 +517,7 @@ HANDOFF TO CUSTOMER
 [ ] Show them the Start Menu shortcut / browser bookmark
 [ ] Confirm they understand: no manual start needed, ever (Section 10)
 [ ] Confirm they know NOT to touch C:\ProgramData\Studix directly
-[ ] Remind them backups live in C:\ProgramData\Studix\backups\ and are never auto-deleted
+[ ] Show the admin Settings -> Backup (daily verified backup, last success)
+[ ] Remind them to copy C:\ProgramData\Studix\backups\*.dump to a USB drive regularly (Section 11.5)
 [ ] Leave them your contact for license renewal / machine changes (Section 6)
 ```

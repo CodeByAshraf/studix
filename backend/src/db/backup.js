@@ -102,10 +102,172 @@ export function findPgRestore(pgHome = resolvePgHome(), legacyPgRoot = 'C:\\Prog
   return resolveBundledBinary('pg_restore.exe', { envOverrideName: 'PG_RESTORE_PATH', pgHome, legacyPgRoot });
 }
 
-function getBackupDir() {
+export function getBackupDir() {
   if (process.env.STUDIX_BACKUP_DIR) return process.env.STUDIX_BACKUP_DIR;
   const programData = process.env.ProgramData || 'C:\\ProgramData';
   return path.join(programData, 'Studix', 'backups');
+}
+
+// ── P1-1 — the routine backup file contract ─────────────────────────────────────────────────
+// Routine backups (routineBackup.js) are published in getBackupDir() as
+//   studix-backup-YYYY-MM-DDTHH-MM-SS-mmmZ.dump      (UTC — same ISO-with-dashes style as the
+//                                                      pre-migration-*.dump files beside them)
+// ONLY a file whose name matches ROUTINE_BACKUP_FILENAME_RE exactly (and that is a regular file,
+// never a directory/symlink) is ever treated as a routine backup — listed, restored with
+// --latest, or considered by retention. Everything else in the directory (pre-migration-*.dump,
+// operator copies, status/lock files, anything unexpected) is never touched by retention.
+export const ROUTINE_BACKUP_PREFIX = 'studix-backup-';
+export const ROUTINE_BACKUP_FILENAME_RE = /^studix-backup-(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z\.dump$/;
+
+export function routineBackupFileName(date) {
+  return `${ROUTINE_BACKUP_PREFIX}${date.toISOString().replace(/[:.]/g, '-')}.dump`;
+}
+
+// Returns the UTC creation time encoded in a routine backup name, or null for any other name
+// (including a well-shaped name carrying an impossible date such as month 13).
+export function parseRoutineBackupFileName(fileName) {
+  const m = ROUTINE_BACKUP_FILENAME_RE.exec(fileName);
+  if (!m) return null;
+  const [, y, mo, d, h, mi, s, ms] = m;
+  const iso = `${y}-${mo}-${d}T${h}:${mi}:${s}.${ms}Z`;
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime()) || date.toISOString() !== iso) return null;
+  return date;
+}
+
+// listRoutineBackups: newest first. lstat (never stat) so a symlink/junction carrying a
+// matching name is never followed or counted.
+export function listRoutineBackups({ backupDir = getBackupDir(), fsImpl = fs } = {}) {
+  let names;
+  try {
+    names = fsImpl.readdirSync(backupDir);
+  } catch (err) {
+    if (err.code === 'ENOENT') return [];
+    throw err;
+  }
+  const backups = [];
+  for (const fileName of names) {
+    const createdAt = parseRoutineBackupFileName(fileName);
+    if (!createdAt) continue;
+    const filePath = path.join(backupDir, fileName);
+    let stat;
+    try {
+      stat = fsImpl.lstatSync(filePath);
+    } catch {
+      continue;
+    }
+    if (!stat.isFile()) continue;
+    backups.push({ fileName, path: filePath, createdAt, sizeBytes: stat.size });
+  }
+  return backups.sort((a, b) => b.createdAt - a.createdAt);
+}
+
+// The routine backup's status file (written by routineBackup.js after every run, read by the
+// admin-only GET /api/backup-status) and retention defaults live here, beside the file contract,
+// so the read-only status route never has to import the backup runner itself.
+export const BACKUP_STATUS_FILE_NAME = 'backup-status.json';
+export const DEFAULT_RETENTION_DAYS = 14;
+export const DEFAULT_MIN_KEEP = 7;
+
+export function resolveBackupStatusPath(backupDir = getBackupDir()) {
+  return path.join(backupDir, BACKUP_STATUS_FILE_NAME);
+}
+
+// null = no routine backup has ever run. A present but unparseable file throws.
+export function readBackupStatus({ backupDir = getBackupDir(), fsImpl = fs } = {}) {
+  const filePath = resolveBackupStatusPath(backupDir);
+  if (!fsImpl.existsSync(filePath)) return null;
+  return JSON.parse(fsImpl.readFileSync(filePath, 'utf8'));
+}
+
+// P1-1 — connection details for pg_dump/pg_restore are passed through libpq's own environment
+// variables (PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE), never as a connection-string argument:
+// an argv containing the URL exposes the password in the process list AND in execFileSync's own
+// error message ("Command failed: pg_dump postgresql://user:password@..."), which then flows
+// into thrown errors and logs.
+export function pgConnectionEnv(databaseUrl, baseEnv = process.env) {
+  const u = new URL(databaseUrl);
+  return {
+    ...baseEnv,
+    PGHOST: u.hostname,
+    PGPORT: u.port || '5432',
+    PGUSER: decodeURIComponent(u.username),
+    PGPASSWORD: decodeURIComponent(u.password),
+    PGDATABASE: decodeURIComponent(u.pathname.replace(/^\//, '')),
+  };
+}
+
+// Scrubs any connection string that might still appear in a lower-level error message.
+const CONNECTION_STRING_RE = /postgres(?:ql)?:\/\/[^\s"')]+/gi;
+function redact(message) {
+  return String(message).replace(CONNECTION_STRING_RE, 'postgresql://[REDACTED]');
+}
+
+// runPgDump: one custom-format (-F c) dump of `databaseUrl`'s database to `outPath`. Shared by
+// createPreMigrationBackup and the routine backup (routineBackup.js) — one invocation shape.
+export function runPgDump({ pgDumpPath, databaseUrl, outPath, execFileSyncFn = execFileSync }) {
+  try {
+    execFileSyncFn(pgDumpPath, ['--format=custom', '--no-password', '--file', outPath], {
+      encoding: 'utf8', env: pgConnectionEnv(databaseUrl), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (err) {
+    const stderr = err && err.stderr ? String(err.stderr).trim() : '';
+    throw new Error(redact(`pg_dump فشل: ${stderr || err.message}`));
+  }
+}
+
+// P1-1 — structural verification of a custom-format archive, stronger than "a non-empty file
+// exists": (1) regular non-empty file, (2) the custom-format magic header "PGDMP", (3)
+// `pg_restore --list` (read-only, no database connection) can read the whole table of contents,
+// (4) that TOC carries TABLE DATA entries for every table in requiredTables. It does NOT restore
+// the archive — a full restore is proven by the restore procedure itself.
+export const BACKUP_REQUIRED_TABLES = Object.freeze(['students', 'groups', 'payments', 'treasury_txn', 'attendance', '_studix_migrations']);
+
+export function verifyBackupArchive(filePath, {
+  pgRestorePath, requiredTables = BACKUP_REQUIRED_TABLES, execFileSyncFn = execFileSync, fsImpl = fs,
+} = {}) {
+  let stat;
+  try {
+    stat = fsImpl.lstatSync(filePath);
+  } catch {
+    throw new Error(`ملف النسخة الاحتياطية غير موجود: ${filePath}`);
+  }
+  if (!stat.isFile() || stat.size === 0) {
+    throw new Error(`ملف النسخة الاحتياطية فارغ أو ليس ملفاً عادياً: ${filePath}`);
+  }
+
+  const header = Buffer.alloc(5);
+  const fd = fsImpl.openSync(filePath, 'r');
+  try {
+    fsImpl.readSync(fd, header, 0, 5, 0);
+  } finally {
+    fsImpl.closeSync(fd);
+  }
+  if (header.toString('latin1') !== 'PGDMP') {
+    throw new Error(`الملف ليس أرشيف pg_dump بالصيغة المخصَّصة (ترويسة PGDMP مفقودة): ${filePath}`);
+  }
+
+  let toc;
+  try {
+    // path.resolve: always an absolute path, so a file name starting with "-" can never be
+    // parsed by pg_restore as an option.
+    toc = String(execFileSyncFn(pgRestorePath, ['--list', path.resolve(filePath)], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }));
+  } catch (err) {
+    const stderr = err && err.stderr ? String(err.stderr).trim() : '';
+    throw new Error(redact(`تعذّر قراءة فهرس الأرشيف (pg_restore --list): ${stderr || err.message}`));
+  }
+
+  const tablesWithData = new Set();
+  for (const line of toc.split(/\r?\n/)) {
+    const m = line.match(/\bTABLE DATA\s+\S+\s+(\S+)/);
+    if (m) tablesWithData.add(m[1]);
+  }
+  const missing = requiredTables.filter((t) => !tablesWithData.has(t));
+  if (missing.length) {
+    throw new Error(`الأرشيف لا يحتوي بيانات الجداول المتوقَّعة: ${missing.join(', ')}`);
+  }
+
+  return { sizeBytes: stat.size, tableDataEntries: tablesWithData.size };
 }
 
 /**
@@ -126,7 +288,7 @@ export async function createPreMigrationBackup(databaseUrl, opts = {}) {
   const backupPath = path.join(backupDir, `pre-migration-${timestamp}.dump`);
 
   try {
-    execFileSync(pgDumpPath, [databaseUrl, '-F', 'c', '-f', backupPath], { encoding: 'utf8' });
+    runPgDump({ pgDumpPath, databaseUrl, outPath: backupPath });
   } catch (err) {
     throw new Error(`فشل أخذ نسخة احتياطية قبل الترحيل: ${err.message}`);
   }
@@ -183,7 +345,7 @@ export async function restoreBackup(backupPath, targetDatabaseUrl, opts = {}) {
   // تحقّق قراءة فقط من صحة الملف قبل أي عملية هدّامة — pg_restore --list لا يتصل بأي قاعدة
   // بيانات إطلاقاً، لا يكتب شيئاً، فقط يقرأ ترويسة/فهرس الأرشيف نفسه.
   try {
-    execFileSync(pgRestorePath, ['--list', backupPath], { encoding: 'utf8' });
+    execFileSync(pgRestorePath, ['--list', path.resolve(backupPath)], { encoding: 'utf8' });
   } catch (err) {
     throw new Error(`ملف النسخة الاحتياطية تالف أو غير صالح — فشل التحقّق منه (pg_restore --list): ${err.message}`);
   }
@@ -197,11 +359,18 @@ export async function restoreBackup(backupPath, targetDatabaseUrl, opts = {}) {
     );
   }
 
+  // P1-1 — credentials via libpq environment (pgConnectionEnv), never the URL in argv; only the
+  // plain database name is passed to --dbname (required so pg_restore connects at all instead of
+  // printing a SQL script to stdout).
+  const targetEnv = pgConnectionEnv(targetDatabaseUrl);
   const start = Date.now();
   try {
-    execFileSync(pgRestorePath, ['--dbname', targetDatabaseUrl, backupPath], { encoding: 'utf8' });
+    execFileSync(pgRestorePath, ['--no-password', '--dbname', targetEnv.PGDATABASE, path.resolve(backupPath)], {
+      encoding: 'utf8', env: targetEnv, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+    });
   } catch (err) {
-    throw new Error(`فشلت عملية الاستعادة (pg_restore): ${err.message}`);
+    const stderr = err && err.stderr ? String(err.stderr).trim() : '';
+    throw new Error(redact(`فشلت عملية الاستعادة (pg_restore): ${stderr || err.message}`));
   }
   const durationMs = Date.now() - start;
 

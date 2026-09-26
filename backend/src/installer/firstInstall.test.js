@@ -5,6 +5,7 @@
 // runFirstInstall calls the right functions, in the right order, with the right arguments, and
 // stops immediately on the first failure. Never touches a real PostgreSQL, a real Windows
 // service, a real network request, or a real browser.
+import fs from 'fs';
 import { describe, it, expect, vi } from 'vitest';
 import { runFirstInstall, FirstInstallError } from './firstInstall.js';
 import { RestoreStateError } from '../db/restoreState.js';
@@ -40,6 +41,7 @@ function baseDeps(overrides = {}) {
     registerAppServiceFn: vi.fn((...args) => { record('registerAppService')(...args); return { status: 'registered' }; }),
     startServiceFn: vi.fn((...args) => { record('startService')(...args); return { status: 'started' }; }),
     registerScheduledTaskFn: vi.fn((...args) => { record('registerScheduledTask')(...args); return { status: 'created' }; }),
+    registerBackupTaskFn: vi.fn((...args) => { record('registerBackupTask')(...args); return { status: 'created' }; }),
     readRestoreStateFn: vi.fn((...args) => { record('readRestoreState')(...args); return { status: 'idle' }; }),
     resolveInstallRootFn: vi.fn(() => 'C:\\Studix'),
     waitForHealthFn: vi.fn(async (...args) => { record('waitForHealth')(...args); return true; }),
@@ -156,7 +158,7 @@ describe('runFirstInstall — fresh install (provisionPostgres returns "initiali
       'provisionPostgres', 'ensureProvisioningAdminConfig', 'validateDatabaseUrl',
       'bootstrapDatabase', 'createMigrationPrismaClient', 'runMigrations', 'provisionLicensingPublicKey', 'ensureAppRole',
       'ensureProductionConfig', 'stopPostgres', 'registerPostgresService', 'startService',
-      'registerAppService', 'readRestoreState', 'startService', 'registerScheduledTask', 'waitForHealth', 'openBrowser',
+      'registerAppService', 'readRestoreState', 'startService', 'registerScheduledTask', 'registerBackupTask', 'waitForHealth', 'openBrowser',
     ]);
   });
 
@@ -239,6 +241,22 @@ describe('runFirstInstall — fresh install (provisionPostgres returns "initiali
     const order = calls.map((c) => c[0]);
     expect(order.indexOf('registerAppService')).toBeLessThan(order.indexOf('registerScheduledTask'));
     expect(order.indexOf('registerScheduledTask')).toBeLessThan(order.indexOf('waitForHealth'));
+  });
+
+  it('P1-1: registers/corrects the daily backup task right after the boot task, on every run (fresh or upgrade)', async () => {
+    const { deps, calls } = baseDeps();
+    await runFirstInstall({ schemaPath: 'schema.sql', deps });
+    expect(deps.registerBackupTaskFn).toHaveBeenCalledTimes(1);
+    expect(deps.registerBackupTaskFn).toHaveBeenCalledWith();
+    const order = calls.map((c) => c[0]);
+    expect(order.indexOf('registerScheduledTask')).toBeLessThan(order.indexOf('registerBackupTask'));
+    expect(order.indexOf('registerBackupTask')).toBeLessThan(order.indexOf('waitForHealth'));
+  });
+
+  it('P1-1: the default registerBackupTaskFn is lib/scheduledTask.js ensureBackupTask (the same Task Scheduler mechanism)', () => {
+    const source = fs.readFileSync(new URL('./firstInstall.js', import.meta.url), 'utf8');
+    expect(source).toMatch(/registerBackupTaskFn = ensureBackupTask/);
+    expect(source).toMatch(/import \{ ensureStartupTask, ensureBackupTask \} from '\.\.\/lib\/scheduledTask\.js'/);
   });
 
   it('polls health at the correct URL for the resolved port', async () => {
@@ -348,6 +366,7 @@ describe('runFirstInstall — failure at each step stops immediately with a mach
     ['start_postgres_service', 'registerPostgresServiceFn', () => { throw new Error('register failed'); }],
     ['start_app_service', 'registerAppServiceFn', () => { throw new Error('nssm missing'); }],
     ['register_scheduled_task', 'registerScheduledTaskFn', () => { throw new Error('schtasks access denied'); }],
+    ['register_backup_task', 'registerBackupTaskFn', () => { throw new Error('schtasks access denied'); }],
   ])('%s', async (expectedStep, failingDep, impl) => {
     const { deps } = baseDeps({ [failingDep]: vi.fn(impl) });
     try {
@@ -389,6 +408,15 @@ describe('runFirstInstall — failure at each step stops immediately with a mach
     expect(deps.registerScheduledTaskFn).not.toHaveBeenCalled();
     expect(deps.waitForHealthFn).not.toHaveBeenCalled();
     expect(deps.openBrowserFn).not.toHaveBeenCalled();
+  });
+
+  it('P1-1: a failure registering the daily backup task fails the install (step "register_backup_task") before the health check', async () => {
+    const { deps } = baseDeps({
+      registerBackupTaskFn: vi.fn(() => { throw new Error('schtasks access denied'); }),
+    });
+    await expect(runFirstInstall({ schemaPath: 'schema.sql', deps })).rejects.toMatchObject({ step: 'register_backup_task' });
+    expect(deps.registerScheduledTaskFn).toHaveBeenCalled();
+    expect(deps.waitForHealthFn).not.toHaveBeenCalled();
   });
 
   it('a registration failure in the Scheduled Task step stops before the health check ever runs', async () => {
@@ -480,7 +508,7 @@ describe('runFirstInstall — restore-state guard before starting StudixApp (aud
       'provisionPostgres', 'ensureProvisioningAdminConfig', 'validateDatabaseUrl',
       'bootstrapDatabase', 'createMigrationPrismaClient', 'runMigrations', 'provisionLicensingPublicKey', 'ensureAppRole',
       'ensureProductionConfig', 'stopPostgres', 'registerPostgresService', 'startService',
-      'registerAppService', 'readRestoreState', 'startService', 'registerScheduledTask',
+      'registerAppService', 'readRestoreState', 'startService', 'registerScheduledTask', 'registerBackupTask',
       'waitForHealth', 'openBrowser',
     ]);
   });

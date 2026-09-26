@@ -35,11 +35,14 @@ afterEach(() => {
 });
 
 describe('manageScheduledTask run("remove")', () => {
-  it('calls removeStartupTask with no arguments and prints its JSON result', async () => {
+  it('P1-1: removes BOTH Studix tasks (boot orchestrator, then daily backup) and prints each JSON result', async () => {
+    removeStartupTaskMock.mockImplementation(({ taskName }) => ({ status: 'removed', taskName }));
     await run('remove');
-    expect(removeStartupTaskMock).toHaveBeenCalledTimes(1);
-    expect(removeStartupTaskMock).toHaveBeenCalledWith();
+    expect(removeStartupTaskMock).toHaveBeenCalledTimes(2);
+    expect(removeStartupTaskMock).toHaveBeenNthCalledWith(1, { taskName: 'StudixStartupOrchestrator' });
+    expect(removeStartupTaskMock).toHaveBeenNthCalledWith(2, { taskName: 'StudixDailyBackup' });
     expect(logSpy).toHaveBeenCalledWith(JSON.stringify({ status: 'removed', taskName: 'StudixStartupOrchestrator' }, null, 2));
+    expect(logSpy).toHaveBeenCalledWith(JSON.stringify({ status: 'removed', taskName: 'StudixDailyBackup' }, null, 2));
     expect(process.exitCode).toBeUndefined();
   });
 
@@ -47,6 +50,16 @@ describe('manageScheduledTask run("remove")', () => {
     removeStartupTaskMock.mockImplementationOnce(() => { throw new ScheduledTaskError('remove_failed', 'فشل الحذف'); });
     await run('remove');
     expect(errorSpy).toHaveBeenCalledWith('❌ [remove_failed] فشل الحذف');
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('P1-1: a failure removing the first task never skips removing the second', async () => {
+    removeStartupTaskMock
+      .mockImplementationOnce(() => { throw new ScheduledTaskError('remove_failed', 'فشل الحذف'); })
+      .mockImplementationOnce(({ taskName }) => ({ status: 'removed', taskName }));
+    await run('remove');
+    expect(removeStartupTaskMock).toHaveBeenCalledTimes(2);
+    expect(removeStartupTaskMock).toHaveBeenNthCalledWith(2, { taskName: 'StudixDailyBackup' });
     expect(process.exitCode).toBe(1);
   });
 
