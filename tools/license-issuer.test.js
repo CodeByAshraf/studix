@@ -19,10 +19,10 @@ function makeOwnerKeyPair() {
 }
 
 describe('parseCustomerRequestCode', () => {
-  it('decodes a real Activation Request Code', () => {
-    const code = buildActivationRequestCode({ installationId: 'inst-1', product: PRODUCT_ID });
+  it('decodes a real Activation Request Code, including the machine binding', () => {
+    const code = buildActivationRequestCode({ installationId: 'inst-1', product: PRODUCT_ID, machineId: 'machine-1' });
     const parsed = parseCustomerRequestCode(code);
-    expect(parsed).toEqual({ v: 1, installationId: 'inst-1', product: PRODUCT_ID });
+    expect(parsed).toEqual({ v: 2, installationId: 'inst-1', product: PRODUCT_ID, machineId: 'machine-1' });
   });
 
   it('rejects a malformed/garbage code with a clear error, not a crash', () => {
@@ -37,32 +37,35 @@ describe('parseCustomerRequestCode', () => {
 describe('issueLicense — produces an artifact the real backend verifier accepts', () => {
   it('1. a valid license request produces a valid artifact', () => {
     const { privateKey } = makeOwnerKeyPair();
-    const result = issueLicense({ installationId: 'inst-1', product: PRODUCT_ID }, privateKey);
+    const result = issueLicense({ installationId: 'inst-1', product: PRODUCT_ID, machineId: 'machine-1' }, privateKey);
     expect(typeof result.artifact).toBe('string');
     expect(result.artifact.split('.')).toHaveLength(2);
     expect(result.installationId).toBe('inst-1');
+    expect(result.machineId).toBe('machine-1');
     expect(typeof result.licenseId).toBe('string');
   });
 
   it('auto-generates a licenseId when none is supplied', () => {
     const { privateKey } = makeOwnerKeyPair();
-    const a = issueLicense({ installationId: 'inst-1', product: PRODUCT_ID }, privateKey);
-    const b = issueLicense({ installationId: 'inst-1', product: PRODUCT_ID }, privateKey);
+    const a = issueLicense({ installationId: 'inst-1', product: PRODUCT_ID, machineId: 'machine-1' }, privateKey);
+    const b = issueLicense({ installationId: 'inst-1', product: PRODUCT_ID, machineId: 'machine-1' }, privateKey);
     expect(a.licenseId).not.toBe(b.licenseId);
   });
 
   it('respects an explicitly supplied licenseId', () => {
     const { privateKey } = makeOwnerKeyPair();
-    const result = issueLicense({ licenseId: 'lic_CUSTOM', installationId: 'inst-1', product: PRODUCT_ID }, privateKey);
+    const result = issueLicense({
+      licenseId: 'lic_CUSTOM', installationId: 'inst-1', product: PRODUCT_ID, machineId: 'machine-1',
+    }, privateKey);
     expect(result.licenseId).toBe('lic_CUSTOM');
   });
 
   it('2. the artifact is accepted by the real Phase 5b verification logic (verifyLicenseArtifact)', () => {
     const { publicKey, privateKey } = makeOwnerKeyPair();
-    const result = issueLicense({ installationId: 'inst-1', product: PRODUCT_ID }, privateKey);
+    const result = issueLicense({ installationId: 'inst-1', product: PRODUCT_ID, machineId: 'machine-1' }, privateKey);
 
     const check = verifyLicenseArtifact({
-      artifact: result.artifact, installationId: 'inst-1', product: PRODUCT_ID, publicKeyPem: publicKey,
+      artifact: result.artifact, installationId: 'inst-1', product: PRODUCT_ID, publicKeyPem: publicKey, currentMachineId: 'machine-1',
     });
     expect(check.ok).toBe(true);
     expect(check.payload.licenseId).toBe(result.licenseId);
@@ -70,36 +73,47 @@ describe('issueLicense — produces an artifact the real backend verifier accept
 
   it('3. tampering with the artifact after issuing causes the real verifier to reject it', () => {
     const { publicKey, privateKey } = makeOwnerKeyPair();
-    const result = issueLicense({ installationId: 'inst-1', product: PRODUCT_ID }, privateKey);
+    const result = issueLicense({ installationId: 'inst-1', product: PRODUCT_ID, machineId: 'machine-1' }, privateKey);
     const tampered = result.artifact.slice(0, -2) + (result.artifact.slice(-2) === 'AA' ? 'BB' : 'AA');
 
     const check = verifyLicenseArtifact({
-      artifact: tampered, installationId: 'inst-1', product: PRODUCT_ID, publicKeyPem: publicKey,
+      artifact: tampered, installationId: 'inst-1', product: PRODUCT_ID, publicKeyPem: publicKey, currentMachineId: 'machine-1',
     });
     expect(check.ok).toBe(false);
   });
 
   it('4. issuing for a different installation produces an artifact rejected by that other installation\'s check', () => {
     const { publicKey, privateKey } = makeOwnerKeyPair();
-    const a = issueLicense({ installationId: 'inst-A', product: PRODUCT_ID }, privateKey);
-    const b = issueLicense({ installationId: 'inst-B', product: PRODUCT_ID }, privateKey);
+    const a = issueLicense({ installationId: 'inst-A', product: PRODUCT_ID, machineId: 'machine-1' }, privateKey);
+    const b = issueLicense({ installationId: 'inst-B', product: PRODUCT_ID, machineId: 'machine-1' }, privateKey);
     expect(a.artifact).not.toBe(b.artifact);
 
     const wrongInstallCheck = verifyLicenseArtifact({
-      artifact: a.artifact, installationId: 'inst-B', product: PRODUCT_ID, publicKeyPem: publicKey,
+      artifact: a.artifact, installationId: 'inst-B', product: PRODUCT_ID, publicKeyPem: publicKey, currentMachineId: 'machine-1',
     });
     expect(wrongInstallCheck.ok).toBe(false);
     expect(wrongInstallCheck.reason).toBe('wrong_installation');
   });
 
+  it('4b. issuing for a different machine produces an artifact rejected by that other machine\'s check', () => {
+    const { publicKey, privateKey } = makeOwnerKeyPair();
+    const result = issueLicense({ installationId: 'inst-1', product: PRODUCT_ID, machineId: 'machine-A' }, privateKey);
+
+    const wrongMachineCheck = verifyLicenseArtifact({
+      artifact: result.artifact, installationId: 'inst-1', product: PRODUCT_ID, publicKeyPem: publicKey, currentMachineId: 'machine-B',
+    });
+    expect(wrongMachineCheck.ok).toBe(false);
+    expect(wrongMachineCheck.reason).toBe('wrong_machine');
+  });
+
   it('5a. an expiring license is rejected once its expiry has passed', () => {
     const { publicKey, privateKey } = makeOwnerKeyPair();
     const result = issueLicense({
-      installationId: 'inst-1', product: PRODUCT_ID, expiresAt: Date.now() + 1000,
+      installationId: 'inst-1', product: PRODUCT_ID, machineId: 'machine-1', expiresAt: Date.now() + 1000,
     }, privateKey);
 
     const check = verifyLicenseArtifact({
-      artifact: result.artifact, installationId: 'inst-1', product: PRODUCT_ID, publicKeyPem: publicKey,
+      artifact: result.artifact, installationId: 'inst-1', product: PRODUCT_ID, publicKeyPem: publicKey, currentMachineId: 'machine-1',
       now: Date.now() + 2000,
     });
     expect(check.ok).toBe(false);
@@ -108,32 +122,39 @@ describe('issueLicense — produces an artifact the real backend verifier accept
 
   it('5b. a perpetual license (expiresAt: null) verifies indefinitely', () => {
     const { publicKey, privateKey } = makeOwnerKeyPair();
-    const result = issueLicense({ installationId: 'inst-1', product: PRODUCT_ID, expiresAt: null }, privateKey);
+    const result = issueLicense({
+      installationId: 'inst-1', product: PRODUCT_ID, machineId: 'machine-1', expiresAt: null,
+    }, privateKey);
     expect(result.expiresAt).toBeNull();
 
     const farFuture = Date.now() + 50 * 365 * 24 * 60 * 60 * 1000;
     const check = verifyLicenseArtifact({
-      artifact: result.artifact, installationId: 'inst-1', product: PRODUCT_ID, publicKeyPem: publicKey, now: farFuture,
+      artifact: result.artifact, installationId: 'inst-1', product: PRODUCT_ID, publicKeyPem: publicKey, currentMachineId: 'machine-1', now: farFuture,
     });
     expect(check.ok).toBe(true);
   });
 
   it('6. rejects a request with a missing installationId, never signs anything', () => {
     const { privateKey } = makeOwnerKeyPair();
-    expect(() => issueLicense({ installationId: '', product: PRODUCT_ID }, privateKey)).toThrow(/installationId/i);
+    expect(() => issueLicense({ installationId: '', product: PRODUCT_ID, machineId: 'machine-1' }, privateKey)).toThrow(/installationId/i);
   });
 
   it('6b. rejects a malformed private key with a clear error', () => {
-    expect(() => issueLicense({ installationId: 'inst-1', product: PRODUCT_ID }, 'not a real PEM key')).toThrow(/private key/i);
+    expect(() => issueLicense({ installationId: 'inst-1', product: PRODUCT_ID, machineId: 'machine-1' }, 'not a real PEM key')).toThrow(/private key/i);
+  });
+
+  it('6c. rejects a request with a missing machineId, never signs anything', () => {
+    const { privateKey } = makeOwnerKeyPair();
+    expect(() => issueLicense({ installationId: 'inst-1', product: PRODUCT_ID, machineId: '' }, privateKey)).toThrow(/machineId/i);
   });
 
   it('7. an artifact signed by the wrong (non-matching) keypair is rejected by the real verifier', () => {
     const owner = makeOwnerKeyPair();
     const impostor = makeOwnerKeyPair();
-    const result = issueLicense({ installationId: 'inst-1', product: PRODUCT_ID }, impostor.privateKey);
+    const result = issueLicense({ installationId: 'inst-1', product: PRODUCT_ID, machineId: 'machine-1' }, impostor.privateKey);
 
     const check = verifyLicenseArtifact({
-      artifact: result.artifact, installationId: 'inst-1', product: PRODUCT_ID, publicKeyPem: owner.publicKey,
+      artifact: result.artifact, installationId: 'inst-1', product: PRODUCT_ID, publicKeyPem: owner.publicKey, currentMachineId: 'machine-1',
     });
     expect(check.ok).toBe(false);
     expect(check.reason).toBe('invalid_signature');
@@ -142,11 +163,11 @@ describe('issueLicense — produces an artifact the real backend verifier accept
   it('features and notes round-trip through the real verifier', () => {
     const { publicKey, privateKey } = makeOwnerKeyPair();
     const result = issueLicense({
-      installationId: 'inst-1', product: PRODUCT_ID, features: ['reports', 'multi-branch'], notes: 'Al-Noor Tutoring Center',
+      installationId: 'inst-1', product: PRODUCT_ID, machineId: 'machine-1', features: ['reports', 'multi-branch'], notes: 'Al-Noor Tutoring Center',
     }, privateKey);
 
     const check = verifyLicenseArtifact({
-      artifact: result.artifact, installationId: 'inst-1', product: PRODUCT_ID, publicKeyPem: publicKey,
+      artifact: result.artifact, installationId: 'inst-1', product: PRODUCT_ID, publicKeyPem: publicKey, currentMachineId: 'machine-1',
     });
     expect(check.ok).toBe(true);
     expect(check.payload.features).toEqual(['reports', 'multi-branch']);
@@ -157,9 +178,9 @@ describe('issueLicense — produces an artifact the real backend verifier accept
 describe('structural proof the issuer output cannot be used as a normal login credential', () => {
   it('the issued result never contains an id/password/role — only license/installation metadata + the artifact', () => {
     const { privateKey } = makeOwnerKeyPair();
-    const result = issueLicense({ installationId: 'inst-1', product: PRODUCT_ID }, privateKey);
+    const result = issueLicense({ installationId: 'inst-1', product: PRODUCT_ID, machineId: 'machine-1' }, privateKey);
     expect(Object.keys(result).sort()).toEqual(
-      ['artifact', 'expiresAt', 'features', 'installationId', 'issuedAt', 'licenseId', 'notes', 'product'].sort()
+      ['artifact', 'expiresAt', 'features', 'installationId', 'issuedAt', 'licenseId', 'machineId', 'notes', 'product'].sort()
     );
     expect(result).not.toHaveProperty('id');
     expect(result).not.toHaveProperty('password');
@@ -191,7 +212,7 @@ describe('the issuer never exposes the private key through its normal CLI output
 
   it('issuing a real perpetual license never prints the PEM private key content', async () => {
     const { privateKey } = makeOwnerKeyPair();
-    const code = buildActivationRequestCode({ installationId: 'inst-1', product: PRODUCT_ID });
+    const code = buildActivationRequestCode({ installationId: 'inst-1', product: PRODUCT_ID, machineId: 'machine-1' });
     const { output, text } = collectOutput();
     // code, licenseId(blank), perpetual(blank=yes), features(blank), notes(blank), then exit
     const input = scriptedInput([code, '', '', '', '', '']);
@@ -206,7 +227,7 @@ describe('the issuer never exposes the private key through its normal CLI output
 
   it('issuing a real expiring license never prints the private key either', async () => {
     const { privateKey } = makeOwnerKeyPair();
-    const code = buildActivationRequestCode({ installationId: 'inst-1', product: PRODUCT_ID });
+    const code = buildActivationRequestCode({ installationId: 'inst-1', product: PRODUCT_ID, machineId: 'machine-1' });
     const { output, text } = collectOutput();
     // code, licenseId(blank), perpetual=n, days=30, features(blank), notes(blank), then exit
     const input = scriptedInput([code, '', 'n', '30', '', '', '']);

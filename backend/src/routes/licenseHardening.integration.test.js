@@ -9,6 +9,13 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vites
 import crypto from 'crypto';
 import { checkPostgresReachable, setupScratchDb, teardownScratchDb } from '../test-helpers/scratchDb.js';
 
+// Fixed, always-matching fake machine fingerprint — this file is about signature/revocation/
+// cross-key threat modeling, not machine binding itself (see the dedicated "Area 9 — machine
+// binding" describe below, and licenseMachineBinding.integration.test.js for the full
+// enforcement-pipeline proof with a genuinely DIFFERENT current machine).
+const TEST_MACHINE_ID = 'test-machine-fixed';
+vi.mock('../lib/machineIdentity.js', () => ({ computeCurrentMachineId: () => TEST_MACHINE_ID }));
+
 const dbCheck = await checkPostgresReachable();
 
 function makeKeyPair() {
@@ -40,6 +47,7 @@ describe('Licensing — Phase 5e hardening (real scratch database)', () => {
       licenseId: overrides.licenseId || `lic_${crypto.randomUUID()}`,
       product: overrides.product ?? PRODUCT_ID,
       installationId: overrides.installationId ?? installationId,
+      machineId: overrides.machineId ?? TEST_MACHINE_ID,
       issuedAt: overrides.issuedAt ?? now,
       expiresAt: overrides.expiresAt !== undefined ? overrides.expiresAt : now + 365 * 24 * 60 * 60 * 1000,
       features: overrides.features ?? null,
@@ -151,33 +159,35 @@ describe('Licensing — Phase 5e hardening (real scratch database)', () => {
     });
   });
 
-  describe('Area 9 — threat model: duplicated/cloned database (documented known limitation, not solved by this phase)', () => {
-    it('the exact same (artifact, installationId, publicKey) tuple verifies identically no matter how many "machines" present it — proof there is no per-machine binding', async () => {
-      // verifyLicenseArtifact is a pure function of its three inputs (no DB access, no
-      // machine identity of any kind) — see licenseArtifactFormat.js. A real database clone
-      // (e.g. restoring the same backup onto two machines) reproduces this exact tuple
-      // verbatim on both, so this pure-function proof is equivalent to — and far simpler
-      // than — spinning up a second live scratch database with copied rows.
+  describe('Area 9 — threat model: duplicated/cloned database — machine binding now closes this gap', () => {
+    it('the exact same (artifact, installationId, publicKey) tuple only verifies as valid on the machine it was actually bound to — a genuinely different current machine fingerprint is rejected (wrong_machine)', async () => {
+      // verifyLicenseArtifact is a pure function of its inputs (no DB access) — a real
+      // database clone (e.g. restoring the same backup onto two machines) reproduces this
+      // exact (artifact, installationId, publicKey) tuple verbatim on both, so this
+      // pure-function proof is equivalent to — and far simpler than — spinning up a second
+      // live scratch database with copied rows. See licenseMachineBinding.integration.test.js
+      // for the same proof exercised through the real DI-injected provider + requireActivation.
       const { verifyLicenseArtifact } = await import('../lib/licenseArtifactFormat.js');
       const installationId = crypto.randomUUID();
-      const artifact = buildSignedArtifact({ privateKeyPem: licensingKeyPair.privateKey, installationId });
-
-      const onMachineOne = verifyLicenseArtifact({
-        artifact, installationId, product: PRODUCT_ID, publicKeyPem: licensingKeyPair.publicKey,
+      const artifact = buildSignedArtifact({
+        privateKeyPem: licensingKeyPair.privateKey, installationId, overrides: { machineId: 'machine-ORIGINAL' },
       });
-      const onMachineTwo = verifyLicenseArtifact({
-        artifact, installationId, product: PRODUCT_ID, publicKeyPem: licensingKeyPair.publicKey,
-      });
-      expect(onMachineOne.ok).toBe(true);
-      expect(onMachineTwo.ok).toBe(true);
 
-      // KNOWN, ACCEPTED LIMITATION (documented, not a defect): this product deliberately
-      // implements no hardware fingerprinting and no online activation server (both
-      // explicitly excluded from Phase 5e's scope by the user). A byte-for-byte database
-      // clone — e.g. restoring the same backup onto two machines — is therefore
-      // indistinguishable from a single legitimate installation, and both will report
-      // activated. Preventing this would require exactly the two mechanisms this project
-      // has deliberately chosen not to build for a fully offline desktop product.
+      const onOriginalMachine = verifyLicenseArtifact({
+        artifact, installationId, product: PRODUCT_ID, publicKeyPem: licensingKeyPair.publicKey, currentMachineId: 'machine-ORIGINAL',
+      });
+      const onClonedMachine = verifyLicenseArtifact({
+        artifact, installationId, product: PRODUCT_ID, publicKeyPem: licensingKeyPair.publicKey, currentMachineId: 'machine-CLONED-COPY',
+      });
+      expect(onOriginalMachine.ok).toBe(true);
+      expect(onClonedMachine.ok).toBe(false);
+      expect(onClonedMachine.reason).toBe('wrong_machine');
+
+      // Previously a documented, accepted limitation (no hardware fingerprinting): a
+      // byte-for-byte database clone was indistinguishable from the original installation.
+      // Machine binding (the signed machineId field, checked against the CURRENT machine's
+      // Windows MachineGuid fingerprint on every verification) closes this — see
+      // machineIdentity.js and tools/LICENSING.md's "Machine binding" section.
     });
   });
 

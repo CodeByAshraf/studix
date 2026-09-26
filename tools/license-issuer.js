@@ -50,6 +50,7 @@ async function runInteractive({ input = process.stdin, output = process.stdout, 
     }
 
     output.write(`\nInstallation: ${requestInfo.installationId}\n`);
+    output.write(`Machine: ${requestInfo.machineId}\n`);
     output.write(`Product: ${requestInfo.product}\n\n`);
 
     const licenseIdInput = (await ask('License ID (blank to auto-generate):\n> ')).trim();
@@ -74,6 +75,7 @@ async function runInteractive({ input = process.stdin, output = process.stdout, 
         licenseId: licenseIdInput || undefined,
         installationId: requestInfo.installationId,
         product: requestInfo.product || PRODUCT_ID,
+        machineId: requestInfo.machineId,
         expiresAt,
         features: parseFeatures(featuresInput),
         notes: notesInput || null,

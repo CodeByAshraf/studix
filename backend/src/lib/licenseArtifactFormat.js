@@ -33,9 +33,15 @@ export const PRODUCT_ID = 'studix';
 // المالك لاحقاً (الأداة المُصدِرة — Phase 5d — تستخدمه، لا أي مسار تفعيل/تحقّق بالخادم).
 // اختياري تماماً: يُحذَف من الحمولة كلياً لو غائب/null، فلا يظهر مطلقاً في شهادات لا
 // تحمله — يحافظ هذا على التوافق الكامل مع كل شهادة/اختبار سابق لا يستخدم هذا الحقل.
-export function buildLicenseArtifactPayload({ licenseId, product, installationId, issuedAt, expiresAt = null, features = null, notes = null }) {
+//
+// machineId (v2, machine binding): بصمة الجهاز (SHA-256 لمعرّف Windows MachineGuid — انظر
+// lib/machineIdentity.js — لا القيمة الخام أبداً)، مُغطّاة بتوقيع Ed25519 مثل كل حقل آخر.
+// v تُرفَع إلى 2 لكل شهادة جديدة — لا يُصدر buildLicenseArtifactPayload شهادات v1 (القديمة،
+// بلا ربط جهاز) بعد الآن؛ shapes v1 تبقى مقبولة في parseLicenseArtifact فقط ليتسنى لـ
+// verifyLicenseArtifact رفضها لاحقاً بسبب مميّز (unbound_license) بدل خطأ تحليل عام.
+export function buildLicenseArtifactPayload({ licenseId, product, installationId, machineId, issuedAt, expiresAt = null, features = null, notes = null }) {
   const payloadObj = {
-    v: 1, licenseId, product, installationId, issuedAt,
+    v: 2, licenseId, product, installationId, machineId, issuedAt,
     expiresAt: expiresAt ?? null, features: features ?? null,
   };
   if (notes !== null && notes !== undefined) payloadObj.notes = notes;
@@ -46,6 +52,10 @@ export function buildLicenseArtifactPayload({ licenseId, product, installationId
 // base64url غير صالح، عدد أجزاء خاطئ، حقل ناقص/بنوع خاطئ، إصدار بروتوكول غير مدعوم) يُعيد
 // null صراحةً. expiresAt/features يُقبَلان null صراحةً (ترخيص دائم / بلا ميزات محدَّدة) —
 // أي قيمة أخرى غير الشكل المتوقَّع (رقم أو null / مصفوفة أو null على الترتيب) تُرفَض.
+//
+// v1/v2 كلاهما مقبولان هنا بنيوياً (شكلاً) — يُحسم أمر v1 (بلا ربط جهاز) لاحقاً في
+// verifyLicenseArtifact بسبب رفض مميّز (unbound_license)، لا هنا كـ "شكل غير صالح" عام؛
+// هذا يتيح تمييز "شهادة قديمة صحيحة التوقيع لكن غير مربوطة بجهاز" عن "شهادة تالفة فعلاً".
 export function parseLicenseArtifact(artifact) {
   if (typeof artifact !== 'string' || !artifact) return null;
   const parts = artifact.split('.');
@@ -60,7 +70,7 @@ export function parseLicenseArtifact(artifact) {
     return null;
   }
   if (
-    !payload || payload.v !== 1 ||
+    !payload || (payload.v !== 1 && payload.v !== 2) ||
     typeof payload.licenseId !== 'string' || !payload.licenseId ||
     typeof payload.product !== 'string' || !payload.product ||
     typeof payload.installationId !== 'string' || !payload.installationId ||
@@ -71,14 +81,18 @@ export function parseLicenseArtifact(artifact) {
   ) {
     return null;
   }
+  if (payload.v === 2 && !(typeof payload.machineId === 'string' && payload.machineId)) {
+    return null;
+  }
   return { payload, payloadB64, signatureB64 };
 }
 
 // verifyLicenseArtifact: دالة نقية بالكامل (بلا I/O) — تستقبل installationId/product/
-// publicKeyPem الفعليين (من القاعدة/الثوابت) بدل قراءتهما بنفسها، لتبقى قابلة للاختبار
-// مباشرة بلا Prisma/DB إطلاقاً. كل سبب رفض واضح في reason — لا "نجاح جزئي" ولا افتراض
-// أبداً: توقيع غير صالح، تثبيت خاطئ، منتج خاطئ، أو انتهاء الصلاحية كلها ترفض بوضوح متساوٍ.
-export function verifyLicenseArtifact({ artifact, installationId, product, publicKeyPem, now = Date.now() }) {
+// publicKeyPem/currentMachineId الفعليين (من القاعدة/الثوابت/مزوّد هوية الجهاز) بدل قراءتها
+// بنفسها، لتبقى قابلة للاختبار مباشرة بلا Prisma/DB/سجل Windows إطلاقاً. كل سبب رفض واضح في
+// reason — لا "نجاح جزئي" ولا افتراض أبداً: توقيع غير صالح، تثبيت خاطئ، منتج خاطئ، جهاز
+// خاطئ، أو انتهاء الصلاحية كلها ترفض بوضوح متساوٍ.
+export function verifyLicenseArtifact({ artifact, installationId, product, publicKeyPem, currentMachineId, now = Date.now() }) {
   const parsed = parseLicenseArtifact(artifact);
   if (!parsed) return { ok: false, reason: 'malformed_artifact', payload: null };
   const { payload, payloadB64, signatureB64 } = parsed;
@@ -109,6 +123,19 @@ export function verifyLicenseArtifact({ artifact, installationId, product, publi
   }
   if (!valid) return { ok: false, reason: 'invalid_signature', payload };
 
+  // ربط الجهاز (machineId) وفحص v1 القديم يُفحَصان بعد التوقيع عمداً — بالضبط نفس منطق فحص
+  // انتهاء الصلاحية أدناه: لا معنى للثقة بأي حقل من حمولة لم يُتحقَّق من صحّتها بعد. هذا
+  // الترتيب أساسي لسيناريو "machineId مُتلاعَب به" تحديداً: أي تعديل على الحمولة (بما فيها
+  // machineId نفسه) يُبطل التوقيع فيُرفَض بـ invalid_signature أولاً — لا يصل أبداً إلى
+  // مقارنة wrong_machine. شهادة v1 (قديمة، تسبق ربط الجهاز) قد تكون موقّعة بصحة تامة من
+  // نفس مفتاح المالك، فتُرفَض بسبب مميّز (unbound_license) يوضّح الحاجة لإعادة الإصدار، لا
+  // بخطأ تحليل عام. استنساخ قاعدة البيانات (نفس الشهادة الصحيحة، حرفياً، بلا أي تلاعب) على
+  // جهاز آخر يمرّ من فحص التوقيع بنجاح (الحمولة لم تتغيّر) ثم يُرفَض هنا بـ wrong_machine —
+  // هذا بالضبط السيناريو الذي يُغلِق الثغرة التي وثّقتها licenseHardening.integration.test.js
+  // سابقاً كقيد معروف غير محلول.
+  if (payload.v === 1) return { ok: false, reason: 'unbound_license', payload };
+  if (payload.machineId !== currentMachineId) return { ok: false, reason: 'wrong_machine', payload };
+
   // انتهاء الصلاحية يُفحَص بعد التوقيع عمداً — لا معنى للثقة بـ expiresAt من شهادة لم
   // يُتحقَّق من صحّتها بعد. expiresAt === null يعني ترخيصاً دائماً، يتخطّى هذا الفحص كلياً.
   if (payload.expiresAt !== null && payload.expiresAt < now) {
@@ -119,12 +146,18 @@ export function verifyLicenseArtifact({ artifact, installationId, product, publi
 }
 
 // buildActivationRequestCode/parseActivationRequestCode: رمز طلب التفعيل — معلوماتي بحت
-// (يُبلِّغ المالك بـ installationId/product ليعرف لأيّ تثبيت يُصدِر الترخيص)، غير موقَّع
-// (لا شيء يُثبِته بنفسه — ليس "تحدّياً" يُستهلَك كما في Support Access) وبلا انتهاء صلاحية
-// (إصدار عدّة شهادات ترخيص لنفس التثبيت بمرور الوقت — تجديد، إعادة تفعيل — أمر طبيعي
-// متوقَّع، لا إعادة استخدام يجب منعها).
-export function buildActivationRequestCode({ installationId, product }) {
-  const payload = JSON.stringify({ v: 1, installationId, product });
+// (يُبلِّغ المالك بـ installationId/product/machineId ليعرف لأيّ تثبيت وجهاز يُصدِر
+// الترخيص)، غير موقَّع (لا شيء يُثبِته بنفسه — ليس "تحدّياً" يُستهلَك كما في Support Access)
+// وبلا انتهاء صلاحية (إصدار عدّة شهادات ترخيص لنفس التثبيت بمرور الوقت — تجديد، إعادة
+// تفعيل — أمر طبيعي متوقَّع، لا إعادة استخدام يجب منعها).
+//
+// machineId (v2، ربط الجهاز): الحاسوب الوحيد القادر على حساب بصمته هو الجهاز نفسه وقت
+// توليد الرمز (lib/machineIdentity.js عبر lib/license.js's requestActivationCode) — يُحمَل
+// هنا فقط لينقله العميل للمالك؛ لا يُتحقَّق منه محلياً هنا إطلاقاً. v رُفعت إلى 2: رمز v1
+// قديم (يسبق ربط الجهاز) يُرفَض الآن صراحة (null) — يفرض توليد رمز جديد من التطبيق الحالي،
+// بدل قبوله وترك المُصدِر يُصدر ترخيصاً بلا ربط جهاز عن غير قصد.
+export function buildActivationRequestCode({ installationId, product, machineId }) {
+  const payload = JSON.stringify({ v: 2, installationId, product, machineId });
   return Buffer.from(payload, 'utf8').toString('base64url');
 }
 
@@ -137,9 +170,10 @@ export function parseActivationRequestCode(code) {
     return null;
   }
   if (
-    !payload || payload.v !== 1 ||
+    !payload || payload.v !== 2 ||
     typeof payload.installationId !== 'string' || !payload.installationId ||
-    typeof payload.product !== 'string' || !payload.product
+    typeof payload.product !== 'string' || !payload.product ||
+    typeof payload.machineId !== 'string' || !payload.machineId
   ) {
     return null;
   }

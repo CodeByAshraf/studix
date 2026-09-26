@@ -15,9 +15,16 @@
 // Sequenced deliberately: the "fresh empty database requires activation" case runs FIRST,
 // before any row has ever been seeded, then the "restore recognizes a previously-activated
 // license" case runs second, using the same connection.
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import crypto from 'crypto';
 import { checkPostgresReachable, setupScratchDb, teardownScratchDb } from '../test-helpers/scratchDb.js';
+
+// Fixed, always-matching fake machine fingerprint — this file is about backup/restore of
+// the SAME machine's data (see licenseMachineBinding.integration.test.js for the dedicated
+// different-machine proof), and machineId is not a stored/backed-up DB column at all (see
+// machineIdentity.js's header) so nothing here needs to vary it.
+const TEST_MACHINE_ID = 'test-machine-fixed';
+vi.mock('./machineIdentity.js', () => ({ computeCurrentMachineId: () => TEST_MACHINE_ID }));
 
 const dbCheck = await checkPostgresReachable();
 
@@ -46,7 +53,7 @@ describe('Licensing backup/restore behavior — Phase 5e Area 3 (real scratch da
   function buildSignedArtifact({ installationId }) {
     const now = Date.now();
     const payloadB64 = buildLicenseArtifactPayload({
-      licenseId: `lic_${crypto.randomUUID()}`, product: PRODUCT_ID, installationId,
+      licenseId: `lic_${crypto.randomUUID()}`, product: PRODUCT_ID, installationId, machineId: TEST_MACHINE_ID,
       issuedAt: now, expiresAt: now + 365 * 24 * 60 * 60 * 1000, features: null,
     });
     return `${payloadB64}.${signPayload(owner.privateKey, payloadB64)}`;

@@ -25,6 +25,24 @@ import { ensureInstallationConfig } from './supportAccess.js';
 import {
   PRODUCT_ID, buildActivationRequestCode, verifyLicenseArtifact, parseLicenseArtifact,
 } from './licenseArtifactFormat.js';
+import { computeCurrentMachineId, MachineIdentityError } from './machineIdentity.js';
+
+// resolveCurrentMachineId: the one place license.js turns "ask the platform for the current
+// machine fingerprint" into a licensing-domain result — MachineIdentityError (registry
+// unreadable, malformed value, unsupported platform) is caught here and turned into the
+// same fail-closed shape every other rejection reason already uses, never propagated as an
+// uncaught exception and never silently treated as "skip the machine check." The
+// `machineIdentity` parameter is the sole injection seam tests use to simulate a specific
+// machine (see licenseMachineBinding.integration.test.js) — production callers never pass
+// it, defaulting to the real Windows provider.
+function resolveCurrentMachineId(machineIdentity) {
+  try {
+    return { ok: true, machineId: machineIdentity() };
+  } catch (err) {
+    if (err instanceof MachineIdentityError) return { ok: false };
+    throw err;
+  }
+}
 
 function conflict(message) {
   const err = new Error(message);
@@ -93,7 +111,7 @@ export async function ensureLicenseConfig() {
 // التوقيع/الارتباط/الانتهاء)، لا يثق أبداً بـ activated_at/expires_at/features المخزَّنة
 // وحدها كسلطة. غياب المفتاح العام أو الـ artifact، أو فشل التحقق لأي سبب، كلها تُعامَل
 // كـ "غير مُفعَّل" (فشل مغلَق) — لا حالة وسطى، لا "نجاح افتراضي".
-export async function getLicenseStatus() {
+export async function getLicenseStatus({ machineIdentity = computeCurrentMachineId } = {}) {
   const config = await ensureLicenseConfig();
 
   if (!config.licensing_public_key) {
@@ -104,6 +122,15 @@ export async function getLicenseStatus() {
   }
 
   const installation = await ensureInstallationConfig();
+
+  // هوية الجهاز الحالي تُحسَب محلياً من هذه الآلة نفسها في كل استدعاء — أبداً لا تُقرأ أو
+  // تُقارَن من عمود مخزَّن في PostgreSQL (لا يوجد أصلاً عمود كهذا — انظر machineIdentity.js).
+  // فشل القراءة (سجل غير قابل للقراءة، منصّة غير مدعومة...) يُحجَب فوراً بسبب مميّز، قبل أي
+  // محاولة تحقّق أخرى — فشل مغلَق، لا تخطٍّ صامت لفحص الجهاز.
+  const machineIdResult = resolveCurrentMachineId(machineIdentity);
+  if (!machineIdResult.ok) {
+    return { activated: false, reason: 'machine_identity_unavailable', payload: null };
+  }
 
   // فحص التراجع يحدث قبل التحقّق الكامل من التوقيع عمداً — لكن قرار الحجب يُطبَّق فقط لو
   // كانت الشهادة المخزَّنة (لو أمكن تحليلها) ترخيصاً محدود المدّة فعلاً (expiresAt ليست
@@ -120,6 +147,7 @@ export async function getLicenseStatus() {
     installationId: installation.installation_id,
     product: PRODUCT_ID,
     publicKeyPem: config.licensing_public_key,
+    currentMachineId: machineIdResult.machineId,
     now: clockCheck.now,
   });
 
@@ -138,12 +166,22 @@ export async function getLicenseStatus() {
   };
 }
 
-// requestActivationCode: يبني رمز طلب التفعيل المرتبط بهذا التثبيت تحديداً (لا يحتاج مفتاحاً
-// عاماً مُهيَّأ — هذا الرمز لا يُتحقَّق منه محلياً إطلاقاً، فقط يُرسَل للمالك).
-export async function requestActivationCode() {
+// requestActivationCode: يبني رمز طلب التفعيل المرتبط بهذا التثبيت وهذا الجهاز تحديداً (لا
+// يحتاج مفتاحاً عاماً مُهيَّأ — هذا الرمز لا يُتحقَّق منه محلياً إطلاقاً، فقط يُرسَل للمالك
+// ليضمّن machineId في الشهادة الموقَّعة التي سيُصدرها). فشل قراءة هوية الجهاز يمنع توليد
+// الرمز من الأساس — لا رمز بلا ربط جهاز صالح يمكن تسليمه للمُصدِر.
+export async function requestActivationCode({ machineIdentity = computeCurrentMachineId } = {}) {
   const installation = await ensureInstallationConfig();
-  const code = buildActivationRequestCode({ installationId: installation.installation_id, product: PRODUCT_ID });
-  return { code, installationId: installation.installation_id, product: PRODUCT_ID };
+  const machineIdResult = resolveCurrentMachineId(machineIdentity);
+  if (!machineIdResult.ok) {
+    throw conflict('تعذّر تحديد هوية هذا الجهاز — لا يمكن توليد رمز طلب تفعيل بدونها.');
+  }
+  const code = buildActivationRequestCode({
+    installationId: installation.installation_id, product: PRODUCT_ID, machineId: machineIdResult.machineId,
+  });
+  return {
+    code, installationId: installation.installation_id, product: PRODUCT_ID, machineId: machineIdResult.machineId,
+  };
 }
 
 // verifyAndActivateLicense: يتحقق من {artifact}، يُعيد {ok:false, reason} دون أي كتابة لأي
@@ -151,15 +189,21 @@ export async function requestActivationCode() {
 // مستوى القاعدة، لكن هذا يمنعه أصلاً قبل أي محاولة كتابة). النجاح يكتب license_artifact +
 // الحقول المشتقّة معاً في معاملة واحدة ضمنية (تحديث صفّ واحد) — كل حقل مشتقّ يُقرأ حرفياً
 // من check.payload المُتحقَّق منه فعلياً، لا مما أرسله العميل مباشرة.
-export async function verifyAndActivateLicense({ artifact }) {
+export async function verifyAndActivateLicense({ artifact }, { machineIdentity = computeCurrentMachineId } = {}) {
   const config = await ensureLicenseConfig();
   if (!config.licensing_public_key) {
     throw conflict('التفعيل غير مُهيَّأ على هذا التثبيت — لا يوجد مفتاح عام مسجَّل بعد.');
   }
 
+  const machineIdResult = resolveCurrentMachineId(machineIdentity);
+  if (!machineIdResult.ok) {
+    return { ok: false, reason: 'machine_identity_unavailable' };
+  }
+
   const installation = await ensureInstallationConfig();
   const check = verifyLicenseArtifact({
     artifact, installationId: installation.installation_id, product: PRODUCT_ID, publicKeyPem: config.licensing_public_key,
+    currentMachineId: machineIdResult.machineId,
   });
 
   if (!check.ok) {

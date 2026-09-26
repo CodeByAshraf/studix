@@ -5,10 +5,16 @@
 // (setupScratchDb, unmodified) — studix الحقيقية لا تُلمَس بأي خطوة هنا. The "issuer" step
 // imports tools/lib/licenseIssuing.js directly (relative path out of backend/ into tools/)
 // — the exact same offline tool an owner would run, not a re-implementation of it.
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import crypto from 'crypto';
 import { checkPostgresReachable, setupScratchDb, teardownScratchDb } from '../test-helpers/scratchDb.js';
 import { issueLicense } from '../../../tools/lib/licenseIssuing.js';
+
+// Fixed, always-matching fake machine fingerprint — this file proves the request-code ->
+// offline-issuer -> activate round trip end to end; a genuinely different current machine
+// is exercised separately in licenseMachineBinding.integration.test.js.
+const TEST_MACHINE_ID = 'test-machine-fixed';
+vi.mock('../lib/machineIdentity.js', () => ({ computeCurrentMachineId: () => TEST_MACHINE_ID }));
 
 const dbCheck = await checkPostgresReachable();
 
@@ -66,7 +72,7 @@ describe('License Issuer — end-to-end (real scratch database)', () => {
     //    tools/lib/licenseIssuing.js — the exact same module the real
     //    tools/license-issuer.js CLI uses
     const issued = issueLicense({
-      installationId: requestInfo.installationId, product: requestInfo.product,
+      installationId: requestInfo.installationId, product: requestInfo.product, machineId: requestInfo.machineId,
     }, owner.privateKey);
     expect(issued.expiresAt).toBeNull();
 
@@ -87,7 +93,7 @@ describe('License Issuer — end-to-end (real scratch database)', () => {
     const requestInfo = await requestActivationCode();
 
     const issued = issueLicense({
-      installationId: requestInfo.installationId, product: requestInfo.product, expiresAt: Date.now() + 500,
+      installationId: requestInfo.installationId, product: requestInfo.product, machineId: requestInfo.machineId, expiresAt: Date.now() + 500,
     }, owner.privateKey);
 
     const result = await verifyAndActivateLicense({ artifact: issued.artifact });
@@ -105,7 +111,7 @@ describe('License Issuer — end-to-end (real scratch database)', () => {
     await seedLicenseConfig();
 
     const issued = issueLicense({
-      installationId: 'some-other-installation-entirely', product: PRODUCT_ID,
+      installationId: 'some-other-installation-entirely', product: PRODUCT_ID, machineId: TEST_MACHINE_ID,
     }, owner.privateKey);
 
     const result = await verifyAndActivateLicense({ artifact: issued.artifact });
@@ -118,7 +124,9 @@ describe('License Issuer — end-to-end (real scratch database)', () => {
     await seedInstallation();
     await seedLicenseConfig();
     const requestInfo = await requestActivationCode();
-    const issued = issueLicense({ installationId: requestInfo.installationId, product: requestInfo.product }, owner.privateKey);
+    const issued = issueLicense({
+      installationId: requestInfo.installationId, product: requestInfo.product, machineId: requestInfo.machineId,
+    }, owner.privateKey);
     const tampered = issued.artifact.slice(0, -2) + (issued.artifact.slice(-2) === 'AA' ? 'BB' : 'AA');
 
     const result = await verifyAndActivateLicense({ artifact: tampered });
@@ -130,7 +138,9 @@ describe('License Issuer — end-to-end (real scratch database)', () => {
     await seedLicenseConfig(); // configured with owner.publicKey
     const requestInfo = await requestActivationCode();
 
-    const issued = issueLicense({ installationId: requestInfo.installationId, product: requestInfo.product }, impostor.privateKey);
+    const issued = issueLicense({
+      installationId: requestInfo.installationId, product: requestInfo.product, machineId: requestInfo.machineId,
+    }, impostor.privateKey);
 
     const result = await verifyAndActivateLicense({ artifact: issued.artifact });
     expect(result.ok).toBe(false);

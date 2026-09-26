@@ -49,6 +49,7 @@ const ACTIVATED_STATUS = { ok: true, activated: true, reason: null, licenseId: '
 const NOT_ACTIVATED_STATUS = { ok: true, activated: false, reason: 'not_activated' };
 const EXPIRED_STATUS = { ok: true, activated: false, reason: 'expired' };
 const CLOCK_ROLLBACK_STATUS = { ok: true, activated: false, reason: 'clock_rollback_detected' };
+const WRONG_MACHINE_STATUS = { ok: true, activated: false, reason: 'wrong_machine' };
 
 describe('ActivationGate', () => {
   beforeEach(() => {
@@ -98,6 +99,14 @@ describe('ActivationGate', () => {
       renderGate();
       expect(await screen.findByText('تفعيل Studix')).toBeInTheDocument();
       expect(screen.getByText(/تراجع واضح في ساعة النظام/)).toBeInTheDocument();
+    });
+
+    it('machine binding: shows the activation gate with the wrong_machine reason', async () => {
+      loginSession(ADMIN);
+      pgGetLicenseStatus.mockResolvedValue(WRONG_MACHINE_STATUS);
+      renderGate();
+      expect(await screen.findByText('تفعيل Studix')).toBeInTheDocument();
+      expect(screen.getByText(/مرتبطة بجهاز مختلف/)).toBeInTheDocument();
     });
 
     it('non-admin: shows the restricted message, not the interactive form', async () => {

@@ -15,6 +15,14 @@ import { checkPostgresReachable, setupScratchDb, teardownScratchDb } from '../te
 
 process.env.SESSION_SECRET = process.env.SESSION_SECRET || 'studix-test-session-secret-not-for-production';
 
+// This file is not about machine binding — it exercises every OTHER dimension (expiry,
+// installation binding, tampering, auth, ...). A fixed, always-matching fake machine
+// fingerprint keeps that coverage exactly as before, without ever touching the real Windows
+// registry (see licenseMachineBinding.integration.test.js for the dedicated Machine A/B
+// enforcement proof, which injects a DIFFERENT value on purpose instead of mocking this).
+const TEST_MACHINE_ID = 'test-machine-fixed';
+vi.mock('../lib/machineIdentity.js', () => ({ computeCurrentMachineId: () => TEST_MACHINE_ID }));
+
 const dbCheck = await checkPostgresReachable();
 
 function makeOwnerKeyPair() {
@@ -54,6 +62,7 @@ describe('Licensing — Phase 5b backend core (real scratch database)', () => {
       licenseId: overrides.licenseId || `lic_${crypto.randomUUID()}`,
       product: overrides.product ?? PRODUCT_ID,
       installationId: overrides.installationId ?? installationId,
+      machineId: overrides.machineId ?? TEST_MACHINE_ID,
       issuedAt: overrides.issuedAt ?? now,
       expiresAt: overrides.expiresAt !== undefined ? overrides.expiresAt : now + 365 * 24 * 60 * 60 * 1000,
       features: overrides.features ?? null,
@@ -113,11 +122,12 @@ describe('Licensing — Phase 5b backend core (real scratch database)', () => {
   }
 
   describe('requestActivationCode / requestLicenseActivationCode — installation binding', () => {
-    it('the activation request code is bound to this installation\'s real installation_id', async () => {
+    it('the activation request code is bound to this installation\'s real installation_id and the current machine fingerprint', async () => {
       const installation = await seedInstallation();
       const result = await requestActivationCode();
       expect(result.installationId).toBe(installation.installation_id);
       expect(result.product).toBe(PRODUCT_ID);
+      expect(result.machineId).toBe(TEST_MACHINE_ID);
     });
 
     it('does not require licensing_public_key to be configured (a request code is never verified locally)', async () => {

@@ -28,6 +28,7 @@ export function parseCustomerRequestCode(code) {
 const REASON_MESSAGES = {
   missing_installation_id: 'installationId is required to issue a license.',
   missing_product: 'product is required to issue a license.',
+  missing_machine_id: 'machineId is required to issue a license — ask the customer to regenerate their Activation Request Code from a version of the app that supports machine binding.',
   bad_private_key: 'Could not load the private key — the file does not contain a valid Ed25519 private key in PEM format.',
 };
 
@@ -42,11 +43,19 @@ function rejectionError(reason) {
 // imported — not duplicated), signs the payloadB64 bytes with Ed25519, and returns the
 // self-contained artifact string ("<payloadB64>.<signatureB64>") ready to hand back to the
 // customer. Supports both perpetual (expiresAt: null/omitted) and expiring licenses.
+//
+// machineId (machine binding): comes from the customer's Activation Request Code (decoded
+// by parseCustomerRequestCode, computed on THEIR machine — this tool never computes or
+// guesses it) and is embedded verbatim into the signed payload, exactly like
+// installationId already is. Required — a license issued without it would be rejected by
+// the backend's own verifier anyway (unbound_license/malformed), so this tool fails fast
+// with a clear message instead of producing a certificate no customer can actually use.
 export function issueLicense({
-  licenseId, installationId, product = PRODUCT_ID, expiresAt = null, features = null, notes = null,
+  licenseId, installationId, product = PRODUCT_ID, machineId, expiresAt = null, features = null, notes = null,
 }, privateKeyPem) {
   if (!installationId) throw rejectionError('missing_installation_id');
   if (!product) throw rejectionError('missing_product');
+  if (!machineId) throw rejectionError('missing_machine_id');
 
   let privateKey;
   try {
@@ -58,7 +67,7 @@ export function issueLicense({
   const finalLicenseId = licenseId || `lic_${crypto.randomUUID()}`;
   const issuedAt = Date.now();
   const payloadB64 = buildLicenseArtifactPayload({
-    licenseId: finalLicenseId, product, installationId, issuedAt, expiresAt, features, notes,
+    licenseId: finalLicenseId, product, installationId, machineId, issuedAt, expiresAt, features, notes,
   });
   const signature = crypto.sign(null, Buffer.from(payloadB64, 'utf8'), privateKey);
   const artifact = `${payloadB64}.${signature.toString('base64url')}`;
@@ -67,6 +76,7 @@ export function issueLicense({
     artifact,
     licenseId: finalLicenseId,
     installationId,
+    machineId,
     product,
     issuedAt,
     expiresAt: expiresAt ?? null,

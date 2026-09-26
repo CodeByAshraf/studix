@@ -4,9 +4,14 @@
 // هنا. This is a DETERRENT, not a cryptographic guarantee — see license.js's own header
 // comment for the full, honest limitation statement; these tests prove the deterrent works
 // as designed, not that it is unbreakable.
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import crypto from 'crypto';
 import { checkPostgresReachable, setupScratchDb, teardownScratchDb } from '../test-helpers/scratchDb.js';
+
+// Fixed, always-matching fake machine fingerprint — this file is about clock-rollback
+// mitigation, not machine binding (see licenseMachineBinding.integration.test.js for that).
+const TEST_MACHINE_ID = 'test-machine-fixed';
+vi.mock('./machineIdentity.js', () => ({ computeCurrentMachineId: () => TEST_MACHINE_ID }));
 
 const dbCheck = await checkPostgresReachable();
 
@@ -38,6 +43,7 @@ describe('Licensing clock-rollback mitigation — Phase 5e (real scratch databas
       licenseId: overrides.licenseId || `lic_${crypto.randomUUID()}`,
       product: 'studix',
       installationId,
+      machineId: overrides.machineId ?? TEST_MACHINE_ID,
       issuedAt: overrides.issuedAt ?? now,
       expiresAt: overrides.expiresAt !== undefined ? overrides.expiresAt : now + 365 * 24 * 60 * 60 * 1000,
       features: null,
