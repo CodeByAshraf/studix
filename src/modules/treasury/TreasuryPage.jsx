@@ -928,7 +928,9 @@ export default function TreasuryPage() {
               </select>
             </Field>
             <Field label="الرصيد الافتتاحي" error={cbErrors.openingBalance}>
+              {/* P2-1: الرصيد الافتتاحي ثابت بعد الإنشاء (الخادم يرفض تغييره) — تُصحَّح الأرصدة بحركة تسوية */}
               <input type="number" min="0" value={cbForm.openingBalance} onChange={e=>setCbForm(p=>({...p,openingBalance:Number(e.target.value)}))}
+                disabled={!!cbModal.cb} title={cbModal.cb ? 'لا يمكن تعديل الرصيد الافتتاحي بعد إنشاء الخزنة — سجّل حركة تسوية بدلاً من ذلك.' : undefined}
                 style={{...BASE_INP, borderColor:cbErrors.openingBalance?'var(--red)':'var(--border)'}} onFocus={F_ON} onBlur={F_OFF}/>
             </Field>
           </div>

@@ -12,6 +12,7 @@ import { asyncHandler } from '../middleware/errorHandler.js';
 import { snakeToCamel, camelToSnake } from '../lib/caseMapper.js';
 import { setPrimaryGroupTx, withdrawEnrollmentTx, findActivePrimary } from '../lib/enrollmentService.js';
 import { runInTransaction } from '../lib/transaction.js';
+import { enforceCreatePolicy } from './crudPolicies.js';
 
 // حقول يديرها الخادم/القاعدة دائماً — تُتجاهَل أي قيمة يرسلها العميل لها
 const SERVER_MANAGED_FIELDS = new Set(['id', 'created_at', 'updated_at']);
@@ -73,7 +74,9 @@ export function prepareWriteData(modelName, body) {
  *   لا يُغيَّر السلوك الافتراضي لأي model آخر.
  */
 export function makeCrudRouter(modelName, opts = {}) {
-  const { writable = false, preserveClientId = false } = opts;
+  // policy (P2-1): the collection's domain-rule policy from crudPolicies.js (blocked methods,
+  // create-field whitelist, update validation) — undefined keeps the plain generic behavior.
+  const { writable = false, preserveClientId = false, policy } = opts;
   const router = Router();
   const model = prisma[modelName];
   const modelFields = getModelFields(modelName);
@@ -113,9 +116,14 @@ export function makeCrudRouter(modelName, opts = {}) {
     return router;
   }
 
+  // P2-1 — a method the policy blocks answers 405 before any database access.
+  const blockedBy = (message) => (req, res) => res.status(405).json({ ok: false, error: message });
+
   // POST / — إنشاء
+  if (policy?.blockCreate) router.post('/', blockedBy(policy.blockCreate));
   router.post('/', asyncHandler(async (req, res) => {
     const { data, fields } = prepareWriteData(modelName, req.body);
+    enforceCreatePolicy(policy, data);
     const idField = fields.find((f) => f.isId);
     // نولّد id فقط لو العمود بلا default في القاعدة (لا identity/autoincrement)
     if (idField && !idField.hasDefaultValue) {
@@ -178,13 +186,22 @@ export function makeCrudRouter(modelName, opts = {}) {
       throw err;
     }
 
+    if (policy?.validateUpdate) {
+      await policy.validateUpdate({ id: parsed.id, data, db: prisma });
+    }
+
     const row = await model.update({ where: { id: parsed.id }, data });
     res.json({ ok: true, data: serializeBigInt(snakeToCamel(row)) });
   });
+  if (policy?.blockUpdate) {
+    router.put('/:id', blockedBy(policy.blockUpdate));
+    router.patch('/:id', blockedBy(policy.blockUpdate));
+  }
   router.put('/:id', updateHandler);
   router.patch('/:id', updateHandler);
 
   // DELETE /:id
+  if (policy?.blockDelete) router.delete('/:id', blockedBy(policy.blockDelete));
   router.delete('/:id', asyncHandler(async (req, res) => {
     const parsed = parseIdParam(modelFields, req.params.id);
     if (parsed.error) return res.status(400).json({ ok: false, error: parsed.error });

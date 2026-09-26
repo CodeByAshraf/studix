@@ -221,4 +221,28 @@ describe('TreasuryPage — cashboxes (Phase 3B-14A — generic CRUD, client id p
 
     expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
   });
+
+  // P2-1 — the server refuses a retroactive opening-balance change (409); the edit form makes
+  // that visible up front instead of letting the user type a value that will be rejected.
+  it('the opening balance is editable when adding a cashbox', async () => {
+    seedStore();
+    renderPage();
+    await openManageTab();
+    fireEvent.click(screen.getByText('+ إضافة خزنة'));
+    expect(screen.getByRole('spinbutton')).not.toBeDisabled();
+  });
+
+  it('the opening balance is locked when editing an existing cashbox, and the PUT re-sends the unchanged value', async () => {
+    seedStore({ cashboxes: [EXISTING_CB] });
+    renderPage();
+    await openManageTab();
+    fireEvent.click(screen.getByText('✎ تعديل'));
+    const opening = screen.getByRole('spinbutton');
+    expect(opening).toBeDisabled();
+    expect(opening).toHaveValue(500);
+
+    fireEvent.click(screen.getByText('💾 حفظ'));
+    await waitFor(() => expect(putCalls()).toHaveLength(1));
+    expect(JSON.parse(putCalls()[0][1].body).openingBalance).toBe(500);
+  });
 });

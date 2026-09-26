@@ -67,6 +67,7 @@ import dbSwitchRouter from './routes/dbSwitch.js';
 import dbIdentityRouter from './routes/dbIdentity.js';
 import backupStatusRouter from './routes/backupStatus.js';
 import { COLLECTION_MODELS } from './routes/collections.js';
+import { CRUD_POLICIES } from './routes/crudPolicies.js';
 import { notFound, errorHandler } from './middleware/errorHandler.js';
 import { requireAuth, requireRole } from './middleware/auth.js';
 import { requirePermission } from './middleware/permissions.js';
@@ -427,7 +428,9 @@ for (const [apiPath, modelName] of Object.entries(COLLECTION_MODELS)) {
     const preserveClientId = PRESERVE_CLIENT_ID_COLLECTIONS.has(apiPath);
     const pageId = COLLECTION_PERMISSIONS[apiPath];
     const guards = pageId ? [requireAuth, requirePermission(pageId)] : [requireAuth];
-    app.use(`/api/${apiPath}`, ...guards, makeCrudRouter(modelName, { writable, preserveClientId }));
+    // P2-1 — domain-rule policy (crudPolicies.js): generic CRUD never bypasses a dedicated API.
+    const policy = CRUD_POLICIES[apiPath];
+    app.use(`/api/${apiPath}`, ...guards, makeCrudRouter(modelName, { writable, preserveClientId, policy }));
     activated.push(`${apiPath}${writable ? '' : ' (read-only)'}${pageId ? ` (permission: ${pageId})` : ' (⚠ no permission mapped)'}`);
   } else {
     skipped.push(apiPath);
