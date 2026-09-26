@@ -18,7 +18,8 @@ Studix's Licensing mechanism (see `backend/src/lib/licenseArtifactFormat.js` and
 approved Phase 5 investigation report) is the same asymmetric, offline pattern already
 proven by Support Access: the owner signs a structured license document with a private key
 that never leaves the owner's machine, and the customer's app verifies that signature
-against a public key it already has. Two tools live here:
+against the public key built into the Studix release it is running (see "The trust-anchor
+model" below). Two tools live here:
 
 - **`license-issuer.js`** — the day-to-day tool. Paste in a customer's Activation Request
   Code, answer a few questions about the license terms, get back the License Artifact to
@@ -57,19 +58,43 @@ never logged), and saves/prints the **public** key (safe to share). If a private
 already exists at that location, the command refuses to run unless you pass `--force` —
 see "If you suspect the private key is compromised" below.
 
-## Installing (provisioning) the public key into a customer installation
+## The trust-anchor model
 
-Each customer's local Studix database has a `license_config` table (Phase 5a) with a
-`licensing_public_key` column — empty by default. A customer's Activate screen refuses to
-verify any license at all until that column holds your public key (fail-closed by design).
+Three different things are involved — keep them distinct:
 
-Getting the public key from `license-keygen.js`'s output into that column for a specific
-customer's database is an operational step, not automated by any tool in this repository —
-Phase 5d intentionally does not add a network/API provisioning path (see the Scope
-Boundary note in the Phase 5d report). Today that means running a one-time update against
-that customer's local Postgres (e.g. via `psql` or Prisma Studio) with the public key PEM
-you generated. A smoother provisioning flow (e.g. as part of the installer) is a reasonable
-future improvement, out of scope here.
+- **Private signing key** (`license-private-key.pem`) — yours alone. Lives only in your
+  owner-controlled directory; never shipped with Studix, never in the installer, never in
+  the Studix source tree, and never stored in any Studix database.
+- **Release public trust anchor** — your licensing **public** key, built into each Studix
+  release (`backend/src/lib/licensingTrustAnchor.js`, together with its SHA-256
+  fingerprint). This is the authoritative verification key: every license is verified
+  against it.
+- **Database value** (`license_config.licensing_public_key`) — a copy of the release's key,
+  written by the installer. It is not an independent source of trust: the app uses it only
+  when it is the same key the release carries.
+
+### Provisioning is automatic
+
+- **Fresh installation:** the installer writes the release's public key into
+  `license_config` as part of installation. There is no `psql` step and nothing to do per
+  customer before their first activation.
+- **Upgrade / re-running the installer:** the same step runs again. If the key is already
+  correct, nothing changes; an existing activation and all other data are never touched —
+  only the key value itself.
+- **Missing, unreadable, or mismatched key:** the app refuses to use it — the Activate screen
+  reports that the licensing key does not match this Studix version (reason
+  `trust_anchor_mismatch`) and activation is refused. Re-running the installer restores the
+  release's key. Never "fix" this by editing the key in the database: a hand-edited key is
+  simply not trusted, so it cannot be used to make a license signed with a different key
+  verify.
+
+To confirm which key a release trusts, compare the release's recorded fingerprint
+(`EXPECTED_LICENSING_PUBLIC_KEY_SHA256` in `licensingTrustAnchor.js`) with your own key
+file's SHA-256 (of its DER-encoded public key):
+
+```
+node -e "const c=require('crypto');const k=c.createPublicKey(require('fs').readFileSync(process.argv[1],'utf8'));console.log(c.createHash('sha256').update(k.export({type:'spki',format:'der'})).digest('hex'))" "<path to license-public-key.pem>"
+```
 
 ## Machine binding
 
@@ -167,7 +192,8 @@ The Activate screen always tells the customer exactly which of these applies via
 
 - Treat `license-private-key.pem` exactly like a root password or a signing certificate: it
   is the **only** thing standing between "anyone" and "only the real software owner" being
-  able to issue a valid license for any installation that has your public key.
+  able to issue a valid license for any Studix installation (every release trusts your
+  public key).
 - Back it up to an encrypted location you control — losing it is unrecoverable for future
   licenses (see below).
 - Never email it, paste it into chat, commit it to any repository, copy it onto a
@@ -177,21 +203,35 @@ The Activate screen always tells the customer exactly which of these applies via
 
 ## If you lose the private key
 
-There is no recovery. You can no longer issue new licenses that any already-provisioned
-customer installation will accept — you would need to generate a new keypair
-(`license-keygen.js --force`) and re-provision the new public key to each customer
-installation (see "Installing the public key" above). Already-activated installations keep
-working normally; this only affects *future* license issuance.
+There is no recovery. No current Studix release will accept a license you sign with any
+other key. You would need to generate a new keypair (`license-keygen.js --force`) and follow
+"Rotating the licensing key" below. Installations stay activated with their existing license
+until they install the release that carries the new key — from then on that old license no
+longer verifies, and each customer needs a newly issued one.
 
 ## If you suspect the private key is compromised
 
+Follow "Rotating the licensing key" below. There is nothing further to "revoke" on the old
+key itself — once customers run the release that carries the new key, the old key is no
+longer trusted anywhere.
+
+## Rotating the licensing key
+
+Rotation always takes a new Studix release — the trust anchor is part of the release, not
+something set per installation:
+
 1. Generate a new keypair: `node tools/license-keygen.js --force` (this **overwrites** your
    existing private key file locally — make sure you actually intend this).
-2. Re-provision the new public key to customer installations through a controlled
-   application update (a deliberate, reviewed change — not an automatic/silent one).
-3. The old public key still installed anywhere simply stops accepting new signatures from
-   you — there is nothing further to "revoke" on the key itself, since only the private key
-   can produce a valid signature in the first place.
+2. Put the new **public** key into `backend/src/lib/licensingTrustAnchor.js`
+   (`EXPECTED_LICENSING_PUBLIC_KEY_PEM`) and update `EXPECTED_LICENSING_PUBLIC_KEY_SHA256`
+   to its fingerprint (command above), then build and ship a new Studix release — a
+   deliberate, reviewed change.
+3. Installing that release replaces each installation's key automatically. A license signed
+   with the old key stops verifying after that upgrade, so every customer needs a new
+   license: they send a fresh Activation Request Code and you issue a new artifact with the
+   new key.
+4. Until the new release is installed, licenses signed with the new key will not activate
+   on that installation.
 
 ## Known limitations
 
@@ -218,6 +258,8 @@ working normally; this only affects *future* license issuance.
 - `license-issuer.js` only ever prints the **License Artifact** it computes — never the key
   material used to compute it.
 - `license-keygen.js` only ever prints the **public** key — never the private one.
+- Only the **public** key is ever part of a Studix release (the trust anchor). The database
+  copy of it is not a trust source: changing it cannot change who is able to sign licenses.
 - This tool has no relationship to the customer application's own login
   (`POST /api/session`) — its output is a signed document, structurally unrelated to any
   user id/password.

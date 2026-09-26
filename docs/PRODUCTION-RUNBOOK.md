@@ -136,20 +136,20 @@ node tools/license-keygen.js
 - Generates a fresh Ed25519 keypair using Node's built-in `crypto` (no external library, no network).
 - **Private key** is written **only** to your own machine, at `<your home directory>\StudixLicensing\license-private-key.pem` (default; override with `STUDIX_LICENSE_KEY_DIR` if you want a different, encrypted location). It is **never printed to the console**, never logged, never included in the installer build, and never leaves your machine through any tool in this project.
 - **Public key** is printed to the console and saved alongside it as `license-public-key.pem` — this one is safe to share/copy.
-- Refuses to run if a private key already exists there, unless you pass `--force` (deliberate — rotating the key invalidates every already-issued license everywhere until you redistribute the new public key).
+- Refuses to run if a private key already exists there, unless you pass `--force` (deliberate — rotating the key requires a new Studix release that carries the new public key, and every customer then needs a newly issued license; see "Key rotation" below).
 - **This is already done on the machine used for the E2E validation in this runbook's history** — do not run `license-keygen.js` again on that machine unless you specifically intend to rotate the key (it would invalidate the test license already issued).
 
-### Per-customer, one-time provisioning step (⚠️ currently manual — see below)
+### Public-key provisioning — automatic (no per-customer step)
 
-Before a customer's Studix installation can accept **any** license at all, your **public** key must be written into that specific installation's own database, in the `license_config.licensing_public_key` column. **This is not automated by any tool in this repository today** — `tools/LICENSING.md` says so explicitly: *"Getting the public key... into that column for a specific customer's database is an operational step, not automated by any tool in this repository."*
+Every Studix release carries your licensing **public** key built in — the release trust anchor (`backend/src/lib/licensingTrustAnchor.js`). The installer writes it into the installation's database (`license_config.licensing_public_key`) automatically: on a fresh install, and again on every upgrade or re-run of the installer. **No `psql` command and no per-customer preparation is needed** before a customer's first activation.
 
-The only way to do this today is a direct SQL statement against that customer's local PostgreSQL, using the `studix_admin` connection string stored in `C:\ProgramData\Studix\config\admin.env` on **that customer's machine**, run via the bundled `psql.exe`:
+- The app verifies licenses against the key the release carries. The value in the database is only a copy of it, and it is trusted only when it is that same key — editing it by hand does not change who can sign licenses.
+- If an installation's database holds a missing, unreadable, or different key, the Activate screen reports that the licensing key does not match this Studix version (reason `trust_anchor_mismatch`) and refuses activation. **Fix: re-run the same Studix installer on that machine** — it restores the release's key. Do not edit the key in the database yourself.
+- Provisioning changes only that key value — an existing activation and all other data are left as they are.
 
-```
-"C:\Program Files\Studix\pgsql\bin\psql.exe" -h 127.0.0.1 -p 55432 -U studix_admin -d studix -c "INSERT INTO license_config (id, licensing_public_key) VALUES (1, '<paste your public key PEM here>') ON CONFLICT (id) DO UPDATE SET licensing_public_key = EXCLUDED.licensing_public_key;"
-```
+### Key rotation (rare and deliberate)
 
-(This is exactly the command form used and verified during the six-phase E2E test in this project.) You (or someone with access to that specific machine) must run this once per customer installation, before their first activation attempt.
+Changing the signing keypair (`license-keygen.js --force`, e.g. after a suspected compromise) takes a **new Studix release** that carries the new public key. Installing that release updates each installation's key automatically — but a license signed with the old key no longer verifies after that upgrade, so every customer needs a newly issued license (fresh Activation Request Code → new artifact). Details: `tools/LICENSING.md`.
 
 ### Issuing a license (every time — per customer, per activation/renewal)
 
@@ -188,10 +188,10 @@ The only way to do this today is a direct SQL statement against that customer's 
 4. Once you send back the License Artifact string, they paste it into the "**الصق شهادة الترخيص هنا**" text box and click "**تفعيل**" (Activate).
 5. **Success:** the screen shows a success toast and the app immediately unlocks — no restart needed (`onActivated` callback re-checks status and lets the normal app shell render right away).
 6. **Failure:** a generic "**فشل التحقق من الترخيص**" (License verification failed) message — the specific reason (wrong machine, tampered, expired, etc.) is intentionally **not** shown in the HTTP response (only logged server-side to `activity_logs` with `module='license'`), to avoid leaking verification internals. If a customer reports this, you'll need to ask them to check `activity_logs` (or re-issue and confirm you copied the artifact correctly — a single missing character breaks the signature).
-7. **Internet required?** No — activation is pure local cryptographic verification against the public key already in that installation's own database (§6).
+7. **Internet required?** No — activation is pure local cryptographic verification against the licensing public key built into the installed Studix release, which the installer copies into that installation's database automatically (§6).
 8. **Survives app restart?** Yes — verified directly in the E2E test: license status, `licenseId`, and full payload were identical after a real `StudixApp` service restart.
 9. **Survives Windows restart?** Yes, for the same reason — the license lives in the PostgreSQL database on disk (`license_config` table), not in memory or any temp state.
-10. **Survives an application upgrade (new installer version, same machine)?** Yes — verified directly: a real in-place upgrade (Phase 3 of the E2E test) preserved the exact same `licenseId` and activation payload, because upgrading never touches `pgdata` or its contents.
+10. **Survives an application upgrade (new installer version, same machine)?** Yes — verified directly: a real in-place upgrade (Phase 3 of the E2E test) preserved the exact same `licenseId` and activation payload, because upgrading never touches `pgdata` or its contents. (The one exception is a release that deliberately rotates the licensing key — see "Key rotation" in §6.)
 
 ---
 
@@ -390,7 +390,7 @@ Use this when: replacing the program files (e.g. as a manual pre-step before a c
 | Install | ✅ (or walk the customer through §3) | Can do it themselves following §2–§3 |
 | First admin account creation | Either | Either — whoever is at the keyboard for `/setup` |
 | License generation (`license-issuer.js`) | ✅ Only you | ❌ Never — requires your private key, which never leaves your machine |
-| Public-key provisioning into a new install | ✅ Only you (currently a manual `psql` step, §6) | ❌ |
+| Public-key provisioning into a new install | N/A — automatic, done by the installer (§6) | N/A — automatic |
 | Activation (pasting the artifact) | Can do it if on-site | ✅ Normally the customer's admin, guided by you |
 | Database management (backup/restore) | ✅ | ❌ Not exposed in the UI at all |
 | Backup (automatic, pre-migration) | N/A — automatic | N/A — automatic, invisible to daily use |
@@ -410,7 +410,8 @@ Use this when: replacing the program files (e.g. as a manual pre-step before a c
 - **Do not** delete `C:\ProgramData\Studix\backups\` "to save space" — it is never regenerated on demand, and it's the only safety net for the full-wipe uninstall path.
 - **Do not** copy `pgdata\` from one physical machine to another expecting the license to keep working — machine-bound licensing will correctly reject it (`wrong_machine`); this requires a fresh Activation Request Code and a fresh artifact from you (§6).
 - **Do not** share, email, or store the licensing **private** key (`license-private-key.pem`) anywhere near the licensing **public** key or on any customer machine — losing control of it means anyone could issue valid licenses for every customer you have (§6).
-- **Do not** run `license-keygen.js --force` casually — it immediately invalidates every future license issuance against the old public key, for every customer, until you personally re-provision the new public key to each one (currently a fully manual step, §6).
+- **Do not** run `license-keygen.js --force` casually — licenses you sign with the new key will not activate anywhere until you ship a new Studix release that carries the new public key, and after customers install that release their existing licenses must be re-issued (§6, "Key rotation").
+- **Do not** edit `license_config.licensing_public_key` in a customer's database by hand — the app only trusts the key built into its release, so a hand-edited value just blocks activation; re-run the installer instead (§6).
 - **Do not** assume an in-progress upgrade needs manual service stopping — doing so unnecessarily risks interrupting the installer's own automatic, tested stop/start sequencing (§12).
 - **Do not** rely on any "renew license" or "self-service transfer" feature — none exists; every license event goes through you personally (§6).
 - **Do not** tell a customer there's a default admin password — there isn't one; it's created live, per installation, during `/setup` (§8).

@@ -10,12 +10,11 @@
 // Usage:
 //   node tools/license-keygen.js            (refuses if a key already exists)
 //   node tools/license-keygen.js --force    (rotates: generates a NEW keypair, overwriting
-//                                             the old one — only do this deliberately; every
-//                                             customer installation provisioned with the OLD
-//                                             public key will stop accepting new licenses
-//                                             signed with the new key until you redistribute
-//                                             it, per the approved Phase 5 investigation
-//                                             report's key-rotation guidance)
+//                                             the old one — only do this deliberately;
+//                                             licenses signed with the new key are only
+//                                             accepted by a Studix release that carries the
+//                                             new public key as its trust anchor — see
+//                                             tools/LICENSING.md, "Rotating the licensing key")
 //
 // The private key is written ONLY to the owner-controlled directory (see
 // tools/lib/licenseKeyStorage.js — outside this repository by default) and is NEVER
@@ -35,10 +34,11 @@ function main() {
     console.error(`A private key already exists at: ${resolvePrivateKeyPath()}`);
     console.error('Refusing to overwrite it without --force.');
     console.error('');
-    console.error('Regenerating the keypair invalidates the public key already installed on');
-    console.error('every customer installation that has one — only pass --force if you');
-    console.error('deliberately intend to rotate the key and have a plan to redistribute the');
-    console.error('new public key through a controlled application update.\n');
+    console.error('Regenerating the keypair means licenses you sign will only activate on a');
+    console.error('new Studix release that carries the new public key as its trust anchor,');
+    console.error('and existing customers will need re-issued licenses after upgrading to it.');
+    console.error('Only pass --force if you deliberately intend to rotate the key');
+    console.error('(see tools/LICENSING.md, "Rotating the licensing key").\n');
     process.exit(1);
   }
 
@@ -61,10 +61,11 @@ function main() {
   console.log('  - Back it up only to an encrypted, offline location you control.\n');
 
   console.log(`Public key saved to:  ${publicPath}`);
-  console.log('  Safe to share. Install it into a customer installation\'s');
-  console.log('  license_config.licensing_public_key column as part of that');
-  console.log('  installation\'s provisioning step (see tools/LICENSING.md) — not done');
-  console.log('  automatically by this tool.\n');
+  console.log('  Safe to share. It becomes the Studix release trust anchor: when rotating');
+  console.log('  keys, put it into backend/src/lib/licensingTrustAnchor.js (with its');
+  console.log('  SHA-256 fingerprint) and ship a new Studix release. Installations get it');
+  console.log('  automatically from the installer — no manual database step. The private');
+  console.log('  key never goes into Studix (see tools/LICENSING.md).\n');
 
   console.log('Public key (PEM) — copy from here if convenient:\n');
   console.log(publicKey);
