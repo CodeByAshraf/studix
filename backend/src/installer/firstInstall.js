@@ -16,7 +16,8 @@
 // runtime production config (lib/productionConfig.js, unchanged) now only ever receives the
 // restricted studix_app connection string.
 //
-//   provisionPostgres()
+//   lockDownDataRootAcl()                          (%ProgramData%\Studix -> Administrators + SYSTEM)
+//   -> provisionPostgres()
 //   -> resolve/persist the studix_admin (provisioning) connection — separate admin-only file
 //   -> bootstrapDatabase()                          (schema, existing/unmodified internals)
 //   -> runMigrations()                              (moved here from server.js — INSTALL-10)
@@ -73,6 +74,7 @@ import {
 import { ensureStartupTask, ensureBackupTask } from '../lib/scheduledTask.js';
 import { readRestoreState, RestoreStateError } from '../db/restoreState.js';
 import { provisionLicensingPublicKey } from '../lib/licensingTrustAnchor.js';
+import { lockDownDataRootAcl } from './dataDirAcl.js';
 
 export class FirstInstallError extends Error {
   constructor(step, cause) {
@@ -129,6 +131,7 @@ export async function runFirstInstall({
   deps = {},
 } = {}) {
   const {
+    lockDownDataRootAclFn = lockDownDataRootAcl,
     provisionPostgresFn = provisionPostgres,
     generatePostgresPasswordFn = generatePostgresPassword,
     ensureProvisioningAdminConfigFn = ensureProvisioningAdminConfig,
@@ -162,6 +165,15 @@ export async function runFirstInstall({
 
   if (!schemaPath) {
     throw new FirstInstallError('validate_input', new Error('schemaPath مطلوب (مسار studix-schema.sql).'));
+  }
+
+  // 0. Lock %ProgramData%\Studix down to Administrators + SYSTEM (installer/dataDirAcl.js) —
+  // first, before initdb or any config/secret file is written on a fresh install, and on every
+  // upgrade/re-run so an existing installation's inherited BUILTIN\Users access is removed.
+  try {
+    lockDownDataRootAclFn();
+  } catch (err) {
+    throw new FirstInstallError('lock_down_data_acl', err);
   }
 
   // 1. PostgreSQL cluster provisioning — idempotent; guarantees PostgreSQL is running (ad-hoc-

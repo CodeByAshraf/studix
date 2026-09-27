@@ -19,6 +19,7 @@ function baseDeps(overrides = {}) {
   const migrationClient = { $disconnect: vi.fn(async () => {}) };
 
   const deps = {
+    lockDownDataRootAclFn: vi.fn((...args) => { record('lockDownDataRootAcl')(...args); return { dataRoot: 'C:\\ProgramData\\Studix' }; }),
     provisionPostgresFn: vi.fn(async (...args) => { record('provisionPostgres')(...args); return { status: 'initialized', databaseUrl: ADMIN_URL, port: 55432 }; }),
     generatePostgresPasswordFn: vi.fn(() => 'deadbeef00'),
     ensureProvisioningAdminConfigFn: vi.fn((...args) => { record('ensureProvisioningAdminConfig')(...args); return { created: true }; }),
@@ -155,6 +156,7 @@ describe('runFirstInstall — fresh install (provisionPostgres returns "initiali
 
     const order = calls.map((c) => c[0]);
     expect(order).toEqual([
+      'lockDownDataRootAcl',
       'provisionPostgres', 'ensureProvisioningAdminConfig', 'validateDatabaseUrl',
       'bootstrapDatabase', 'createMigrationPrismaClient', 'runMigrations', 'provisionLicensingPublicKey', 'ensureAppRole',
       'ensureProductionConfig', 'stopPostgres', 'registerPostgresService', 'startService',
@@ -359,6 +361,7 @@ describe('runFirstInstall — resolving the admin connection fails closed, never
 
 describe('runFirstInstall — failure at each step stops immediately with a machine-readable .step', () => {
   it.each([
+    ['lock_down_data_acl', 'lockDownDataRootAclFn', () => { throw new Error('icacls /reset failed'); }],
     ['provision_postgres', 'provisionPostgresFn', () => { throw new Error('pg down'); }],
     ['bootstrap_database', 'bootstrapDatabaseFn', () => { throw new Error('schema failed'); }],
     ['ensure_app_role', 'ensureAppRoleFn', () => { throw new Error('grant failed'); }],
@@ -376,6 +379,17 @@ describe('runFirstInstall — failure at each step stops immediately with a mach
       expect(err).toBeInstanceOf(FirstInstallError);
       expect(err.step).toBe(expectedStep);
     }
+  });
+
+  it('a data-folder ACL failure stops before PostgreSQL is provisioned or any secret/config file is written', async () => {
+    const { deps, calls } = baseDeps({
+      lockDownDataRootAclFn: vi.fn(() => { throw new Error('icacls access denied'); }),
+    });
+    await expect(runFirstInstall({ schemaPath: 'schema.sql', deps })).rejects.toMatchObject({ step: 'lock_down_data_acl' });
+    expect(calls).toHaveLength(0);
+    expect(deps.provisionPostgresFn).not.toHaveBeenCalled();
+    expect(deps.ensureProvisioningAdminConfigFn).not.toHaveBeenCalled();
+    expect(deps.ensureProductionConfigFn).not.toHaveBeenCalled();
   });
 
   it('run_migrations failure stops with step "run_migrations" but still disconnects the migration client', async () => {
@@ -505,6 +519,7 @@ describe('runFirstInstall — restore-state guard before starting StudixApp (aud
     await runFirstInstall({ schemaPath: 'schema.sql', deps });
     const order = calls.map((c) => c[0]);
     expect(order).toEqual([
+      'lockDownDataRootAcl',
       'provisionPostgres', 'ensureProvisioningAdminConfig', 'validateDatabaseUrl',
       'bootstrapDatabase', 'createMigrationPrismaClient', 'runMigrations', 'provisionLicensingPublicKey', 'ensureAppRole',
       'ensureProductionConfig', 'stopPostgres', 'registerPostgresService', 'startService',

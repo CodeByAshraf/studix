@@ -98,13 +98,13 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 ; ── ProgramData ACL (decision #4) — the ENTIRE %ProgramData%\Studix\ tree, not just config\.
 ; Restricted to Administrators + SYSTEM only: the SESSION_SECRET/PostgreSQL-password-bearing
 ; config file, pgdata, logs, and backups all live under here. Both Windows services run as
-; LocalSystem by default (lib/windowsService.js never overrides SERVICE_START_NAME), which
-; already has unrestricted local access regardless of this ACL — this permission list denies
-; ordinary interactive users read access without breaking either service's own legitimate
-; access. NTFS ACL inheritance means every subdirectory the running application later creates
-; itself (pgdata\, logs\, backups\, config\ — via plain fs.mkdirSync calls, which set no ACL of
-; their own) inherits this same restriction automatically; nothing else in this script needs to
-; enumerate those subdirectories individually.
+; LocalSystem by default (lib/windowsService.js never overrides SERVICE_START_NAME), which keeps
+; full access. NOTE: "Permissions: admins-full system-full" below only ADDS those grants — it
+; does not remove the BUILTIN\Users access inherited from %ProgramData%. The actual lockdown is
+; firstInstall.js's first step (backend/src/installer/dataDirAcl.js: icacls by SID — owner,
+; reset, inheritance removed, Administrators + SYSTEM only), run on every install and upgrade,
+; so existing installations are corrected too. Every subdirectory the application creates later
+; (pgdata\, logs\, backups\, config\ — plain fs.mkdirSync) inherits that restriction.
 [Dirs]
 Name: "{commonappdata}\Studix"; Permissions: admins-full system-full
 Name: "{commonappdata}\Studix\logs"
