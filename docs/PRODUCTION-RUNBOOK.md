@@ -80,7 +80,7 @@ In plain terms, here is exactly what happens behind the scenes, with real paths 
 - `tools\nssm.exe` — the Windows service wrapper used to run the Node app as a real Windows service.
 - `unins000.exe` / `unins000.dat` — the uninstaller.
 
-**Data and configuration placed in `C:\ProgramData\Studix\`** (customer data — never deleted except by the explicit, opt-in "delete all data" uninstall path, §13):
+**Data and configuration placed in `C:\ProgramData\Studix\`** (customer data — never deleted except by the explicit, opt-in "delete all data" uninstall path, §13). The installer restricts this whole folder, on every install and upgrade, to **Administrators and SYSTEM only**: ordinary Windows users cannot open, read or copy anything in it (including `backups\` and `logs\`). Use an Administrator account — or an elevated prompt — to read logs or copy backups; the Studix services and scheduled tasks run as SYSTEM and are unaffected.
 - `pgdata\` — the actual PostgreSQL data directory. This **is** the customer's database, on disk, as real files. Never touch these files directly.
 - `config\.env` — the application's own runtime configuration: the restricted database connection (`studix_app` role), session secret, port. Read by the running app on every start.
 - `config\admin.env` — a **separate**, more privileged database connection (`studix_admin` role), used only during installation/upgrade for schema/migration work. The running application itself never reads this file.
@@ -244,12 +244,12 @@ Designed to require **zero technical steps** from the customer:
 | Start Node manually? | **No.** `StudixApp` is also `AUTO_START`, wrapped by NSSM as a real Windows service. |
 | Run any command? | **No**, for normal daily use. |
 | Need Command Prompt? | **No.** |
-| Need Administrator rights every time? | **No** — only the one-time install/uninstall/upgrade needs admin; using the app day-to-day (opening the browser, logging in, using the app) does not. |
+| Need Administrator rights every time? | **No** — only the one-time install/uninstall/upgrade needs admin, plus copying backup files off the machine (§11.5); using the app day-to-day (opening the browser, logging in, using the app) does not. |
 | After a Windows restart? | Both services restart automatically; the customer just opens the Studix shortcut (or browser bookmark to `http://localhost:4000/`) as usual, no waiting required beyond normal Windows boot time. |
 | If Studix (the browser tab) is closed? | Nothing happens to the services — they keep running in the background regardless of whether any browser window is open. Reopening `http://localhost:4000/` picks up exactly where it left off. |
 | If the PC loses Internet? | No effect — everything (app, database, license verification) runs 100% locally. Internet has no role in Studix's daily operation at all. |
 | Where is the data? | `C:\ProgramData\Studix\pgdata\` (never edit these files directly). |
-| Where are backups? | `C:\ProgramData\Studix\backups\` — taken automatically every day (§11); an admin can see the last backup in Settings. The only customer task is copying them to a USB drive/another PC regularly (§11.5). |
+| Where are backups? | `C:\ProgramData\Studix\backups\` — taken automatically every day (§11); an admin can see the last backup in Settings. The only customer task is copying them to a USB drive/another PC regularly, from a Windows Administrator account (§11.5). |
 
 The customer's entire normal workflow is: **turn on the PC → open the browser bookmark → log in.** Nothing else.
 
@@ -309,7 +309,7 @@ This is an owner/operator procedure. It never overwrites the current database: t
 
 ### 11.5 Local-only limitation — copy backups off the machine
 
-All backups are on the **same disk** as the database. They protect against mistakes, bad data, a failed upgrade and database corruption, but **not** against disk failure, theft, fire, ransomware or loss of the PC. Copy the `.dump` files regularly (e.g. weekly) to a USB drive or another computer — they are static, self-contained files, safe to copy at any time with normal Windows copy, no service needs stopping. Studix has no off-machine backup of its own.
+All backups are on the **same disk** as the database. They protect against mistakes, bad data, a failed upgrade and database corruption, but **not** against disk failure, theft, fire, ransomware or loss of the PC. Copy the `.dump` files regularly (e.g. weekly) to a USB drive or another computer — they are static, self-contained files, safe to copy at any time, no service needs stopping. `C:\ProgramData\Studix\backups\` is readable only by Administrators (and SYSTEM), so the copy must be made by a Windows Administrator from an **elevated Command Prompt** (e.g. `copy "C:\ProgramData\Studix\backups\*.dump" E:\StudixBackups\`). Avoid File Explorer's "You don't currently have permission… Continue" button for this folder: it permanently adds your account to the folder's permissions (the next install/upgrade removes it again). Ordinary Windows users cannot read or copy these files — that protection is intentional, since a dump contains the whole database. Backup creation, retention and the restore procedure (§11.1–11.4) are unchanged by this. Studix has no off-machine backup of its own.
 
 ### 11.6 When a backup fails
 
@@ -417,7 +417,7 @@ Use this when: replacing the program files (e.g. as a manual pre-step before a c
 | `C:\ProgramData\Studix\pgdata\` | The actual customer database | **Never** touch directly. Only removed by the explicit full-wipe uninstall path. |
 | `C:\ProgramData\Studix\config\.env` | Runtime app config (restricted DB connection, session secret, port) | Do not hand-edit unless you know exactly what you're changing; deleting it will break the running app. |
 | `C:\ProgramData\Studix\config\admin.env` | Privileged DB connection, used only for install/upgrade/migration | Never share this file or its contents with anyone outside your own operational team. |
-| `C:\ProgramData\Studix\logs\` | Application + service logs | Safe to read/copy; safe to delete old log files if disk space is a concern (the app will just create new ones). |
+| `C:\ProgramData\Studix\logs\` | Application + service logs | Safe to read/copy (as Administrator — see §4); safe to delete old log files if disk space is a concern (the app will just create new ones). |
 | `C:\ProgramData\Studix\backups\` | Verified daily `studix-backup-*.dump`, `pre-migration-*.dump`, `backup-status.json`, `.routine-backup.lock` (only while a backup runs) | **Never delete** by hand — old daily backups are removed automatically by retention (§11.1); the installer/uninstaller never touches this folder. Copy `*.dump` files off the machine regularly (§11.5). |
 | `C:\ProgramData\Studix\pg-startup.log` | One-time ad-hoc PostgreSQL startup log (fresh-init only) | Diagnostic only, safe to delete. |
 
@@ -518,6 +518,6 @@ HANDOFF TO CUSTOMER
 [ ] Confirm they understand: no manual start needed, ever (Section 10)
 [ ] Confirm they know NOT to touch C:\ProgramData\Studix directly
 [ ] Show the admin Settings -> Backup (daily verified backup, last success)
-[ ] Remind them to copy C:\ProgramData\Studix\backups\*.dump to a USB drive regularly (Section 11.5)
+[ ] Remind them to copy C:\ProgramData\Studix\backups\*.dump to a USB drive regularly, from a Windows Administrator account (Section 11.5)
 [ ] Leave them your contact for license renewal / machine changes (Section 6)
 ```
