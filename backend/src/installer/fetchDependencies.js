@@ -97,14 +97,31 @@ export async function downloadFile(url, destPath, { downloadFn, io = {} } = {}) 
   return { path: destPath, bytes: buffer.length };
 }
 
+// resolveSystemTarPath: Windows' own tar.exe by absolute %SystemRoot%\System32 path — never a
+// PATH lookup, so extraction behaves the same whichever shell launches the build. Git Bash puts
+// GNU tar (/usr/bin/tar) first on PATH, and GNU tar reads "C:\..." as a remote host
+// ("Cannot connect to C: resolve failed"). No hard-coded drive: without SystemRoot/windir this
+// fails clearly instead of guessing.
+export function resolveSystemTarPath(env = process.env) {
+  const systemRoot = env.SystemRoot || env.SYSTEMROOT || env.windir || env.WINDIR;
+  if (!systemRoot) {
+    throw new DependencyFetchError(
+      'system_tar_unavailable',
+      'تعذّر تحديد مجلد Windows (SystemRoot/windir غير معرَّفين) — لا يمكن تحديد مسار tar.exe الخاص بالنظام.'
+    );
+  }
+  return path.win32.join(systemRoot, 'System32', 'tar.exe');
+}
+
 // extractZip: shells out to Windows 10 1803+'s built-in tar.exe (bsdtar, handles .zip natively)
-// — no new dependency, no PowerShell child-process hop. Injectable execFileSync, so no
+// — no new dependency, no PowerShell child-process hop. Injectable execFileSync (and env), so no
 // automated test ever spawns a real process.
 export function extractZip(zipPath, destDir, io = {}) {
   const { mkdirSync, execFileSync: exec } = { ...REAL_IO, ...io };
+  const tarPath = resolveSystemTarPath(io.env || process.env);
   mkdirSync(destDir, { recursive: true });
   try {
-    exec('tar', ['-xf', zipPath, '-C', destDir], { stdio: 'pipe' });
+    exec(tarPath, ['-xf', zipPath, '-C', destDir], { stdio: 'pipe' });
   } catch (err) {
     throw new DependencyFetchError('extract_failed', `فشل استخراج ${zipPath}: ${err.message}`);
   }

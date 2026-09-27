@@ -11,7 +11,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import {
-  computeSha256, verifyChecksum, downloadFile, extractZip, fetchAndVerify,
+  computeSha256, verifyChecksum, downloadFile, extractZip, fetchAndVerify, resolveSystemTarPath,
   DependencyFetchError, PLACEHOLDER_SHA256,
 } from './fetchDependencies.js';
 
@@ -130,17 +130,62 @@ describe('downloadFile', () => {
   });
 });
 
+describe('resolveSystemTarPath', () => {
+  it('is <SystemRoot>\\System32\\tar.exe, derived from the environment — not a fixed drive', () => {
+    expect(resolveSystemTarPath({ SystemRoot: 'C:\\Windows' })).toBe('C:\\Windows\\System32\\tar.exe');
+    expect(resolveSystemTarPath({ SystemRoot: 'D:\\WINNT' })).toBe('D:\\WINNT\\System32\\tar.exe');
+  });
+
+  it('falls back to windir, and fails clearly (no guessed path) when neither is set', () => {
+    expect(resolveSystemTarPath({ windir: 'E:\\Win' })).toBe('E:\\Win\\System32\\tar.exe');
+    expect(() => resolveSystemTarPath({})).toThrow(DependencyFetchError);
+    try { resolveSystemTarPath({}); } catch (err) { expect(err.reason).toBe('system_tar_unavailable'); }
+  });
+});
+
 describe('extractZip', () => {
-  it('invokes tar -xf <zip> -C <dest> — never a raw shell string, never PowerShell Expand-Archive', () => {
+  const env = { SystemRoot: 'D:\\WINNT' };
+  const SYSTEM_TAR = 'D:\\WINNT\\System32\\tar.exe';
+
+  it('invokes <SystemRoot>\\System32\\tar.exe -xf <zip> -C <dest> — never a raw shell string, never PowerShell Expand-Archive', () => {
     const calls = [];
-    const io = { mkdirSync: () => {}, execFileSync: (cmd, args, opts) => calls.push([cmd, args, opts]) };
+    const io = { env, mkdirSync: () => {}, execFileSync: (cmd, args, opts) => calls.push([cmd, args, opts]) };
     extractZip('C:\\downloads\\nssm.zip', 'C:\\out\\tools', io);
-    expect(calls).toEqual([['tar', ['-xf', 'C:\\downloads\\nssm.zip', '-C', 'C:\\out\\tools'], expect.anything()]]);
+    expect(calls).toEqual([[SYSTEM_TAR, ['-xf', 'C:\\downloads\\nssm.zip', '-C', 'C:\\out\\tools'], expect.anything()]]);
+  });
+
+  it.each([
+    ['PostgreSQL', 'C:\\Temp\\studix-deps-x\\postgresql-binaries.zip', 'C:\\Temp\\studix-deps-x\\pg-extracted'],
+    ['NSSM', 'C:\\Temp\\studix-deps-x\\nssm.zip', 'C:\\Temp\\studix-deps-x\\nssm-extracted'],
+  ])('%s extraction uses the absolute System32 tar.exe, never a bare "tar"', (_label, zipPath, destDir) => {
+    const calls = [];
+    extractZip(zipPath, destDir, { env, mkdirSync: () => {}, execFileSync: (cmd, args) => calls.push([cmd, args]) });
+    expect(calls).toHaveLength(1);
+    expect(calls[0][0]).toBe(SYSTEM_TAR);
+    expect(path.win32.isAbsolute(calls[0][0])).toBe(true);
+    expect(calls[0][0]).not.toBe('tar');
+    expect(calls[0][1]).toEqual(['-xf', zipPath, '-C', destDir]);
+  });
+
+  it('the build script extracts both archives only through extractZip (no tar/process call of its own)', () => {
+    const script = fs.readFileSync(path.join(__dirname, '..', '..', 'scripts', 'fetchWindowsRuntimeDependencies.js'), 'utf8');
+    expect(script.match(/extractZip\(zipPath, stagingDir\)/g)).toHaveLength(2);
+    expect(script).not.toMatch(/['"]tar['"]|execFileSync|spawn|child_process/);
   });
 
   it('classifies a failed extraction clearly', () => {
-    const io = { mkdirSync: () => {}, execFileSync: () => { throw new Error('bad archive'); } };
+    const io = { env, mkdirSync: () => {}, execFileSync: () => { throw new Error('bad archive'); } };
     expect(() => extractZip('x.zip', 'dest', io)).toThrow(DependencyFetchError);
+    try { extractZip('x.zip', 'dest', io); } catch (err) { expect(err.reason).toBe('extract_failed'); }
+  });
+
+  it('without a Windows system root it fails before creating anything or running any process', () => {
+    let mkdirCalled = false;
+    let execCalled = false;
+    const io = { env: {}, mkdirSync: () => { mkdirCalled = true; }, execFileSync: () => { execCalled = true; } };
+    expect(() => extractZip('x.zip', 'dest', io)).toThrow(/SystemRoot/);
+    expect(mkdirCalled).toBe(false);
+    expect(execCalled).toBe(false);
   });
 });
 
