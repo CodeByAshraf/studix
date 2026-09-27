@@ -376,6 +376,7 @@ Use this when: replacing the program files (e.g. as a manual pre-step before a c
 | `C:\ProgramData\Studix\pgdata\` | **Permanently deleted** |
 | `C:\ProgramData\Studix\config\` | **Permanently deleted** |
 | `C:\ProgramData\Studix\logs\` | **Permanently deleted** |
+| `C:\ProgramData\Studix\pg-startup.log` (legacy — only present on machines first installed with a pre-release build that wrote it there; current builds write `%TEMP%\studix-pg-startup.log` instead) | **Permanently deleted** if present |
 | `C:\ProgramData\Studix\backups\` | **Always preserved — never deleted by this path either** |
 | External/unrelated PostgreSQL on this machine | **Never touched**, under any circumstance — directly re-verified |
 

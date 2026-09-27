@@ -130,8 +130,8 @@ Source: "..\release\win-x64\studix\*"; DestDir: "{app}"; Flags: recursesubdirs i
 ; step (independent of InitializeUninstall/WipeDataConfirmed/CurUninstallStepChanged below — none
 ; of that Pascal code is touched by this section) and targets ONLY {app} (Program Files\Studix).
 ; It never touches {commonappdata}\Studix — that tree's fate (backups\ always kept; pgdata\/
-; config\/logs\ deleted only on confirmed wipe) is governed entirely by the existing, separate
-; CurUninstallStepChanged logic, unchanged here.
+; config\/logs\ and the legacy root-level pg-startup.log deleted only on confirmed wipe) is
+; governed entirely by the existing, separate CurUninstallStepChanged logic, unchanged here.
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"
 
@@ -469,7 +469,9 @@ end;
 // block is a no-op] or both services were already confirmed safely torn down above). Targets
 // pgdata\, config\, and logs\ INDIVIDUALLY — never the {commonappdata}\Studix root itself, and
 // never backups\ (D2) — so the parent directory and its backups\ subdirectory both survive
-// exactly as decision #5's original ACL/[Dirs] entry left them.
+// exactly as decision #5's original ACL/[Dirs] entry left them. It also deletes, by exact name,
+// the legacy root-level pg-startup.log that pre-abc5b60 builds wrote next to pgdata\ (current
+// builds write %TEMP%\studix-pg-startup.log instead, so on a clean install it simply is absent).
 //
 // Phase 4 — BestEffortRemoveScheduledTask() is called here, in usUninstall, for BOTH the normal
 // and the opt-in-wipe uninstall path: usUninstall always fires (unconditionally, every
@@ -497,5 +499,8 @@ begin
       Log('INSTALL-08: تعذّر حذف config بالكامل — قد تبقى بعض الملفات (راجع سجلّ الإزالة).');
     if not DelTree(ExpandConstant('{commonappdata}\Studix\logs'), True, True, True) then
       Log('INSTALL-08: تعذّر حذف logs بالكامل — قد تبقى بعض الملفات (راجع سجلّ الإزالة).');
+    if FileExists(ExpandConstant('{commonappdata}\Studix\pg-startup.log')) and
+       not DeleteFile(ExpandConstant('{commonappdata}\Studix\pg-startup.log')) then
+      Log('INSTALL-08: تعذّر حذف pg-startup.log القديم (راجع سجلّ الإزالة).');
   end;
 end;

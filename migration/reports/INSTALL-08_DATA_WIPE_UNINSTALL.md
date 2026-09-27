@@ -29,6 +29,10 @@ contract).
   wipe deletes `pgdata\`, `config\`, and `logs\` only — individually, never the
   `{commonappdata}\Studix` root itself (which would also take `backups\` with it). No second
   backup-deletion option or additional UI was added.
+  *Follow-up (2026-09-27):* the wipe also deletes, by exact name, the legacy root-level
+  `pg-startup.log` that pre-release builds wrote next to `pgdata\` (current builds write
+  `%TEMP%\studix-pg-startup.log`). A real wipe run had left that one file behind; `backups\` is
+  still never touched (pinned by `backend/scripts/uninstallWipe.consistency.test.js`).
 - **D3 — Two sequential `MsgBox(..., MB_YESNO)` confirmations**, nothing pre-selected. First
   names exactly what will be deleted and states that backups are retained; second restates
   irreversibility. No custom VCL form was built.
