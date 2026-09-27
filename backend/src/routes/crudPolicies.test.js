@@ -21,7 +21,9 @@ function mockModel() {
   };
 }
 
-const mockPrisma = {};
+// Interactive transaction: the work runs against the same mocked client (policy validateCreate
+// hooks run inside the generic POST's transaction).
+const mockPrisma = { $transaction: async (work) => work(mockPrisma) };
 vi.mock('../prisma.js', () => ({ prisma: mockPrisma }));
 
 const { makeCrudRouter } = await import('./crud.js');

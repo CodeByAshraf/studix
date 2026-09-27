@@ -28,6 +28,7 @@
 import { Router } from 'express';
 import crypto from 'crypto';
 import { runInTransaction } from '../lib/transaction.js';
+import { lockCashboxForDebit, exceedsBalance } from '../lib/cashboxLedger.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { snakeToCamel } from '../lib/caseMapper.js';
 
@@ -148,18 +149,25 @@ export async function transferBetweenCashboxes(
   if (!dateObj) throw badRequest('التاريخ غير صالح.');
 
   const result = await runInTransaction(async (tx) => {
-    // القراءة الحاسمة داخل المعاملة — نفس مبدأ reverseTreasuryTxn أعلاه.
-    const fromCb = await tx.cashboxes.findUnique({ where: { id: fromCashboxId } });
-    if (!fromCb) throw badRequest('الخزنة المصدر غير موجودة.');
+    // القراءة الحاسمة داخل المعاملة — نفس مبدأ reverseTreasuryTxn أعلاه. P2-3: الخزنة
+    // المصدر تُقرَأ عبر قفل الخصم (lockCashboxForDebit) — تحويلات/مصروفات/استردادات
+    // متزامنة على نفس الخزنة تُسرَّى خلفه، فلا يرى اثنان منها نفس الرصيد.
+    const source = await lockCashboxForDebit(tx, fromCashboxId);
+    if (!source) throw badRequest('الخزنة المصدر غير موجودة.');
+    const fromCb = source.cashbox;
     // نفس حارس `active` المفروض بالفعل قبل أي كتابة خزنة أخرى (payments.js،
     // admissionPayments.js) — كان غائباً هنا فقط، فيسمح بالتحويل من/إلى خزنة مُغلقة
-    // (مؤرشفة). لا حارس رصيد/overdraft مقابل — لا يوجد قيد "الرصيد لا يقل عن صفر" في أي
-    // مسار كتابة آخر بالمشروع (الرصيد يُحتسَب ديناميكياً بلا أي حد أدنى مفروض)، فإضافته
-    // هنا فقط كانت ستكون قاعدة عمل جديدة، لا إصلاح فجوة قائمة.
+    // (مؤرشفة).
     if (!fromCb.active) throw badRequest('الخزنة المصدر غير نشطة.');
     const toCb = await tx.cashboxes.findUnique({ where: { id: toCashboxId } });
     if (!toCb) throw badRequest('الخزنة الوجهة غير موجودة.');
     if (!toCb.active) throw badRequest('الخزنة الوجهة غير نشطة.');
+    // P2-3: حارس الرصيد — نفس القاعدة التي يفرضها نموذج التحويل (validateTransfer في
+    // src/services/cashboxService.js) وحدود استرداد الدفعات، مفروضة الآن هنا أيضاً ذرّياً مع
+    // الكتابة بدل الاعتماد على فحص الواجهة وحده (الذي يتجاوزه أي طلبان متزامنان).
+    if (exceedsBalance(amt, source.balance)) {
+      throw badRequest(`رصيد الخزنة غير كافٍ (المتاح: ${Number(source.balance)} ج.م).`);
+    }
 
     // transferId رابط منطقي فقط (ref_id مشترَك بين الحركتين) — ليس صفاً بحدّ ذاته.
     // لا عمود description (نفس الاكتشاف أعلاه في reverseTreasuryTxn) — الوصف/السبب

@@ -16,6 +16,7 @@
 import { Router } from 'express';
 import crypto from 'crypto';
 import { runInTransaction } from '../lib/transaction.js';
+import { lockCashboxForDebit, exceedsBalance } from '../lib/cashboxLedger.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { snakeToCamel } from '../lib/caseMapper.js';
 
@@ -57,29 +58,34 @@ export async function cancelAdmissionWithRefund({ admissionId, reason } = {}, { 
     const alreadyRefundedIds = new Set(existingRefunds.map(r => r.ref_id));
     const refundable = allPayments.filter(p => !alreadyRefundedIds.has(p.id));
 
-    const refundTxns = [];
+    const originals = [];
     for (const payment of refundable) {
       const originalTxn = await tx.treasury_txn.findUnique({ where: { id: payment.treasury_txn_id } });
       if (!originalTxn) {
         throw badRequest(`دفعة القبول ${payment.id} غير مرتبطة بحركة خزنة صحيحة — يتطلّب مراجعة يدوية.`);
       }
+      originals.push({ payment, originalTxn });
+    }
 
+    // P2-3: قفل كل خزنة معنيّة قبل أي فحص رصيد — بترتيب ثابت (id تصاعدياً) حتى لا يتقاطع
+    // إلغاءان متزامنان يلمسان نفس الخزنتين بترتيبين مختلفين (deadlock).
+    const cashboxIds = [...new Set(originals.map(o => o.originalTxn.cashbox_id))].sort();
+    for (const cashboxId of cashboxIds) {
+      if (!(await lockCashboxForDebit(tx, cashboxId))) {
+        throw badRequest('خزنة دفعة القبول غير موجودة — يتطلّب مراجعة يدوية.');
+      }
+    }
+
+    const refundTxns = [];
+    for (const { payment, originalTxn } of originals) {
       // رصيد الخزنة الحيّ — مُعاد حسابه من صفوف treasury_txn الفعلية لهذه الخزنة تحديداً
-      // (قد تختلف من دفعة لأخرى)، لا من قيمة يرسلها العميل. فشل أي واحدة منها يُسقِط
-      // المعاملة بأكملها — لا استرداد جزئي أبداً (قرار صريح: "تنجح كلها أو تفشل كلها").
-      const cashbox = await tx.cashboxes.findUnique({ where: { id: originalTxn.cashbox_id } });
-      const incomeAgg  = await tx.treasury_txn.aggregate({
-        where: { cashbox_id: originalTxn.cashbox_id, type: 'income',  status: 'active' }, _sum: { amount: true },
-      });
-      const expenseAgg = await tx.treasury_txn.aggregate({
-        where: { cashbox_id: originalTxn.cashbox_id, type: 'expense', status: 'active' }, _sum: { amount: true },
-      });
-      const balance = Number(cashbox?.opening_balance ?? 0)
-        + Number(incomeAgg._sum.amount ?? 0)
-        - Number(expenseAgg._sum.amount ?? 0);
+      // (قد تختلف من دفعة لأخرى)، لا من قيمة يرسلها العميل — يشمل استردادات هذه المعاملة
+      // نفسها السابقة في الحلقة. فشل أي واحدة منها يُسقِط المعاملة بأكملها — لا استرداد
+      // جزئي أبداً (قرار صريح: "تنجح كلها أو تفشل كلها").
+      const { balance } = await lockCashboxForDebit(tx, originalTxn.cashbox_id);
       const refundAmount = Number(payment.amount);
-      if (refundAmount > balance) {
-        throw badRequest(`رصيد الخزنة (${balance} ج.م) لا يكفي لاسترداد دفعة بقيمة ${refundAmount} ج.م — أُلغيت العملية بأكملها.`);
+      if (exceedsBalance(payment.amount, balance)) {
+        throw badRequest(`رصيد الخزنة (${Number(balance)} ج.م) لا يكفي لاسترداد دفعة بقيمة ${refundAmount} ج.م — أُلغيت العملية بأكملها.`);
       }
 
       const refundTxn = await tx.treasury_txn.create({

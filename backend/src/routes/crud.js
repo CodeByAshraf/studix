@@ -136,7 +136,14 @@ export function makeCrudRouter(modelName, opts = {}) {
         : '';
       data.id = clientId || (idField.type === 'BigInt' ? undefined : crypto.randomUUID());
     }
-    const row = await model.create({ data });
+    // P2-3 — a policy validateCreate runs in the same transaction as the insert, so a check
+    // it makes under a row lock (e.g. the cashbox balance) cannot go stale before the write.
+    const row = policy?.validateCreate
+      ? await runInTransaction(async (tx) => {
+        await policy.validateCreate({ data, db: tx });
+        return tx[modelName].create({ data });
+      })
+      : await model.create({ data });
     res.status(201).json({ ok: true, data: serializeBigInt(snakeToCamel(row)) });
   }));
 

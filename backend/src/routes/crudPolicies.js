@@ -13,12 +13,15 @@
 //       already overwritten whatever the client sent.
 //   createFixed : { column: value } — the only value a generic POST may store for that column
 //       (absent/null -> the fixed value; anything else -> 400).
+//   validateCreate({ data, db }) : async — runs inside the generic POST's transaction (`db` is
+//       the transaction client), immediately before the insert; may throw an HTTP error.
 //   validateUpdate({ id, data, db }) : async — runs before a generic PUT/PATCH writes; may
 //       remove no-op fields from `data`, or throw an HTTP error (status + expose).
 //
 // Collections not listed here keep their existing generic behavior unchanged.
 // ─────────────────────────────────────────────────────────────
 import { Prisma } from '@prisma/client';
+import { lockCashboxForDebit, exceedsBalance } from '../lib/cashboxLedger.js';
 
 function httpError(status, message) {
   const err = new Error(message);
@@ -54,6 +57,21 @@ async function validateCashboxUpdate({ id, data, db }) {
     throw httpError(409, 'لا يمكن تعديل الرصيد الافتتاحي للخزنة بعد إنشائها — سجّل حركة إيراد/مصروف (تسوية) بدلاً من ذلك.');
   }
   delete data.opening_balance;
+}
+
+// P2-3 — a manual expense is a balance-gated debit (lib/cashboxLedger.js): the cashbox is locked
+// and its balance recomputed in the insert's own transaction, so concurrent debits cannot both
+// spend the same money. Same rule the treasury expense form applies client-side. Income is
+// never gated.
+async function validateTreasuryCreate({ data, db }) {
+  if (data.type !== 'expense') return;
+  if (typeof data.cashbox_id !== 'string' || !data.cashbox_id) throw httpError(400, 'الخزنة مطلوبة.');
+  const amount = toDecimalOrThrow(data.amount, 'المبلغ');
+  const locked = await lockCashboxForDebit(db, data.cashbox_id);
+  if (!locked) throw httpError(400, 'الخزنة غير موجودة.');
+  if (exceedsBalance(amount, locked.balance)) {
+    throw httpError(400, `رصيد الخزنة غير كافٍ (المتاح: ${Number(locked.balance)} ج.م).`);
+  }
 }
 
 // exams.total / homeworks.total_score are the upper bound /api/exam-grades and
@@ -121,6 +139,7 @@ export const CRUD_POLICIES = Object.freeze({
   treasuryTxn: {
     createFields: ['cashbox_id', 'date', 'type', 'category', 'amount', 'method', 'party', 'notes', 'status', 'created_by'],
     createFixed: { status: 'active' },
+    validateCreate: validateTreasuryCreate,
   },
   // Activity log: append-only; actor fields come from the session (activityLogs.js), the
   // timestamp from the database.

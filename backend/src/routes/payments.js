@@ -29,6 +29,7 @@
 import { Router } from 'express';
 import crypto from 'crypto';
 import { runInTransaction } from '../lib/transaction.js';
+import { lockCashboxForDebit, exceedsBalance } from '../lib/cashboxLedger.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { snakeToCamel } from '../lib/caseMapper.js';
 import { parseTreasuryDate } from './treasuryTxn.js';
@@ -355,18 +356,12 @@ export async function refundPayment({ id, amount, reason }, { userId = null } = 
 
     // رصيد الخزنة الحيّ — مُعاد حسابه من صفوف treasury_txn الفعلية، لا من قيمة يرسلها
     // العميل (نفس المبدأ المُقرَّر مسبقاً في تقرير التفتيش الأصلي للنطاق المالي، البند 14).
-    const cashbox = await tx.cashboxes.findUnique({ where: { id: originalTxn.cashbox_id } });
-    const incomeAgg  = await tx.treasury_txn.aggregate({
-      where: { cashbox_id: originalTxn.cashbox_id, type: 'income',  status: 'active' }, _sum: { amount: true },
-    });
-    const expenseAgg = await tx.treasury_txn.aggregate({
-      where: { cashbox_id: originalTxn.cashbox_id, type: 'expense', status: 'active' }, _sum: { amount: true },
-    });
-    const balance = Number(cashbox?.opening_balance ?? 0)
-      + Number(incomeAgg._sum.amount ?? 0)
-      - Number(expenseAgg._sum.amount ?? 0);
-    if (amt > balance) {
-      throw badRequest(`رصيد الخزنة (${balance} ج.م) لا يكفي لاسترداد ${amt} ج.م.`);
+    // P2-3: قفل صفّ الخزنة أولاً (lockCashboxForDebit) — قفل الدفعة أعلاه يحمي هذه الدفعة
+    // وحدها، لا استردادات دفعات أخرى متزامنة على نفس الخزنة.
+    const cashboxLock = await lockCashboxForDebit(tx, originalTxn.cashbox_id);
+    if (!cashboxLock) throw badRequest('خزنة الدفعة الأصلية غير موجودة — يتطلّب مراجعة يدوية.');
+    if (exceedsBalance(amt, cashboxLock.balance)) {
+      throw badRequest(`رصيد الخزنة (${Number(cashboxLock.balance)} ج.م) لا يكفي لاسترداد ${amt} ج.م.`);
     }
 
     // حركة استرداد جديدة فقط — الدفعة نفسها لا تُعدَّل بأي حقل إطلاقاً (immutable).
