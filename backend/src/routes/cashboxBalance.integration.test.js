@@ -106,24 +106,22 @@ describe('cashboxBalance.js — getCashboxBalanceAsOf (real PostgreSQL integrati
     expect(balance).toBe(300 - 100);
   });
 
-  it('E. reversal: the original row becomes cancelled (excluded) and the opposite-type reversal row (active) is counted — matches the REAL reverseTreasuryTxn+getCashboxBalance behavior verified empirically (see the Phase 3 report: reversing a +500 income nets to -500, not back to 0)', async () => {
+  it('E. reversal: the original row and its reversal row are both cancelled (excluded) — a reversed +500 income nets back to 0', async () => {
     const cashbox = await seedCashbox({ opening_balance: 0 });
-    // يُطابِق تماماً ما ينتجه reverseTreasuryTxn الحقيقي (تحقّق تجريبي مباشر أُجري قبل
-    // كتابة هذا الاختبار): الأصل income=500 → status='cancelled' (مستبعَد من المجموع)،
-    // + حركة عكس جديدة expense=500 → status='active' (nref_type='reversal', تُحتسَب).
+    // يُطابِق ما ينتجه reverseTreasuryTxn الحقيقي: الأصل income=500 → status='cancelled'،
+    // + حركة عكس expense=500 → status='cancelled' أيضاً (ref_type='reversal'، سجلّ تدقيق
+    // بلا أثر مالي). قبل التصحيح كانت حركة العكس 'active' فكان الناتج -500 بدل صفر
+    // (انظر reversalAccounting.integration.test.js).
     const original = await seedTxn(cashbox.id, { type: 'income', amount: 500, status: 'cancelled' });
-    await seedTxn(cashbox.id, { type: 'expense', amount: 500, ref_type: 'reversal', ref_id: original.id, status: 'active' });
+    await seedTxn(cashbox.id, { type: 'expense', amount: 500, ref_type: 'reversal', ref_id: original.id, status: 'cancelled' });
 
     const { balance } = await getCashboxBalanceAsOf(cashbox.id);
-    // النتيجة الفعلية الحقيقية (مؤكَّدة تجريبياً بتشغيل reverseTreasuryTxn الحقيقية على
-    // قاعدة scratch): -500، لا صفر — الأصل الملغى يُستبعَد بالكامل (لا يُعوَّض بشيء)،
-    // وحركة العكس النشطة (-500) هي المساهمة الوحيدة الفعلية في المجموع.
-    expect(balance).toBe(-500);
+    expect(balance).toBe(0);
 
-    // إضافة حركة نشطة أخرى تُثبت أن الأصل الملغى فعلاً مستبعَد بلا أي مساهمة خفية.
+    // إضافة حركة نشطة أخرى تُثبت أن زوج العكس مستبعَد بلا أي مساهمة خفية.
     await seedTxn(cashbox.id, { type: 'income', amount: 200 });
     const { balance: balance2 } = await getCashboxBalanceAsOf(cashbox.id);
-    expect(balance2).toBe(-500 + 200);
+    expect(balance2).toBe(200);
   });
 
   it('F. transfer: two legs on two different cashboxes each affect only their own cashbox', async () => {

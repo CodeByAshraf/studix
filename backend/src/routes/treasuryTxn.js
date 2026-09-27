@@ -108,6 +108,12 @@ export async function reverseTreasuryTxn({ id, reason }, { userId = null } = {})
     // original (المُلتقَط قبل الحارس) يبقى مصدراً آمناً لبقية الحقول: cashbox_id/type/
     // amount/method/party لا تتغيّر أبداً بعد الإنشاء — الحارس أعلاه يحمي status فقط،
     // وهو العمود الوحيد المُتنازَع عليه فعلياً.
+    //
+    // حركة العكس تُنشأ بحالة 'cancelled' — سجلّ تدقيق للزوج، لا أثر مالي لها: الأصل
+    // 'cancelled' أعلاه مستبعَد بالفعل من كل مجموع (الرصيد، الإيراد/المصروف، دفتر الخزنة —
+    // خادماً وعميلاً)، فهذا وحده يُلغي أثره. حركة عكس 'active' كانت ستُلغي الأثر مرة ثانية
+    // (عكس إيراد 100 كان يُنقص الرصيد 200). لا يمكن عكسها بدورها (ref_type='reversal').
+    // انظر migrations/010_reversal_rows_non_financial.sql لتصحيح الأزواج السابقة.
     const reversal = await tx.treasury_txn.create({
       data: {
         id: crypto.randomUUID(),
@@ -119,6 +125,7 @@ export async function reverseTreasuryTxn({ id, reason }, { userId = null } = {})
         method:      original.method,
         party:       original.party,
         notes:       reason.trim(),
+        status:      'cancelled',
         ref_type:    'reversal',
         ref_id:      original.id,
         created_by:  userId,

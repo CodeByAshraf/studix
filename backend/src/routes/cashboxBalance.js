@@ -15,7 +15,9 @@
 //
 // Reversals and transfers need NO special-case handling here: a reversal
 // (reverseTreasuryTxn, treasuryTxn.js) marks the ORIGINAL row 'cancelled' (excluded by the
-// same predicate) and creates a normal opposite-type row (included normally) — a transfer
+// same predicate) and records an opposite-type reversal row that is itself 'cancelled' — an
+// audit record, also excluded, so the pair nets to exactly "as if it never happened"
+// (migration 010 corrected reversal rows created 'active' before that fix) — a transfer
 // (transferBetweenCashboxes) is just two ordinary income/expense rows on two different
 // cashboxes. Both are already correctly reflected by summing type=income/expense per
 // cashbox_id; nothing about them requires a different formula.
