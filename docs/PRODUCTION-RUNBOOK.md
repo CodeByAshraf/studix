@@ -90,16 +90,18 @@ In plain terms, here is exactly what happens behind the scenes, with real paths 
 
 **Windows services registered and started:**
 - `StudixPostgreSQL` — the native PostgreSQL Windows service (registered via `pg_ctl register`, runs as `LocalSystem`, `AUTO_START`), listening on `127.0.0.1:55432` only.
-- `StudixApp` — the Node application, wrapped by NSSM as a Windows service (also `LocalSystem`, `AUTO_START`), listening on `127.0.0.1:4000` only, configured with `DependOnService = StudixPostgreSQL` so Windows always starts PostgreSQL first.
+- `StudixApp` — the Node application, wrapped by NSSM as a Windows service (also `LocalSystem`), listening on `127.0.0.1:4000` only, configured with `DependOnService = StudixPostgreSQL`. Its start type is deliberately **`DEMAND_START` (Manual)**, not Automatic: Windows itself never starts it at boot — the startup orchestrator below does, and only once it is safe to.
 
-Both are set to **start automatically on every Windows boot** — no manual step, ever, for the customer (§10).
+**Scheduled task for startup:** `StudixStartupOrchestrator` — a boot-triggered Scheduled Task that runs as **SYSTEM** with highest privileges (`C:\Program Files\Studix\node\node.exe "C:\Program Files\Studix\backend\src\db\startupOrchestrator.js"`). On every boot it waits until PostgreSQL is actually ready, runs the restore-state recovery check (finishing or rolling back an interrupted database switch, §11.4), and only if both succeed starts `StudixApp`. If either step fails, `StudixApp` is intentionally left stopped rather than started on top of an unsafe database state. Registered (and corrected if it drifted) by the installer on every install/upgrade, removed by uninstall.
+
+Together, Studix **comes up by itself on every Windows boot** — `StudixPostgreSQL` via Windows, `StudixApp` via the startup orchestrator — with no manual step, ever, for the customer (§10). **Do not change `StudixApp` to Automatic:** that would let Windows start the app before the readiness and recovery checks have run.
 
 **Scheduled task for backups:** `StudixDailyBackup` (runs as SYSTEM every day at 03:00, or right after the next boot if the PC was off) takes the verified daily database backup described in §11. Registered by the installer on every install/upgrade, removed by uninstall.
 
 **Database initialization (fresh install only):**
 1. `initdb` creates a brand-new PostgreSQL cluster in `pgdata\`, with a generated random password (never the customer's concern).
 2. The `studix` database and its full base schema are created (`backend/prisma/studix-schema.sql`).
-3. Any pending migrations are applied (`backend/migrations/*.sql` — currently `001_baseline.sql` through `004_licensing_clock_guard.sql`).
+3. Any pending migrations are applied (`backend/migrations/*.sql` — migrations 001 through 010 are included in this release, from `001_baseline.sql` to `010_reversal_rows_non_financial.sql`; later releases may add more).
 4. A restricted, least-privilege `studix_app` database role is created — this is the one the running application actually connects as day-to-day; the more powerful `studix_admin` role is only used for install/upgrade/migration.
 5. The Windows services are registered and started, and the installer polls `http://127.0.0.1:4000/health` until it responds `200`, up to 60 seconds, before declaring success.
 
@@ -110,7 +112,7 @@ Both are set to **start automatically on every Windows boot** — no manual step
 ## 5. First Launch
 
 - **What the operator/customer opens:** there is no separate desktop "Studix.exe" application window — Studix is a locally-hosted web app. The Start Menu shortcut (`Studix` → `Studix`, created under `{group}\Studix`) simply opens `http://localhost:4000/` in the **default web browser**. This also happens automatically once at the end of a successful install (§3, step 8).
-- **Services that should already be running** (no manual start needed): `StudixApp` and `StudixPostgreSQL`, both `AUTO_START`.
+- **Services that should already be running** (no manual start needed): `StudixPostgreSQL` (Automatic) and `StudixApp` (Manual start type, started by the installer and, after every boot, by `StudixStartupOrchestrator` — §4).
   - Verify from an elevated PowerShell: `sc.exe query StudixApp` and `sc.exe query StudixPostgreSQL` — both should show `STATE : 4  RUNNING`.
 - **Verify backend health** directly: open `http://localhost:4000/health` in a browser, or `curl http://127.0.0.1:4000/health` — a healthy install returns `{"ok":true,"service":"studix-backend","database":{"connected":true,...}}`.
 - **⚠️ Important, non-obvious step — the first screen is NOT a setup wizard automatically.** Verified directly in the frontend routing (`src/App.jsx`): the Start Menu shortcut opens `/`, which — since no one is logged in yet — redirects straight to the ordinary **login screen**. There is **no automatic redirect to first-run setup**. On the very first launch of a brand-new installation, **you must manually navigate the browser to:**
@@ -240,12 +242,12 @@ Designed to require **zero technical steps** from the customer:
 
 | Question | Answer |
 |---|---|
-| Start PostgreSQL manually? | **No.** `StudixPostgreSQL` is `AUTO_START` — Windows starts it on every boot, before `StudixApp` (explicit service dependency). |
-| Start Node manually? | **No.** `StudixApp` is also `AUTO_START`, wrapped by NSSM as a real Windows service. |
+| Start PostgreSQL manually? | **No.** `StudixPostgreSQL` is `AUTO_START` — Windows starts it on every boot. |
+| Start Node manually? | **No.** `StudixApp` (wrapped by NSSM as a real Windows service) is started after every boot by the `StudixStartupOrchestrator` scheduled task, once PostgreSQL is ready and the recovery check has passed. Its start type is Manual (`DEMAND_START`) on purpose — do not change it to Automatic (§4). |
 | Run any command? | **No**, for normal daily use. |
 | Need Command Prompt? | **No.** |
 | Need Administrator rights every time? | **No** — only the one-time install/uninstall/upgrade needs admin, plus copying backup files off the machine (§11.5); using the app day-to-day (opening the browser, logging in, using the app) does not. |
-| After a Windows restart? | Both services restart automatically; the customer just opens the Studix shortcut (or browser bookmark to `http://localhost:4000/`) as usual, no waiting required beyond normal Windows boot time. |
+| After a Windows restart? | Both services come back by themselves (`StudixPostgreSQL` via Windows, `StudixApp` via `StudixStartupOrchestrator`); the customer just opens the Studix shortcut (or browser bookmark to `http://localhost:4000/`) as usual, no waiting required beyond normal Windows boot time. |
 | If Studix (the browser tab) is closed? | Nothing happens to the services — they keep running in the background regardless of whether any browser window is open. Reopening `http://localhost:4000/` picks up exactly where it left off. |
 | If the PC loses Internet? | No effect — everything (app, database, license verification) runs 100% locally. Internet has no role in Studix's daily operation at all. |
 | Where is the data? | `C:\ProgramData\Studix\pgdata\` (never edit these files directly). |
