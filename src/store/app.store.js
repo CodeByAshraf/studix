@@ -228,7 +228,6 @@ export const useStoreActions = () => useAppStore((s) => ({
   setTreasuryMeta:     s.setTreasuryMeta,
   addTreasuryTxn:      s.addTreasuryTxn,
   updateTreasuryTxn:   s.updateTreasuryTxn,
-  reverseTreasuryTxn:  s.reverseTreasuryTxn,
   updateTreasuryMeta:  s.updateTreasuryMeta,
   addCashbox:               s.addCashbox,
   updateCashbox:            s.updateCashbox,

@@ -5,7 +5,7 @@ import {
   INITIAL_CASHBOXES,
   INITIAL_TREASURY_META,
 } from '../../data/initialData';
-import { buildCashboxTxn, buildTransfer } from '../../services/cashboxService';
+import { buildTransfer } from '../../services/cashboxService';
 
 export const createTreasurySlice = (set, get) => ({
   // ── State ────────────────────────────────────────────────────
@@ -48,43 +48,6 @@ export const createTreasurySlice = (set, get) => ({
       ),
     })),
 
-  reverseTreasuryTxn: (txnId, reason, currentUserId) => {
-    const txns = get().treasuryTxn;
-    const original = txns.find(t => t.id === txnId);
-    if (!original) throw { type:'NOT_FOUND', message:'العملية غير موجودة' };
-
-    const reversalTxn = {
-      ...buildCashboxTxn({
-        cashboxId:   original.cashboxId,
-        date:        new Date().toISOString().split('T')[0],
-        type:        original.type === 'income' ? 'expense' : 'income',
-        category:    original.category,
-        description: `عكس: ${original.description}`,
-        amount:      original.amount,
-        method:      original.method,
-        refType:     'reversal',
-        refId:       original.id,
-      }, currentUserId),
-      reversalOf: original.id,
-    };
-
-    const updatedOriginal = {
-      ...original,
-      status:     'reversed',
-      reversalId: reversalTxn.id,
-      reversalReason: reason,
-      updatedAt:  new Date().toISOString(),
-    };
-
-    set(s => ({
-      treasuryTxn: [
-        ...s.treasuryTxn.map(t => t.id === txnId ? updatedOriginal : t),
-        reversalTxn,
-      ],
-    }));
-    return { reversalTxn, updatedOriginal };
-  },
-
   // ── Transfer between cashboxes (atomic) ──────────────────────
   transferBetweenCashboxes: (data, createdBy) => {
     const { cashboxes } = get();
@@ -124,4 +87,9 @@ export const createTreasurySlice = (set, get) => ({
   // reverseLinkedTxn هناك كان أصلاً معطوباً بصمت (تعارض توقيع — تقرير تفتيش 3B-14C،
   // القسم 9) — لا يعتمد عليه شيء حي. حذف الدفعة واسترداد الدفعة أصبحا الآن عمليتين
   // ذرّيتين حقيقيتين على الخادم (backend/src/routes/payments.js)، لا محليتين.
+  //
+  // reverseTreasuryTxn المحلي أُزيل أيضاً — بلا أي مستدعٍ بعد إزالة reverseLinkedTxn
+  // (تحقّق مؤكَّد عبر grep قبل الإزالة). العكس يتمّ حصراً عبر pgReverseTreasuryTxn
+  // (PUT /api/treasuryTxn/:id/reverse)، وTreasuryPage.jsx يتبنّى ردّ الخادم عبر
+  // updateTreasuryTxn/addTreasuryTxn فقط.
 });

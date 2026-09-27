@@ -53,7 +53,7 @@ beforeEach(() => {
     reversal: {
       id: 'srv-rev-1', cashboxId: EXISTING_TXN.cashboxId, date: '2026-01-10', type: 'expense',
       category: EXISTING_TXN.category, amount: EXISTING_TXN.amount, method: EXISTING_TXN.method, party: EXISTING_TXN.party,
-      notes: body.reason, refType: 'reversal', refId: id, status: 'active', createdBy: 'u1',
+      notes: body.reason, refType: 'reversal', refId: id, status: 'cancelled', createdBy: 'u1',
       createdAt: '2026-01-10T00:00:00.000Z',
     },
   });
@@ -198,7 +198,7 @@ describe('TreasuryPage — treasury_txn write flows (Phase 3B-14B)', () => {
       reversal: {
         id: 'srv-rev-1', cashboxId: 'cb1', date: '2026-01-10', type: 'expense', category: 'subscriptions',
         amount: 200, method: 'cash', party: 'أحمد',
-        notes: 'خطأ في إدخال المبلغ', refType: 'reversal', refId: 'tx1', status: 'active',
+        notes: 'خطأ في إدخال المبلغ', refType: 'reversal', refId: 'tx1', status: 'cancelled',
         createdBy: 'u1', createdAt: '2026-01-10T00:00:00.000Z',
       },
     }));
@@ -215,6 +215,8 @@ describe('TreasuryPage — treasury_txn write flows (Phase 3B-14B)', () => {
     expect(reversal.refType).toBe('reversal');
     expect(reversal.refId).toBe('tx1');
     expect(reversal.type).toBe('expense'); // معاكس لنوع الأصل (income)
+    // سجلّ تدقيق للزوج بلا أثر مالي (19e3359) — يُتبنّى كما أعاده الخادم تماماً
+    expect(reversal.status).toBe('cancelled');
     // نداءان: مزامنة cb_main الخلفية (Issue 2) + العكس الذرّي الوحيد
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });

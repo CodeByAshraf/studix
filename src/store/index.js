@@ -84,7 +84,6 @@ export function useApp() {
     saveAutoBackup: s.saveAutoBackup,
     addTreasuryTxn:     s.addTreasuryTxn,
     updateTreasuryTxn:  s.updateTreasuryTxn,
-    reverseTreasuryTxn: s.reverseTreasuryTxn,
     updateTreasuryMeta: s.updateTreasuryMeta,
   })));
 

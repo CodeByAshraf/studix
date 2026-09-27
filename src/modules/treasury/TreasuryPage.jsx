@@ -553,10 +553,9 @@ export default function TreasuryPage() {
 
   // ── Reverse ──────────────────────────────────────────────────
   // Phase 3B-14B: نداء ذرّي واحد (PUT /api/treasuryTxn/:id/reverse) — يعيد {original,
-  // reversal} معاً؛ نتبنّى كليهما بعد النجاح فقط (updateTreasuryTxn/addTreasuryTxn، لا
-  // reverseTreasuryTxn المحلي القديم — ذاك يبقى محجوزاً لمسار PaymentsPage.jsx وحده
-  // (reverseLinkedTxn)، خارج نطاق 3B-14B تماماً، ولم يُمَسّ). السبب يأتي من المستخدم
-  // فعلياً الآن، لا نص ثابت.
+  // reversal} معاً (كلاهما 'cancelled' — زوج العكس بلا أثر مالي)؛ نتبنّى كليهما بعد
+  // النجاح فقط (updateTreasuryTxn/addTreasuryTxn — لا عكس محلي في المتجر إطلاقاً). السبب
+  // يأتي من المستخدم فعلياً الآن، لا نص ثابت.
   const handleReverse = useCallback(async () => {
     const txn = reverseModal.txn;
     if (!reverseReason.trim()) { setReverseError('سبب العكس مطلوب'); return; }
