@@ -94,6 +94,14 @@ export function resolvePgDataDir() {
   return path.join(programData, 'Studix', 'pgdata');
 }
 
+// The ad-hoc (pg_ctl -l) startup log of the one-time provisioning instance. It lives in the
+// installing user's %TEMP%, not in %ProgramData%\Studix: pg_ctl writes it from inside the
+// restricted, non-admin process it launches postgres with, and %ProgramData%\Studix is locked
+// to Administrators + SYSTEM (installer/dataDirAcl.js) — that process may only touch pgdata.
+export function resolvePgStartupLogPath() {
+  return path.join(os.tmpdir(), 'studix-pg-startup.log');
+}
+
 // ── binary location ────────────────────────────────────────────────────────────────────────
 export function locatePgBinaries(pgHome = resolvePgHome(), io = {}) {
   const { existsSync } = { ...REAL_IO, ...io };
@@ -567,7 +575,7 @@ export async function provisionPostgres({
     throw new PostgresProvisioningError('inconsistent_data_dir', classification.reason);
   }
 
-  const logFile = path.join(path.dirname(pgDataDir), 'pg-startup.log');
+  const logFile = resolvePgStartupLogPath();
 
   if (classification.state === 'initialized') {
     const { port } = classification;

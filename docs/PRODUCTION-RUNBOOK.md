@@ -86,7 +86,7 @@ In plain terms, here is exactly what happens behind the scenes, with real paths 
 - `config\admin.env` — a **separate**, more privileged database connection (`studix_admin` role), used only during installation/upgrade for schema/migration work. The running application itself never reads this file.
 - `logs\` — `studix-YYYY-MM-DD.log` (daily application log), `studix-app-service-stdout.log` / `studix-app-service-stderr.log` (raw NSSM-captured console output).
 - `backups\` — verified full database backups: the **daily** routine backups (`studix-backup-<UTC timestamp>.dump`, kept 14 days / newest 7 always, older ones cleaned up automatically) and the pre-migration backups taken before an upgrade migrates the database (`pre-migration-<timestamp>.dump`, never cleaned up) — see §11. **The folder itself is never deleted, by anyone, including a full data wipe uninstall.**
-- `pg-startup.log` — PostgreSQL's own startup log from the very first, one-time ad-hoc initialization step (not written to again once the Windows service takes over — see §12 for why this matters on upgrades).
+- PostgreSQL's own startup log from the one-time ad-hoc initialization step is **not** kept here: it is written to `%TEMP%\studix-pg-startup.log` of the administrator who ran the installer (e.g. `C:\Users\<admin>\AppData\Local\Temp\`), because that initialization runs with PostgreSQL's restricted (non-admin) token, which only gets temporary access to `pgdata\` during installation. It is not written to again once the Windows service takes over (see §12).
 
 **Windows services registered and started:**
 - `StudixPostgreSQL` — the native PostgreSQL Windows service (registered via `pg_ctl register`, runs as `LocalSystem`, `AUTO_START`), listening on `127.0.0.1:55432` only.
@@ -391,7 +391,7 @@ Use this when: replacing the program files (e.g. as a manual pre-step before a c
 | SmartScreen warning | "Windows protected your PC" | Installer is not code-signed (§1/§2) | Click **More info** → **Run anyway** |
 | Antivirus removes/quarantines the installer | File disappears after download/copy | Heuristic flag on an unsigned installer bundling `nssm.exe`/`postgres.exe` | Restore from quarantine or whitelist the file; re-verify SHA256 afterward |
 | Installation fails, message box with a step name | e.g. `[provision_postgres] ...` | Any transient issue during first-run provisioning | Simply re-run the installer — every step is safely re-runnable (§3, step 9) |
-| PostgreSQL service won't start | `sc.exe query StudixPostgreSQL` shows `STOPPED` | Corrupted/incomplete `pgdata\`, or version mismatch after a manual file edit | `classifyDataDir`/`provisionPostgres` fail closed rather than guessing — check `C:\ProgramData\Studix\pg-startup.log` for the real PostgreSQL error; do not manually edit `pgdata\` files |
+| PostgreSQL service won't start | `sc.exe query StudixPostgreSQL` shows `STOPPED` | Corrupted/incomplete `pgdata\`, or version mismatch after a manual file edit | `classifyDataDir`/`provisionPostgres` fail closed rather than guessing — check the installer-time startup log `%TEMP%\studix-pg-startup.log` of the administrator who ran the installer for the real PostgreSQL error; do not manually edit `pgdata\` files |
 | Studix (app) service won't start | `sc.exe query StudixApp` shows `STOPPED` | `StudixPostgreSQL` isn't running yet (hard dependency) or `.env` is missing/corrupted | Confirm `StudixPostgreSQL` is `RUNNING` first; check `C:\ProgramData\Studix\logs\studix-app-service-stderr.log` |
 | Port conflict | Health check fails, startup log mentions the port | Something else is already bound to `127.0.0.1:4000` or `:55432` (Studix's own bundled instances only — never 5432) | Free the conflicting port, or identify what else on the machine is using 4000/55432 |
 | Database connection failure | `/health` shows `"connected": false` | `StudixPostgreSQL` not running, or `config\.env`'s connection string doesn't match reality | Verify the service first; do not hand-edit `.env` unless you know exactly what you're changing |
@@ -419,7 +419,7 @@ Use this when: replacing the program files (e.g. as a manual pre-step before a c
 | `C:\ProgramData\Studix\config\admin.env` | Privileged DB connection, used only for install/upgrade/migration | Never share this file or its contents with anyone outside your own operational team. |
 | `C:\ProgramData\Studix\logs\` | Application + service logs | Safe to read/copy (as Administrator — see §4); safe to delete old log files if disk space is a concern (the app will just create new ones). |
 | `C:\ProgramData\Studix\backups\` | Verified daily `studix-backup-*.dump`, `pre-migration-*.dump`, `backup-status.json`, `.routine-backup.lock` (only while a backup runs) | **Never delete** by hand — old daily backups are removed automatically by retention (§11.1); the installer/uninstaller never touches this folder. Copy `*.dump` files off the machine regularly (§11.5). |
-| `C:\ProgramData\Studix\pg-startup.log` | One-time ad-hoc PostgreSQL startup log (fresh-init only) | Diagnostic only, safe to delete. |
+| `%TEMP%\studix-pg-startup.log` (of the administrator who ran the installer) | One-time ad-hoc PostgreSQL startup log (installation only) | Diagnostic only, safe to delete. |
 
 | Command | When to use it |
 |---|---|

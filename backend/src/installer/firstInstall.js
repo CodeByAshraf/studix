@@ -17,6 +17,7 @@
 // restricted studix_app connection string.
 //
 //   lockDownDataRootAcl()                          (%ProgramData%\Studix -> Administrators + SYSTEM)
+//   -> grantPgProvisioningAccess()                 (installing user: pgdata only, temporary)
 //   -> provisionPostgres()
 //   -> resolve/persist the studix_admin (provisioning) connection — separate admin-only file
 //   -> bootstrapDatabase()                          (schema, existing/unmodified internals)
@@ -25,6 +26,7 @@
 //   -> ensureProductionConfig({ databaseUrl: <studix_app URL> })   (only on first role creation)
 //   -> stopPostgres()                                (hand off the ad-hoc instance)
 //   -> register + start the PostgreSQL service
+//   -> restoreDataRootAcl()                          (temporary access removed; lockdown verified)
 //   -> register + start the Studix application service
 //   -> poll GET /health until 200
 //   -> open the default browser
@@ -74,7 +76,7 @@ import {
 import { ensureStartupTask, ensureBackupTask } from '../lib/scheduledTask.js';
 import { readRestoreState, RestoreStateError } from '../db/restoreState.js';
 import { provisionLicensingPublicKey } from '../lib/licensingTrustAnchor.js';
-import { lockDownDataRootAcl } from './dataDirAcl.js';
+import { lockDownDataRootAcl, grantPgProvisioningAccess, restoreDataRootAcl } from './dataDirAcl.js';
 
 export class FirstInstallError extends Error {
   constructor(step, cause) {
@@ -123,15 +125,40 @@ function defaultCreateMigrationPrismaClient(url) {
 // every external call this function makes (each reused INSTALL-02/03/05/10 function, the health
 // poll, opening the browser) is overridable, so the entire sequencing/branching contract above
 // is unit-testable without a real PostgreSQL, real Windows services, or a real browser.
-export async function runFirstInstall({
+//
+// While the temporary pgdata provisioning access (step 0b) is in place, ANY failure first
+// restores the final %ProgramData%\Studix ACL (lockdown + verification) before the error
+// propagates. If that restore itself fails, the install fails with step 'restore_data_acl'
+// (the original error is kept as .provisioningError) — never silently with a weaker ACL.
+export async function runFirstInstall(options = {}) {
+  const provisioningAccess = { active: false, restore: null };
+  try {
+    return await runFirstInstallSteps(options, provisioningAccess);
+  } catch (err) {
+    if (!provisioningAccess.active) throw err;
+    provisioningAccess.active = false;
+    try {
+      provisioningAccess.restore();
+    } catch (restoreErr) {
+      const failure = new FirstInstallError('restore_data_acl', restoreErr);
+      failure.provisioningError = err;
+      throw failure;
+    }
+    throw err;
+  }
+}
+
+async function runFirstInstallSteps({
   schemaPath,
   port = process.env.PORT || 4000,
   healthTimeoutMs = DEFAULT_HEALTH_TIMEOUT_MS,
   healthIntervalMs = DEFAULT_HEALTH_INTERVAL_MS,
   deps = {},
-} = {}) {
+} = {}, provisioningAccess) {
   const {
     lockDownDataRootAclFn = lockDownDataRootAcl,
+    grantPgProvisioningAccessFn = grantPgProvisioningAccess,
+    restoreDataRootAclFn = restoreDataRootAcl,
     provisionPostgresFn = provisionPostgres,
     generatePostgresPasswordFn = generatePostgresPassword,
     ensureProvisioningAdminConfigFn = ensureProvisioningAdminConfig,
@@ -174,6 +201,19 @@ export async function runFirstInstall({
     lockDownDataRootAclFn();
   } catch (err) {
     throw new FirstInstallError('lock_down_data_acl', err);
+  }
+
+  // 0b. Temporary PostgreSQL provisioning access (installer/dataDirAcl.js): initdb and the
+  // ad-hoc pg_ctl start run with a restricted token WITHOUT the Administrators group, so under
+  // the lockdown they could not touch pgdata at all. The installing user's SID gets full control
+  // of pgdata ONLY (never config\, backups\, logs\ or the root) until step 9b removes it. Marked
+  // active before the grant runs, so even a partially applied grant is cleaned up on failure.
+  provisioningAccess.restore = () => restoreDataRootAclFn();
+  provisioningAccess.active = true;
+  try {
+    grantPgProvisioningAccessFn({ pgDataDir: resolvePgDataDirFn() });
+  } catch (err) {
+    throw new FirstInstallError('grant_provisioning_access', err);
   }
 
   // 1. PostgreSQL cluster provisioning — idempotent; guarantees PostgreSQL is running (ad-hoc-
@@ -320,6 +360,17 @@ export async function runFirstInstall({
     startServiceFn(STUDIX_POSTGRES_SERVICE_NAME);
   } catch (err) {
     throw new FirstInstallError('start_postgres_service', err);
+  }
+
+  // 9b. PostgreSQL now runs as the LocalSystem service and the ad-hoc instance is stopped —
+  // remove the temporary pgdata access: full lockdown again, then verify by SID that the whole
+  // tree is Administrators + SYSTEM only (inheritance removed, no explicit ACE below the root).
+  // Fails closed: a failure here stops the install instead of continuing with a weaker ACL.
+  provisioningAccess.active = false;
+  try {
+    restoreDataRootAclFn();
+  } catch (err) {
+    throw new FirstInstallError('restore_data_acl', err);
   }
 
   // 10–11. Studix application service. nssmPath is pinned explicitly to the packaged

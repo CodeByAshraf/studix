@@ -26,6 +26,7 @@ import {
   locatePgBinaries,
   verifyEffectiveConfig,
   classifyDataDir,
+  resolvePgStartupLogPath,
   PostgresProvisioningError,
 } from './postgresProvisioning.js';
 import {
@@ -82,11 +83,9 @@ describe.skipIf(!realPgHome)('postgresProvisioning — real disposable PostgreSQ
   let scratchRoot;
 
   beforeAll(async () => {
-    // Nested one level below the wrapper temp dir (not directly under the shared os.tmpdir()
-    // root) so provisionPostgres's default log-file location (a sibling of pgDataDir — correct
-    // for the real %ProgramData%\Studix\{pgdata,pg-startup.log} deployment case) stays
-    // contained and gets cleaned up together with everything else in afterAll, instead of
-    // leaving a stray pg-startup.log directly in the shared OS temp root.
+    // Nested one level below the wrapper temp dir so pgdata is cleaned up together with
+    // everything else in afterAll. (provisionPostgres's ad-hoc startup log is
+    // resolvePgStartupLogPath() — the installing user's %TEMP% — not a sibling of pgdata.)
     scratchRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'studix-pgprov-real-'));
     scratchDataDir = path.join(scratchRoot, 'pgdata');
     fs.mkdirSync(scratchDataDir);
@@ -103,7 +102,7 @@ describe.skipIf(!realPgHome)('postgresProvisioning — real disposable PostgreSQ
     } catch (err) {
       if (err instanceof PostgresProvisioningError && err.reason === 'start_failed') {
         realBindBlocked = true;
-        const logPath = path.join(os.tmpdir(), 'pg-startup.log');
+        const logPath = resolvePgStartupLogPath();
         const logTail = fs.existsSync(logPath) ? fs.readFileSync(logPath, 'utf8').slice(-500) : '(no log file)';
         realBindBlockedReason = `${err.message}\n--- pg-startup.log tail ---\n${logTail}`;
         // eslint-disable-next-line no-console

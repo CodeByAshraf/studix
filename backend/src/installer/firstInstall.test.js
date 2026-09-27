@@ -20,6 +20,8 @@ function baseDeps(overrides = {}) {
 
   const deps = {
     lockDownDataRootAclFn: vi.fn((...args) => { record('lockDownDataRootAcl')(...args); return { dataRoot: 'C:\\ProgramData\\Studix' }; }),
+    grantPgProvisioningAccessFn: vi.fn((...args) => { record('grantPgProvisioningAccess')(...args); return { sid: 'S-1-5-21-1-2-3-1001', granted: true }; }),
+    restoreDataRootAclFn: vi.fn((...args) => { record('restoreDataRootAcl')(...args); return { dataRoot: 'C:\\ProgramData\\Studix' }; }),
     provisionPostgresFn: vi.fn(async (...args) => { record('provisionPostgres')(...args); return { status: 'initialized', databaseUrl: ADMIN_URL, port: 55432 }; }),
     generatePostgresPasswordFn: vi.fn(() => 'deadbeef00'),
     ensureProvisioningAdminConfigFn: vi.fn((...args) => { record('ensureProvisioningAdminConfig')(...args); return { created: true }; }),
@@ -156,10 +158,10 @@ describe('runFirstInstall — fresh install (provisionPostgres returns "initiali
 
     const order = calls.map((c) => c[0]);
     expect(order).toEqual([
-      'lockDownDataRootAcl',
+      'lockDownDataRootAcl', 'grantPgProvisioningAccess',
       'provisionPostgres', 'ensureProvisioningAdminConfig', 'validateDatabaseUrl',
       'bootstrapDatabase', 'createMigrationPrismaClient', 'runMigrations', 'provisionLicensingPublicKey', 'ensureAppRole',
-      'ensureProductionConfig', 'stopPostgres', 'registerPostgresService', 'startService',
+      'ensureProductionConfig', 'stopPostgres', 'registerPostgresService', 'startService', 'restoreDataRootAcl',
       'registerAppService', 'readRestoreState', 'startService', 'registerScheduledTask', 'registerBackupTask', 'waitForHealth', 'openBrowser',
     ]);
   });
@@ -362,6 +364,8 @@ describe('runFirstInstall — resolving the admin connection fails closed, never
 describe('runFirstInstall — failure at each step stops immediately with a machine-readable .step', () => {
   it.each([
     ['lock_down_data_acl', 'lockDownDataRootAclFn', () => { throw new Error('icacls /reset failed'); }],
+    ['grant_provisioning_access', 'grantPgProvisioningAccessFn', () => { throw new Error('icacls /grant failed'); }],
+    ['restore_data_acl', 'restoreDataRootAclFn', () => { throw new Error('verification failed'); }],
     ['provision_postgres', 'provisionPostgresFn', () => { throw new Error('pg down'); }],
     ['bootstrap_database', 'bootstrapDatabaseFn', () => { throw new Error('schema failed'); }],
     ['ensure_app_role', 'ensureAppRoleFn', () => { throw new Error('grant failed'); }],
@@ -390,6 +394,15 @@ describe('runFirstInstall — failure at each step stops immediately with a mach
     expect(deps.provisionPostgresFn).not.toHaveBeenCalled();
     expect(deps.ensureProvisioningAdminConfigFn).not.toHaveBeenCalled();
     expect(deps.ensureProductionConfigFn).not.toHaveBeenCalled();
+  });
+
+  it('a data-folder ACL failure at step 0 grants nothing and restores nothing (no temporary access exists yet)', async () => {
+    const { deps } = baseDeps({
+      lockDownDataRootAclFn: vi.fn(() => { throw new Error('icacls access denied'); }),
+    });
+    await expect(runFirstInstall({ schemaPath: 'schema.sql', deps })).rejects.toMatchObject({ step: 'lock_down_data_acl' });
+    expect(deps.grantPgProvisioningAccessFn).not.toHaveBeenCalled();
+    expect(deps.restoreDataRootAclFn).not.toHaveBeenCalled();
   });
 
   it('run_migrations failure stops with step "run_migrations" but still disconnects the migration client', async () => {
@@ -519,10 +532,10 @@ describe('runFirstInstall — restore-state guard before starting StudixApp (aud
     await runFirstInstall({ schemaPath: 'schema.sql', deps });
     const order = calls.map((c) => c[0]);
     expect(order).toEqual([
-      'lockDownDataRootAcl',
+      'lockDownDataRootAcl', 'grantPgProvisioningAccess',
       'provisionPostgres', 'ensureProvisioningAdminConfig', 'validateDatabaseUrl',
       'bootstrapDatabase', 'createMigrationPrismaClient', 'runMigrations', 'provisionLicensingPublicKey', 'ensureAppRole',
-      'ensureProductionConfig', 'stopPostgres', 'registerPostgresService', 'startService',
+      'ensureProductionConfig', 'stopPostgres', 'registerPostgresService', 'startService', 'restoreDataRootAcl',
       'registerAppService', 'readRestoreState', 'startService', 'registerScheduledTask', 'registerBackupTask',
       'waitForHealth', 'openBrowser',
     ]);
@@ -605,5 +618,91 @@ describe('runFirstInstall — step 4b: licensing public key provisioning (P1-3)'
 
     expect(err.step).toBe('run_migrations');
     expect(deps.provisionLicensingPublicKeyFn).not.toHaveBeenCalled();
+  });
+});
+
+describe('runFirstInstall — temporary PostgreSQL provisioning access (pgdata only)', () => {
+  const PGDATA = 'C:\\ProgramData\\Studix\\pgdata';
+
+  it('fresh install: lockdown -> pgdata-only grant -> provisioning ... -> PostgreSQL service up -> restore, then the app service', async () => {
+    const { deps, calls } = baseDeps();
+    await runFirstInstall({ schemaPath: 'schema.sql', deps });
+    const order = calls.map((c) => c[0]);
+
+    expect(order.indexOf('lockDownDataRootAcl')).toBe(0);
+    expect(order.indexOf('grantPgProvisioningAccess')).toBe(1);
+    expect(order.indexOf('grantPgProvisioningAccess')).toBeLessThan(order.indexOf('provisionPostgres'));
+    // restore happens only after the ad-hoc instance is stopped and the LocalSystem service runs…
+    const restoreAt = order.indexOf('restoreDataRootAcl');
+    expect(restoreAt).toBeGreaterThan(order.indexOf('stopPostgres'));
+    expect(restoreAt).toBeGreaterThan(order.indexOf('registerPostgresService'));
+    expect(calls[restoreAt - 1]).toEqual(['startService', 'StudixPostgreSQL']);
+    // …and before anything else runs (app service, tasks, health).
+    expect(restoreAt).toBeLessThan(order.indexOf('registerAppService'));
+    expect(order.filter((n) => n === 'restoreDataRootAcl')).toHaveLength(1);
+  });
+
+  it('grants access to the pgdata directory only — nothing else is passed to the grant', async () => {
+    const { deps } = baseDeps();
+    await runFirstInstall({ schemaPath: 'schema.sql', deps });
+    expect(deps.grantPgProvisioningAccessFn).toHaveBeenCalledTimes(1);
+    expect(deps.grantPgProvisioningAccessFn).toHaveBeenCalledWith({ pgDataDir: PGDATA });
+  });
+
+  it('upgrade / re-run (existing cluster): the same grant -> restore lifecycle runs', async () => {
+    const { deps, calls } = baseDeps({
+      provisionPostgresFn: vi.fn(async (...args) => { calls.push(['provisionPostgres', ...args]); return { status: 'already_initialized', port: 55432 }; }),
+    });
+    await runFirstInstall({ schemaPath: 'schema.sql', deps });
+    const order = calls.map((c) => c[0]);
+    expect(order.slice(0, 3)).toEqual(['lockDownDataRootAcl', 'grantPgProvisioningAccess', 'provisionPostgres']);
+    expect(order.indexOf('restoreDataRootAcl')).toBeGreaterThan(order.indexOf('registerPostgresService'));
+    expect(order.indexOf('restoreDataRootAcl')).toBeLessThan(order.indexOf('registerAppService'));
+  });
+
+  it.each([
+    ['grant_provisioning_access', { grantPgProvisioningAccessFn: vi.fn(() => { throw new Error('icacls /grant failed'); }) }],
+    ['provision_postgres', { provisionPostgresFn: vi.fn(async () => { throw new Error('initdb failed'); }) }],
+    ['bootstrap_database', { bootstrapDatabaseFn: vi.fn(async () => { throw new Error('schema failed'); }) }],
+    ['write_production_config', { ensureProductionConfigFn: vi.fn(() => { throw new Error('disk full'); }) }],
+    ['stop_adhoc_postgres', { stopPostgresFn: vi.fn(() => { throw new Error('stop failed'); }) }],
+    ['start_postgres_service', { registerPostgresServiceFn: vi.fn(() => { throw new Error('register failed'); }) }],
+  ])('a failure at %s while the temporary access exists restores the lockdown, then reports the original step', async (step, overrides) => {
+    const { deps } = baseDeps(overrides);
+    await expect(runFirstInstall({ schemaPath: 'schema.sql', deps })).rejects.toMatchObject({ step });
+    expect(deps.restoreDataRootAclFn).toHaveBeenCalledTimes(1);
+    expect(deps.registerAppServiceFn).not.toHaveBeenCalled();
+  });
+
+  it('fails closed with step "restore_data_acl" (original error kept) when that cleanup itself fails', async () => {
+    const original = new Error('initdb failed');
+    const { deps } = baseDeps({
+      provisionPostgresFn: vi.fn(async () => { throw original; }),
+      restoreDataRootAclFn: vi.fn(() => { throw new Error('verification: pgdata still grants S-1-5-21-1-2-3-1001'); }),
+    });
+    const err = await runFirstInstall({ schemaPath: 'schema.sql', deps }).catch((e) => e);
+    expect(err).toBeInstanceOf(FirstInstallError);
+    expect(err.step).toBe('restore_data_acl');
+    expect(err.provisioningError).toBeInstanceOf(FirstInstallError);
+    expect(err.provisioningError.step).toBe('provision_postgres');
+    expect(err.provisioningError.cause).toBe(original);
+  });
+
+  it('a failure of the final restore (step 9b) stops the install before the app service — and is not retried as "cleanup"', async () => {
+    const { deps } = baseDeps({
+      restoreDataRootAclFn: vi.fn(() => { throw new Error('icacls /reset failed'); }),
+    });
+    await expect(runFirstInstall({ schemaPath: 'schema.sql', deps })).rejects.toMatchObject({ step: 'restore_data_acl' });
+    expect(deps.restoreDataRootAclFn).toHaveBeenCalledTimes(1);
+    expect(deps.registerAppServiceFn).not.toHaveBeenCalled();
+    expect(deps.registerBackupTaskFn).not.toHaveBeenCalled();
+  });
+
+  it('a failure after the final restore does not touch the ACL again', async () => {
+    const { deps } = baseDeps({
+      registerBackupTaskFn: vi.fn(() => { throw new Error('schtasks access denied'); }),
+    });
+    await expect(runFirstInstall({ schemaPath: 'schema.sql', deps })).rejects.toMatchObject({ step: 'register_backup_task' });
+    expect(deps.restoreDataRootAclFn).toHaveBeenCalledTimes(1);
   });
 });
