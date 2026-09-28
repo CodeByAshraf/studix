@@ -114,8 +114,9 @@ export function toAttendDays(selected, group) {
 // produces the same attendancePct: null as before, since `[].total`/`undefined.total` is
 // undefined either way.
 // members (optional): this group's Map<studentId, role> from buildGroupMembership — when
-// given, membership comes from enrollments; omitted, the legacy students.groupId match is
-// kept for callers not yet on enrollment membership.
+// given, membership comes from enrollments (and only role='primary' members count toward
+// monthlyExpected); omitted, the legacy students.groupId match is kept for callers not yet
+// on enrollment membership.
 export function getGroupStats(group, students, payments, attendanceStats = {}, treasuryTxn = [], members) {
   const isMember = members
     ? (s) => members.has(s.id)
@@ -132,7 +133,12 @@ export function getGroupStats(group, students, payments, attendanceStats = {}, t
   // ضمن "المحصَّل" بكامل مبلغها، فتُضخِّم totalRevenue/collectionRate المُشتقّين منها.
   const collected = monthlyPayments.filter(p => p.status === 'paid').reduce((s,p) => s + (p.amount - getRefundedAmount(p.id, treasuryTxn)), 0);
   // الإيراد المتوقع = مجموع رسوم كل طالب (رسوم الطالب الفردية أو سعر المجموعة احتياطياً)
-  const expected  = groupStudents.reduce((sum, s) => {
+  // The monthly fee is student-level and is billed/collected in the student's PRIMARY group
+  // (payments carry the Primary groupId — paymentService.js), so with enrollment membership
+  // only Primary members contribute here: an Additional Group enrollment is membership/
+  // schedule only and never adds a second fee. Membership counts above still include them.
+  const feePayers = members ? groupStudents.filter(s => members.get(s.id) === 'primary') : groupStudents;
+  const expected  = feePayers.reduce((sum, s) => {
     const fee = Number(s.monthlyFee);
     return sum + (fee > 0 ? fee : (Number(group.price) || 0));
   }, 0);

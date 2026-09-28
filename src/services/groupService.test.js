@@ -152,3 +152,64 @@ describe('enrollment attendance-day helpers', () => {
     expect(toAttendDays(['sat'], { days: null })).toBeNull();
   });
 });
+
+// Additional Group enrollment is membership/schedule only — the monthly fee is student-level
+// and billed in the student's Primary group, so with enrollment membership a student adds to
+// monthlyExpected (the collection % denominator) at most once: in their Primary group only.
+describe('getGroupStats with enrollment membership — each student contributes their fee at most once', () => {
+  const GA = { id: 'gA', name: 'أ', price: 1000, max: 30 };
+  const GB = { id: 'gB', name: 'ب', price: 1000, max: 30 };
+  const GC = { id: 'gC', name: 'ج', price: 1000, max: 30 };
+  const S1 = { id: 's1', name: 's1', groupId: 'gA', status: 'active', monthlyFee: 500 };
+  const now = new Date();
+  const pay = (id, groupId, amount) => ({ id, studentId: 's1', groupId, amount, status: 'paid', month: now.getMonth() + 1, year: now.getFullYear() });
+  const members = (role) => new Map([['s1', role]]);
+
+  it('1. a student in one Primary Group contributes their monthly fee once', () => {
+    const stats = getGroupStats(GA, [S1], [], [], [], members('primary'));
+    expect(stats.monthlyExpected).toBe(500);
+  });
+
+  it('2/4. Primary + one Additional: the fee counts in the Primary group only; the Additional group expects nothing from it', () => {
+    const primary = getGroupStats(GA, [S1], [], [], [], members('primary'));
+    const additional = getGroupStats(GB, [S1], [], [], [], members('additional'));
+    expect(primary.monthlyExpected).toBe(500);
+    expect(additional.monthlyExpected).toBe(0);
+    expect(primary.monthlyExpected + additional.monthlyExpected).toBe(500);
+  });
+
+  it('3. Primary + multiple Additional groups: still exactly one fee across every group card', () => {
+    const total = [[GA, 'primary'], [GB, 'additional'], [GC, 'additional']]
+      .map(([g, role]) => getGroupStats(g, [S1], [], [], [], members(role)).monthlyExpected)
+      .reduce((a, b) => a + b, 0);
+    expect(total).toBe(500);
+  });
+
+  it('4. Additional membership still counts toward membership/capacity, just not toward expected revenue', () => {
+    const additional = getGroupStats(GB, [S1], [], [], [], members('additional'));
+    expect(additional.activeCount).toBe(1);
+    expect(additional.totalCount).toBe(1);
+    expect(additional.monthlyExpected).toBe(0);
+    expect(additional.collectionRate).toBe(0); // no expected amount → 0%, never a division by zero
+  });
+
+  it('5. collection % in the Primary group is unchanged by the student\'s Additional memberships', () => {
+    const withAdditionals = getGroupStats(GA, [S1], [pay('p1', 'gA', 250)], [], [], members('primary'));
+    const legacyPath = getGroupStats(GA, [S1], [pay('p1', 'gA', 250)], [], []);
+    expect(withAdditionals.monthlyCollected).toBe(250);
+    expect(withAdditionals.collectionRate).toBe(50);
+    expect(withAdditionals.collectionRate).toBe(legacyPath.collectionRate);
+  });
+
+  it('6. a Primary member with no fee still falls back to the group price exactly as before; an Additional one adds nothing', () => {
+    const noFee = { ...S1, monthlyFee: null };
+    expect(getGroupStats(GA, [noFee], [], [], [], members('primary')).monthlyExpected).toBe(1000);
+    expect(getGroupStats(GA, [noFee], [], [], []).monthlyExpected).toBe(1000); // legacy path, unchanged
+    expect(getGroupStats(GB, [noFee], [], [], [], members('additional')).monthlyExpected).toBe(0);
+  });
+
+  it('inactive members contribute nothing, whatever their role (unchanged)', () => {
+    const inactive = { ...S1, status: 'inactive' };
+    expect(getGroupStats(GA, [inactive], [], [], [], members('primary')).monthlyExpected).toBe(0);
+  });
+});

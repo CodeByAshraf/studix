@@ -22,7 +22,7 @@ const YEAR = now.getFullYear();
 const GROUP = { id: 'g1', name: 'مجموعة أ', subject: 'رياضيات', teacher: 'أ. محمد', time: '5:00', days: [], max: 8, color: '#3b82f6' };
 const STUDENT = { id: 's1', name: 'طالب', groupId: 'g1', status: 'active', monthlyFee: 1000 };
 
-function mockFetch({ payments, groupAggregate = [], attendanceGroupAggregate = [] }) {
+function mockFetch({ payments, groupAggregate = [], attendanceGroupAggregate = [], extraEnrollments = [] }) {
   const attendanceAggregateCalls = [];
   globalThis.fetch = vi.fn((url) => {
     const u = String(url);
@@ -53,7 +53,8 @@ function mockFetch({ payments, groupAggregate = [], attendanceGroupAggregate = [
     if (u.includes('/api/enrollments')) {
       const data = useAppStore.getState().students
         .filter((s) => s.groupId)
-        .map((s) => ({ id: `e-${s.id}`, studentId: s.id, groupId: s.groupId, role: 'primary', status: 'active' }));
+        .map((s) => ({ id: `e-${s.id}`, studentId: s.id, groupId: s.groupId, role: 'primary', status: 'active' }))
+        .concat(extraEnrollments);
       return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true, data }) });
     }
     return Promise.reject(new Error(`unexpected fetch: ${u}`));
@@ -162,5 +163,34 @@ describe('GroupsPage grid view (GroupCard) — attendance % now fetched in one b
 
     const label = await screen.findByText('حضور %');
     expect(within(label.parentElement).getByText('—')).toBeInTheDocument();
+  });
+});
+
+// An Additional Group enrollment is membership/schedule only: the student's fee is billed in
+// their Primary group, so it must not inflate an Additional group's expected amount (the
+// collection % denominator) on the Groups card.
+describe('GroupsPage grid view — an Additional member does not add a second fee to the card', () => {
+  it("the Additional group's collection % counts only its Primary members' fees", async () => {
+    const GROUP_B = { id: 'g2', name: 'مجموعة ب', subject: 'فيزياء', teacher: 'أ. سعيد', time: '6:00', days: [], max: 8, color: '#10b981' };
+    const PRIMARY_B = { id: 's2', name: 'طالب ب', groupId: 'g2', status: 'active', monthlyFee: 1000 };
+    useAppStore.setState({
+      groups: [GROUP, GROUP_B], students: [STUDENT, PRIMARY_B], attendance: [], treasuryTxn: [],
+      admissions: [], communications: [], homeworks: [],
+    });
+    mockFetch({
+      payments: [{ id: 'p2', studentId: 's2', groupId: 'g2', month: MONTH, year: YEAR, status: 'paid', amount: 1000 }],
+      groupAggregate: [{ key: 'g2', count: 1, revenue: 1000 }],
+      // s1 (Primary: g1, fee 1000) also attends g2 as an Additional Group
+      extraEnrollments: [{ id: 'e-s1-g2', studentId: 's1', groupId: 'g2', role: 'additional', status: 'active' }],
+    });
+
+    renderGrid();
+
+    // g2: collected 1000 / expected 1000 (s2 only) = 100% — counting s1's fee again would give 50%
+    expect(await screen.findByText('100%')).toBeInTheDocument();
+    expect(screen.queryByText('50%')).not.toBeInTheDocument();
+    // s1 still shows as a member of g2 (2 active students on its card)
+    const cardB = screen.getByText('مجموعة ب').closest('.rounded-card');
+    expect(within(cardB).getByText('2')).toBeInTheDocument();
   });
 });
