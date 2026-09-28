@@ -16,6 +16,7 @@ export const SYSTEM_PAGES = [
   { id:'exams',         label:'الامتحانات',           icon:'📝', group:'الأكاديمي' },
   { id:'homework',      label:'الواجبات',             icon:'📋', group:'الأكاديمي' },
   { id:'materials',     label:'المذكرات الدراسية',   icon:'📚', group:'الأكاديمي' },
+  { id:'recitation',    label:'التسميع',              icon:'📖', group:'الأكاديمي' },
   { id:'notifications', label:'الإشعارات',            icon:'🔔', group:'إدارة'     },
   { id:'reports',       label:'التقارير',             icon:'📊', group:'إدارة'     },
   { id:'id-cards',      label:'بطاقات الطلاب',       icon:'🪪', group:'إدارة'     },
