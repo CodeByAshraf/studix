@@ -12,6 +12,7 @@
     "admin:create": "node scripts/adminCreate.js",
     "config:generate": "node scripts/generateProductionConfig.js",
     "postgres:provision": "node scripts/provisionPostgres.js",
+    "dev:reset": "node scripts/devReset.js",
     "test": "vitest run",
     "test:integration": "vitest run --config vitest.integration.config.js"
   },
