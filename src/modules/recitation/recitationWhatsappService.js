@@ -12,10 +12,10 @@ import { formatDate } from '../../utils/helpers';
 
 export { openWhatsapp, buildWhatsappUrl, copyMessage } from '../student-report/studentWhatsappService';
 
-// نفس اصطلاح جهة الاتصال المُستخدَم بالفعل في getAbsenceContactPhone/getHomeworkContactPhone
-// — هاتف ولي الأمر أولاً، وإلا هاتف الطالب نفسه.
+// نفس اصطلاح getAbsenceContactPhone/getHomeworkContactPhone — هاتف ولي الأمر فقط، بلا رجوع
+// صامت لهاتف الطالب نفسه؛ بلا هاتف ولي أمر يُعاد '' (زر معطَّل، وopenWhatsapp('') يرفض).
 export function getRecitationContactPhone(student) {
-  return student?.parentPhone || student?.phone || '';
+  return student?.parentPhone || '';
 }
 
 // يبني رسالة نتيجة تسميع من صف روستر التسميع (RecitationPage.jsx's SessionDetailForm)

@@ -29,7 +29,7 @@ export default function WhatsappPreviewModal({ studentName, parentPhone, message
         <div style={{ display: 'flex', gap: 14, fontSize: '0.8rem', marginBottom: 12, padding: '8px 12px', background: 'var(--surface2)', borderRadius: 8 }}>
           <span>الطالب: <strong>{studentName}</strong></span>
           <span style={{ direction: 'ltr' }}>
-            الهاتف: <strong>{hasPhone ? parentPhone : '—'}</strong>
+            هاتف ولي الأمر: <strong>{hasPhone ? parentPhone : 'غير متوفر'}</strong>
           </span>
         </div>
 

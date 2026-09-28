@@ -32,11 +32,16 @@ import {
   openRecitationSessionReport, openRecitationNotEvaluatedReport, openRecitationSummaryReport,
 } from './buildRecitationReport';
 
-vi.mock('./recitationWhatsappService', () => ({
-  getRecitationContactPhone: vi.fn((student) => student?.parentPhone || student?.phone || ''),
-  buildRecitationMessage: vi.fn(() => 'mock message'),
-  openWhatsapp: vi.fn(() => ({ ok: true })),
-}));
+// getRecitationContactPhone wraps the REAL implementation (parent phone only) so these page
+// tests exercise the actual recipient rule; only the message text and window.open are mocked.
+vi.mock('./recitationWhatsappService', async () => {
+  const actual = await vi.importActual('./recitationWhatsappService');
+  return {
+    getRecitationContactPhone: vi.fn(actual.getRecitationContactPhone),
+    buildRecitationMessage: vi.fn(() => 'mock message'),
+    openWhatsapp: vi.fn(() => ({ ok: true })),
+  };
+});
 import { getRecitationContactPhone, buildRecitationMessage, openWhatsapp } from './recitationWhatsappService';
 
 const GROUP_ID = 'g1';
@@ -356,6 +361,7 @@ describe('RecitationPage — session detail', () => {
       { studentId: 's1', studentName: 'أحمد', studentCode: 'C1', attendanceStatus: 'present', score: 18, maxScore: 20, note: 'ممتاز', phone: '01099998888', parentPhone: '01011112222' },
       { studentId: 's2', studentName: 'مريم', studentCode: 'C2', attendanceStatus: 'late', score: null, maxScore: null, note: null, phone: '01088887777', parentPhone: null },
       { studentId: 's3', studentName: 'سارة', studentCode: 'C3', attendanceStatus: 'present', score: 15, maxScore: 20, note: null, phone: null, parentPhone: null },
+      { studentId: 's4', studentName: 'يوسف', studentCode: 'C4', attendanceStatus: 'present', score: 12, maxScore: 20, note: null, phone: '01077776666', parentPhone: null },
     ];
 
     it('WhatsApp button is absent for an unevaluated row (score === null), even when the session is locked', async () => {
@@ -375,8 +381,23 @@ describe('RecitationPage — session detail', () => {
       await screen.findByText('أحمد');
 
       const saraRow = screen.getByTestId('recitation-row-s3'); // evaluated, no phone at all
-      const btn = within(saraRow).getByText('📲 لا يوجد هاتف');
+      const btn = within(saraRow).getByText('📲 لا يوجد رقم ولي أمر');
       expect(btn).toBeDisabled();
+    });
+
+    it('no parent phone but a student phone → never falls back to the student: disabled with a clear Arabic label/title, openWhatsapp NOT called', async () => {
+      pgGetRecitationSession.mockResolvedValue(makeSessionDetail({ maxScore: 20, recitationStatus: 'completed', roster: EVALUATED_ROSTER }));
+      renderPage();
+      fireEvent.click(await screen.findByText('مجموعة أ'));
+      await screen.findByText('أحمد');
+
+      const yousefRow = screen.getByTestId('recitation-row-s4'); // evaluated, student phone only
+      expect(within(yousefRow).queryByText('📲 واتساب')).not.toBeInTheDocument();
+      const btn = within(yousefRow).getByText('📲 لا يوجد رقم ولي أمر');
+      expect(btn).toBeDisabled();
+      expect(btn).toHaveAttribute('title', 'لا يوجد رقم هاتف لولي الأمر');
+      fireEvent.click(btn);
+      expect(openWhatsapp).not.toHaveBeenCalled();
     });
 
     it('WhatsApp button is absent for every row while the session is still draft/in-progress, even for an evaluated student', async () => {
@@ -418,7 +439,7 @@ describe('RecitationPage — session detail', () => {
       expect(buildRecitationMessage).toHaveBeenCalledWith(expect.objectContaining({
         studentName: 'أحمد', groupName: 'مجموعة أ', score: 18, maxScore: 20, percentage: 90, note: 'ممتاز',
       }));
-      expect(openWhatsapp).toHaveBeenCalledWith('01011112222', 'mock message'); // parentPhone preferred
+      expect(openWhatsapp).toHaveBeenCalledWith('01011112222', 'mock message'); // the parent phone, not the student's
     });
 
     it('never calls pgSaveRecitations as a side effect of sending WhatsApp', async () => {

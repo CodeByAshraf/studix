@@ -92,9 +92,9 @@ describe('HomeworkSearch — WhatsApp parent follow-up (Homework Phase 3B)', () 
 
   it('passes the correct, row-specific data into the message — not another row\'s data', async () => {
     seed();
-    // Give s2 her own usable phone here so the modal's open action isn't disabled — the
-    // dedicated "no usable phone" test below covers that case separately.
-    useAppStore.setState({ students: [S1_GRADED, { ...S2_NO_PHONE, phone: '01099998888' }] });
+    // Give s2 a parent phone here so the modal's open action isn't disabled — the dedicated
+    // "no parent phone" tests below cover that case separately.
+    useAppStore.setState({ students: [S1_GRADED, { ...S2_NO_PHONE, parentPhone: '01099998888' }] });
     await renderSearch();
 
     fireEvent.click(waButtonForRow('سارة محمد'));
@@ -118,6 +118,22 @@ describe('HomeworkSearch — WhatsApp parent follow-up (Homework Phase 3B)', () 
     expect(openBtn).toBeDisabled();
     expect(screen.getByRole('button', { name: /نسخ الرسالة/ })).not.toBeDisabled();
 
+    fireEvent.click(openBtn);
+    expect(openWhatsapp).not.toHaveBeenCalled();
+  });
+
+  it('no parent phone but a student phone → the preview never labels the student phone as the parent\'s, shows a clear warning, and WhatsApp is NOT opened', async () => {
+    seed();
+    useAppStore.setState({ students: [S1_GRADED, { ...S2_NO_PHONE, phone: '01099998888' }] });
+    await renderSearch();
+
+    fireEvent.click(waButtonForRow('سارة محمد'));
+
+    expect(screen.queryByText('01099998888')).not.toBeInTheDocument();
+    expect(screen.getByText('غير متوفر')).toBeInTheDocument();
+    expect(screen.getByText(/لا يوجد رقم هاتف لولي الأمر/)).toBeInTheDocument();
+    const openBtn = screen.getByRole('button', { name: /فتح واتساب/ });
+    expect(openBtn).toBeDisabled();
     fireEvent.click(openBtn);
     expect(openWhatsapp).not.toHaveBeenCalled();
   });

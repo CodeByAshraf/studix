@@ -48,16 +48,16 @@ describe('absenceWhatsappService — buildAbsenceMessage', () => {
 });
 
 describe('absenceWhatsappService — getAbsenceContactPhone', () => {
-  it('prefers the parent phone over the student phone', () => {
+  it('uses the parent phone, never the student phone', () => {
     expect(getAbsenceContactPhone({ phone: '01000000000', parentPhone: '01111111111' })).toBe('01111111111');
   });
 
-  it('falls back to the student phone when parentPhone is missing/empty', () => {
-    expect(getAbsenceContactPhone({ phone: '01000000000', parentPhone: '' })).toBe('01000000000');
-    expect(getAbsenceContactPhone({ phone: '01000000000' })).toBe('01000000000');
+  it('never falls back to the student phone when parentPhone is missing/empty', () => {
+    expect(getAbsenceContactPhone({ phone: '01000000000', parentPhone: '' })).toBe('');
+    expect(getAbsenceContactPhone({ phone: '01000000000' })).toBe('');
   });
 
-  it('returns an empty string when neither phone is available', () => {
+  it('returns an empty string when no parent phone is available', () => {
     expect(getAbsenceContactPhone({})).toBe('');
     expect(getAbsenceContactPhone(null)).toBe('');
     expect(getAbsenceContactPhone(undefined)).toBe('');

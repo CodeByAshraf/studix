@@ -2,7 +2,7 @@
 // Recitation WhatsApp — same shape as homeworkWhatsappService.test.js (the closest
 // precedent). Reuses studentWhatsappService.js's openWhatsapp/buildWhatsappUrl/
 // copyMessage verbatim — this file only owns the two genuinely new pieces: the
-// contact-phone convention (identical fallback to absence/homework) and the
+// contact-phone convention (parent phone only, same as absence/homework) and the
 // recitation-specific message text. Never fabricates a score for an unevaluated row.
 import { describe, it, expect } from 'vitest';
 import { getRecitationContactPhone, buildRecitationMessage } from './recitationWhatsappService';
@@ -11,10 +11,11 @@ describe('getRecitationContactPhone — same convention as getAbsenceContactPhon
   it('prefers parentPhone', () => {
     expect(getRecitationContactPhone({ parentPhone: '01011112222', phone: '01099998888' })).toBe('01011112222');
   });
-  it('falls back to the student\'s own phone when parentPhone is absent', () => {
-    expect(getRecitationContactPhone({ phone: '01099998888' })).toBe('01099998888');
+  it('never falls back to the student\'s own phone when parentPhone is absent/empty', () => {
+    expect(getRecitationContactPhone({ phone: '01099998888' })).toBe('');
+    expect(getRecitationContactPhone({ phone: '01099998888', parentPhone: '' })).toBe('');
   });
-  it('returns an empty string when neither phone exists', () => {
+  it('returns an empty string when no parent phone exists', () => {
     expect(getRecitationContactPhone({})).toBe('');
     expect(getRecitationContactPhone(undefined)).toBe('');
   });

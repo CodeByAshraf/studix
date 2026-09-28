@@ -53,7 +53,7 @@ describe('AbsenceFollowup — WhatsApp action (V1)', () => {
 
     expect(openWhatsapp).toHaveBeenCalledTimes(1);
     const [phone, message] = openWhatsapp.mock.calls[0];
-    expect(phone).toBe('01111111111'); // parentPhone preferred over student's own phone
+    expect(phone).toBe('01111111111'); // the parent phone — never the student's own phone
     expect(message).toContain('أحمد علي');
     expect(message).toContain('مجموعة أ');
     expect(message).toContain('أ. محمد سعيد'); // group.teacherName — the session's real teacher
@@ -72,19 +72,23 @@ describe('AbsenceFollowup — WhatsApp action (V1)', () => {
     expect(message).toContain('أ. مدرّس المركز الافتراضي');
   });
 
-  it('falls back to the student phone when parentPhone is missing', () => {
+  it('never falls back to the student phone: no parent phone + a student phone → disabled with a clear Arabic label, WhatsApp is NOT opened', () => {
     seedStore([{ id: 's1', name: 'سارة', phone: '01000000000', parentPhone: '' }]);
     renderPage();
 
-    fireEvent.click(screen.getByRole('button', { name: /واتساب/ }));
-    expect(openWhatsapp).toHaveBeenCalledWith('01000000000', expect.any(String));
+    expect(screen.queryByRole('button', { name: /^📲 واتساب$/ })).not.toBeInTheDocument();
+    const btn = screen.getByRole('button', { name: /لا يوجد رقم ولي أمر/ });
+    expect(btn).toBeDisabled();
+    expect(btn).toHaveAttribute('title', 'لا يوجد رقم هاتف لولي الأمر');
+    fireEvent.click(btn);
+    expect(openWhatsapp).not.toHaveBeenCalled();
   });
 
-  it('disables the action with a clear Arabic label when there is no usable phone at all, and never calls openWhatsapp', () => {
+  it('disables the action with a clear Arabic label when there is no phone at all, and never calls openWhatsapp', () => {
     seedStore([{ id: 's1', name: 'مريم', phone: '', parentPhone: '' }]);
     renderPage();
 
-    const btn = screen.getByRole('button', { name: /لا يوجد هاتف/ });
+    const btn = screen.getByRole('button', { name: /لا يوجد رقم ولي أمر/ });
     expect(btn).toBeDisabled();
     fireEvent.click(btn);
     expect(openWhatsapp).not.toHaveBeenCalled();

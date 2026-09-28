@@ -11,10 +11,11 @@ import { formatDate } from '../../utils/helpers';
 
 export { openWhatsapp, buildWhatsappUrl } from '../student-report/studentWhatsappService';
 
-// نفس اصطلاح جهة الاتصال المُستخدَم بالفعل في FollowupModal (AbsenceFollowup.jsx) —
-// هاتف ولي الأمر أولاً، وإلا هاتف الطالب نفسه.
+// رسالة واتساب موجَّهة لولي الأمر — هاتف ولي الأمر فقط. لا رجوع صامت لهاتف الطالب نفسه
+// (كان سيُرسل رسالة "نود إبلاغكم بتغيب ..." للطالب على أنه ولي الأمر). بلا هاتف ولي أمر
+// يُعاد '' فيُعطَّل الزر، وopenWhatsapp('') يرفض برسالة "لا يوجد رقم هاتف لولي الأمر.".
 export function getAbsenceContactPhone(student) {
-  return student?.parentPhone || student?.phone || '';
+  return student?.parentPhone || '';
 }
 
 // اسم المدرّس المسؤول عن حصة/مجموعة الطالب — نفس مصدر البيانات الحقيقي المُستخدَم

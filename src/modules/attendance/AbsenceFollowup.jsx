@@ -270,7 +270,7 @@ function FollowupTable({ items, groups, onOpenRow, onWhatsapp, emptyText }) {
                         <button
                           onClick={e => { e.stopPropagation(); onWhatsapp(student, group, attRecord); }}
                           disabled={!hasPhone}
-                          title={hasPhone ? '' : 'لا يوجد رقم هاتف لولي الأمر أو الطالب'}
+                          title={hasPhone ? '' : 'لا يوجد رقم هاتف لولي الأمر'}
                           style={{ padding:'4px 12px', borderRadius:7, fontSize:'0.72rem', fontWeight:700, fontFamily:'Cairo,sans-serif', transition:'all .12s',
                             cursor:  hasPhone ? 'pointer' : 'not-allowed',
                             opacity: hasPhone ? 1 : 0.5,
@@ -279,7 +279,7 @@ function FollowupTable({ items, groups, onOpenRow, onWhatsapp, emptyText }) {
                             color:      hasPhone ? '#fff'    : 'var(--text3)',
                           }}
                         >
-                          {hasPhone ? '📲 واتساب' : '📲 لا يوجد هاتف'}
+                          {hasPhone ? '📲 واتساب' : '📲 لا يوجد رقم ولي أمر'}
                         </button>
                       );
                     })()}

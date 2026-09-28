@@ -54,6 +54,7 @@ import communicationsRouter from './routes/communications.js';
 import admissionActivationRouter from './routes/admissionActivation.js';
 import studentCreateRouter from './routes/studentCreate.js';
 import treasuryTxnRouter from './routes/treasuryTxn.js';
+import waReportLogRouter from './routes/waReportLog.js';
 import cashboxBalanceRouter from './routes/cashboxBalance.js';
 import paymentsRouter from './routes/payments.js';
 import admissionPaymentsRouter from './routes/admissionPayments.js';
@@ -334,6 +335,11 @@ app.use('/api/cashboxes', requireAuth, requirePermission('treasury'), cashboxBal
 // دون تغيير للحلقة الديناميكية أدناه، التي تتولّى POST / فعلياً عبر الـ CRUD العام —
 // treasuryTxn ليست في PRESERVE_CLIENT_ID_COLLECTIONS، فتولّد UUID خادمياً دائماً.
 app.use('/api/treasuryTxn', requireAuth, requirePermission('treasury'), treasuryTxnRouter);
+
+// ── wa_report_log — author is server-derived (req.user.id), never client-supplied ──
+// Same interceptor technique as treasuryTxn above: replaces/strips created_by, then next()
+// to the generic CRUD below. Same 'students' permission as COLLECTION_PERMISSIONS.waReportLog.
+app.use('/api/waReportLog', requireAuth, requirePermission('students'), waReportLogRouter);
 
 // ── Phase 3B-14C: payments — إنشاء/استرداد ذرّيان مخصّصان + حظر PUT/PATCH/DELETE ──
 // payments.js يتولّى كل كتابة حقيقية لهذه الـ collection: POST / (إنشاء دفعة + حركة

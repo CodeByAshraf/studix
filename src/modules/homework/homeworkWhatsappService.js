@@ -11,10 +11,10 @@ import { formatDate } from '../../utils/helpers';
 
 export { openWhatsapp, buildWhatsappUrl, copyMessage } from '../student-report/studentWhatsappService';
 
-// نفس اصطلاح جهة الاتصال المُستخدَم بالفعل في absenceWhatsappService.js's
-// getAbsenceContactPhone — هاتف ولي الأمر أولاً، وإلا هاتف الطالب نفسه.
+// نفس اصطلاح absenceWhatsappService.js's getAbsenceContactPhone — هاتف ولي الأمر فقط، بلا
+// رجوع صامت لهاتف الطالب نفسه؛ بلا هاتف ولي أمر يُعاد '' (المعاينة تُظهر ذلك وتمنع الفتح).
 export function getHomeworkContactPhone(student) {
-  return student?.parentPhone || student?.phone || '';
+  return student?.parentPhone || '';
 }
 
 // Phase 3B clarification: واتساب الواجبات يخدم حالتين فقط — "لم يُسلَّم" (status:'missing'،

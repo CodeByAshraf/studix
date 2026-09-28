@@ -35,10 +35,11 @@ describe('getHomeworkContactPhone — same convention as attendance\'s getAbsenc
   it('prefers parentPhone', () => {
     expect(getHomeworkContactPhone({ parentPhone: '01011112222', phone: '01099998888' })).toBe('01011112222');
   });
-  it('falls back to the student\'s own phone when parentPhone is absent', () => {
-    expect(getHomeworkContactPhone({ phone: '01099998888' })).toBe('01099998888');
+  it('never falls back to the student\'s own phone when parentPhone is absent/empty', () => {
+    expect(getHomeworkContactPhone({ phone: '01099998888' })).toBe('');
+    expect(getHomeworkContactPhone({ phone: '01099998888', parentPhone: '' })).toBe('');
   });
-  it('returns an empty string when neither phone exists', () => {
+  it('returns an empty string when no parent phone exists', () => {
     expect(getHomeworkContactPhone({})).toBe('');
     expect(getHomeworkContactPhone(undefined)).toBe('');
   });
