@@ -53,11 +53,15 @@ const MIN_PASSWORD_LENGTH = 8; // matches scripts/adminCreate.js's own minimum, 
 // the Roles editor's checkbox list). Duplicated here deliberately: backend and frontend are
 // separate packages with no shared module anywhere else in this codebase either (see
 // db/backup.js's own pg_dump-path duplication comment for the same reasoning). Keep in sync
-// with SYSTEM_PAGES if a page is ever added/removed there.
+// with SYSTEM_PAGES if a page is ever added/removed there — firstAdmin.test.js fails if any
+// SYSTEM_PAGES id is missing here. 'recitation' is included: the first admin's explicit
+// per-user array always wins over any role (resolveEffectivePermissions' first rule), and the
+// Users screen has no per-user permission editor, so a page missing here could never be
+// granted to this account through the UI at all.
 export const ALL_PERMISSION_PAGES = [
   'dashboard', 'admissions', 'students', 'groups', 'attendance', 'payments', 'treasury',
-  'exams', 'homework', 'materials', 'notifications', 'reports', 'id-cards', 'activity-log',
-  'settings', 'users',
+  'exams', 'homework', 'materials', 'recitation', 'notifications', 'reports', 'id-cards',
+  'activity-log', 'settings', 'users',
 ];
 
 function withConnectionLimit(databaseUrl, limit) {

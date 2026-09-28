@@ -24,9 +24,19 @@ describe('ALL_PERMISSION_PAGES', () => {
     const mustInclude = [
       'dashboard', 'students', 'groups', 'attendance', 'exams', 'homework', 'settings',
       'materials', 'admissions', 'treasury', 'payments', 'activity-log', 'users',
-      'reports', 'id-cards', 'notifications',
+      'reports', 'id-cards', 'notifications', 'recitation',
     ];
     for (const id of mustInclude) expect(ALL_PERMISSION_PAGES).toContain(id);
+  });
+
+  it('contains every permission the Roles screen exposes (the frontend\'s SYSTEM_PAGES), including recitation', async () => {
+    // The first admin's explicit per-user array overrides any role and the Users screen has no
+    // per-user permission editor — a SYSTEM_PAGES id missing here can never be granted to the
+    // fresh-install owner account (pre-installer audit B1: the Recitation screen stayed 403).
+    const { SYSTEM_PAGES } = await import('../../../src/services/usersService.js');
+    const exposed = SYSTEM_PAGES.map((p) => p.id);
+    expect(exposed).toContain('recitation');
+    for (const id of exposed) expect(ALL_PERMISSION_PAGES).toContain(id);
   });
 });
 

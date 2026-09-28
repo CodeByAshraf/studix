@@ -15,6 +15,8 @@
 // recorded if PostgreSQL is unreachable.
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { checkPostgresReachable, setupScratchDb, teardownScratchDb } from '../test-helpers/scratchDb.js';
+import { ALL_PERMISSION_PAGES } from '../db/firstAdmin.js';
+import { hashPbkdf2, verifyPbkdf2 } from '../lib/passwordVerify.js';
 
 const dbCheck = await checkPostgresReachable();
 
@@ -208,6 +210,84 @@ describe('users.js — real PostgreSQL integration (auth_version/authCache contr
 
       const dbUser = await client.users.findUnique({ where: { id: user.id } });
       expect(dbUser.auth_version).toBe(user.auth_version);
+    });
+  });
+
+  // Pre-installer audit H1 — a fresh install has ZERO roles rows, and the owner created by the
+  // setup wizard has role_id null + an explicit permissions array (firstAdmin.js). The Users
+  // screen's self-edit now sends no roleId (UsersPage.jsx saveUser); these prove that exact
+  // payload works on such a database without touching the owner's role/permissions, while the
+  // role validation for any roleId that IS sent (editing another user) is unchanged.
+  describe('fresh database with no roles — owner self-edit (audit H1)', () => {
+    async function seedFreshOwner() {
+      expect(await client.roles.count()).toBe(0);
+      return seedUser('owner', {
+        is_admin: true, role_id: null, permissions: ALL_PERMISSION_PAGES, password_hash: hashPbkdf2('Original-pass1'),
+      });
+    }
+
+    it('the owner updates their own name/email with the UI self-edit payload (no roleId) — 200, role/permissions/auth_version untouched', async () => {
+      const owner = await seedFreshOwner();
+      const claims = tokenClaimsFor(owner);
+
+      const result = await invoke(usersRouter, {
+        method: 'PUT', url: `/${owner.id}`, user: { id: owner.id },
+        body: { name: 'المالك', email: 'owner@example.com', active: true },
+      });
+      expect(result.statusCode).toBe(200);
+
+      const dbOwner = await client.users.findUnique({ where: { id: owner.id } });
+      expect(dbOwner).toMatchObject({ name: 'المالك', email: 'owner@example.com', role_id: null, is_admin: true, active: true });
+      expect(dbOwner.permissions).toEqual(ALL_PERMISSION_PAGES);
+      expect(dbOwner.auth_version).toBe(owner.auth_version);
+      expect(await client.roles.count()).toBe(0); // no role was created to make this work
+
+      // effective permissions (incl. recitation) unchanged, and the owner's session stays valid
+      for (const page of ['users', 'recitation']) {
+        const { req, res } = mockReqRes(claims);
+        await requirePermission(page)(req, res, () => {});
+        expect(res.statusCode).toBeNull();
+      }
+    });
+
+    it('the owner changes their own password through the same payload — the new password verifies, the old one no longer does', async () => {
+      const owner = await seedFreshOwner();
+
+      const result = await invoke(usersRouter, {
+        method: 'PUT', url: `/${owner.id}`, user: { id: owner.id },
+        body: { name: owner.name, email: '', active: true, password: 'Brand-new-pass2' },
+      });
+      expect(result.statusCode).toBe(200);
+
+      const dbOwner = await client.users.findUnique({ where: { id: owner.id } });
+      expect(verifyPbkdf2('Brand-new-pass2', dbOwner.password_hash)).toBe(true);
+      expect(verifyPbkdf2('Original-pass1', dbOwner.password_hash)).toBe(false);
+      expect(dbOwner.role_id).toBeNull();
+      expect(dbOwner.permissions).toEqual(ALL_PERMISSION_PAGES);
+    });
+
+    it('role validation is unchanged: any roleId that is sent must exist (the old self-edit payload, and editing another user)', async () => {
+      const owner = await seedFreshOwner();
+      const other = await seedUser('u-other', { permissions: ['dashboard'] });
+
+      const oldSelfPayload = await invoke(usersRouter, {
+        method: 'PUT', url: `/${owner.id}`, user: { id: owner.id }, body: { name: 'x', roleId: 'admin', active: true },
+      });
+      expect(oldSelfPayload.statusCode).toBe(400);
+      expect(oldSelfPayload.body.error).toBe('الدور المحدَّد غير موجود.');
+
+      const missingRole = await invoke(usersRouter, {
+        method: 'PUT', url: `/${other.id}`, user: { id: owner.id }, body: { roleId: 'no-such-role' },
+      });
+      expect(missingRole.statusCode).toBe(400);
+      expect((await client.users.findUnique({ where: { id: other.id } })).role_id).toBeNull();
+
+      await seedRole('cashier', ['payments']);
+      const realRole = await invoke(usersRouter, {
+        method: 'PUT', url: `/${other.id}`, user: { id: owner.id }, body: { roleId: 'cashier' },
+      });
+      expect(realRole.statusCode).toBe(200);
+      expect((await client.users.findUnique({ where: { id: other.id } })).role_id).toBe('cashier');
     });
   });
 

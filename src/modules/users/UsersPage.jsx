@@ -109,6 +109,9 @@ function UserForm({ initial, editId, onSave, onClose, loading, roles, teachers, 
 
   const handleSave = () => {
     const errs = validateUser(form, users, editId);
+    // تعديل الحساب الخاص لا يُرسِل الدور إطلاقاً (انظر saveUser) — فلا يُشترَط اختياره هنا؛ مدير
+    // التثبيت الأول بلا role_id أصلاً (صلاحيات شخصية صريحة)، ولا أدوار في قاعدة جديدة.
+    if (isEditingSelf) delete errs.roleId;
     if (Object.keys(errs).length) { setErrors(errs); return; }
     onSave(form);
   };
@@ -315,19 +318,20 @@ export default function UsersPage() {
 
   const saveUser = useCallback(async (formData) => {
     await run(async () => {
-      // تعديل الحساب الخاص بالمستخدم الحالي: الدور يبقى admin دائماً بغض النظر عن قيمة الفورم
-      // (حماية ضد التلاعب بالقيمة المُرسَلة — الواجهة تعطّل الحقل لكن هذا هو الضمان الفعلي
-      // على العميل؛ الخادم نفسه يرفض أيضاً ترك النظام بلا مدير نشط واحد على الأقل).
+      // تعديل الحساب الخاص بالمستخدم الحالي: roleId لا يُرسَل إطلاقاً، فلا يتغيّر الدور ولا
+      // الصلاحيات الفعلية عبر هذا المسار (الواجهة تعطّل الحقل أيضاً). إرسال 'admin' سابقاً كان
+      // يُرفَض بـ 400 على تثبيت جديد (لا صفوف في roles، والخادم يتحقّق من وجود أي roleId مُرسَل)
+      // فيتعذّر على المدير تعديل اسمه/بريده/كلمة مروره. تعديل مستخدم آخر يُرسِل roleId كما هو.
       // ملاحظة: teacherId لا يُرسَل أبداً لمسارات users الجديدة — عمود teacher_id بالخادم
       // يشير لجدول teachers الحقيقي الفارغ حالياً (Teachers domain خارج النطاق).
       if (modal.data?.id) {
         const isSelfSave = modal.data.id === currentUser?.id;
         const payload = {
           name:   formData.name.trim(),
-          roleId: isSelfSave ? 'admin' : formData.roleId,
           email:  formData.email?.trim() || '',
           active: formData.active !== false,
         };
+        if (!isSelfSave) payload.roleId = formData.roleId;
         if (formData.password?.trim()) payload.password = formData.password.trim();
         const updated = await pgUpdateUser(modal.data.id, payload);
         setUsersState(prev => prev.map(u => u.id === modal.data.id ? updated : u));

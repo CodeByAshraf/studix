@@ -99,6 +99,7 @@ describe('firstAdmin.js — real PostgreSQL integration (transaction/advisory-lo
       const effective = resolveEffectivePermissions(state);
       expect(effective).not.toBeNull();
       for (const page of ALL_PERMISSION_PAGES) expect(effective).toContain(page);
+      expect(effective).toContain('recitation'); // audit B1: /api/recitation-sessions must not 403 the owner
     });
 
     it('the returned object never contains the password or the hash', async () => {
