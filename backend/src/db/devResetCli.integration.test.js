@@ -199,4 +199,34 @@ describe('devResetCli.js — real PostgreSQL CLI integration', () => {
     expect(fs.existsSync(env.STUDIX_RESTORE_LOCK_PATH)).toBe(false);
     expect(fs.existsSync(path.join(env.STUDIX_BACKUP_DIR, '.routine-backup.lock'))).toBe(false);
   });
+
+  it('success with ONLY the two required settings: paths fall back to <LOCALAPPDATA>/Studix/developer', async () => {
+    // No STUDIX_BACKUP_DIR / STUDIX_RESTORE_LOCK_PATH / STUDIX_DB_IDENTITY_PATH at all.
+    const minimalEnv = {
+      DATABASE_URL: scratch.scratchUrl,
+      STUDIX_DEV_TOOLS: '1',
+      STUDIX_DEV_RESET_DATABASE: scratch.scratchDbName,
+      LOCALAPPDATA: root,
+    };
+    const devRoot = path.join(root, 'Studix', 'developer');
+    await client.$disconnect();
+
+    const lines = [];
+    const code = await cli.runDevResetCli({
+      env: minimalEnv, configMode: 'development', prompt: async () => resetMod.RESET_CONFIRMATION_PHRASE, print: (l) => lines.push(l),
+    });
+    const out = lines.join('\n');
+    expect(code).toBe(cli.EXIT.success);
+    expect(out).toMatch(/Developer reset completed successfully/);
+    expect(out).toMatch(/browsers are NOT invalidated automatically/);
+
+    const dumps = dumpsIn(path.join(devRoot, 'backups', 'dev-reset'));
+    expect(dumps).toHaveLength(1);
+    const toc = execFileSync(backupJs.findPgRestore(), ['--list', path.join(devRoot, 'backups', 'dev-reset', dumps[0])], { encoding: 'utf8', windowsHide: true });
+    expect(toc).toMatch(/TABLE DATA \S+ students /);
+    expect(identity.readActiveDatabaseIdentity({ configPath: path.join(devRoot, 'config', 'db-identity.json') }).role).toBe('active');
+    expect(fs.existsSync(path.join(devRoot, 'config', 'restore-state.lock'))).toBe(false);
+    expect(await count('students')).toBe(0);
+    expect(await count('users')).toBe(1);
+  });
 });

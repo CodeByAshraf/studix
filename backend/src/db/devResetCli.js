@@ -21,10 +21,21 @@
 //   3. explicit developer opt-in: STUDIX_DEV_TOOLS=1
 //   4. DATABASE_URL present, and STUDIX_DEV_RESET_DATABASE (the database the developer means to
 //      reset) set and equal to the database DATABASE_URL names
-//   5. every path the flow writes is usable — backup dir (STUDIX_BACKUP_DIR), restore lock
-//      (STUDIX_RESTORE_LOCK_PATH), database identity (STUDIX_DB_IDENTITY_PATH) — proven with a
-//      real probe-file write, not an access() check (on Windows access() ignores NTFS ACLs);
-//      an existing identity file must be valid
+//   5. every path the flow writes is usable — backup dir, restore lock, database identity —
+//      proven with a real probe-file write, not an access() check (on Windows access() ignores
+//      NTFS ACLs); an existing identity file must be valid. Paths (resolveDeveloperPaths): the
+//      explicit overrides STUDIX_BACKUP_DIR / STUDIX_RESTORE_LOCK_PATH / STUDIX_DB_IDENTITY_PATH
+//      when set, otherwise a stable developer-local root mirroring the installed
+//      %ProgramData%\Studix\{backups,config} layout:
+//        <LOCALAPPDATA or home>\Studix\developer\backups\dev-reset\pre-reset-<ts>.dump
+//        <LOCALAPPDATA or home>\Studix\developer\config\restore-state.lock
+//        <LOCALAPPDATA or home>\Studix\developer\config\db-identity.json
+//      The application's own defaults (getBackupDir/resolveRestoreLockPath/
+//      resolveDatabaseIdentityPath → %ProgramData%) are not changed. Consequences, printed where
+//      they matter: the backend reads its identity from STUDIX_DB_IDENTITY_PATH or %ProgramData%,
+//      so a fallback identity rotation does not reach browsers (clear the keys manually, or set
+//      STUDIX_DB_IDENTITY_PATH in backend/.env so both agree); the fallback restore lock only
+//      coordinates with tools using the same path.
 //   6. the connected database really is that database (current_database())
 //   7. no other client is connected to it — the running backend always holds a Prisma
 //      connection, and its in-memory auth cache (lib/authCache.js) would otherwise keep old
@@ -35,14 +46,13 @@
 //      see a process that has not connected yet — start the backend only after the reset.
 // ─────────────────────────────────────────────────────────────
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import process from 'process';
 import { URL } from 'url';
-import { getBackupDir } from './backup.js';
-import { resolveRestoreLockPath } from './restoreLock.js';
 import { resolveBackupLockPath } from './routineBackup.js';
 import {
-  resolveDatabaseIdentityPath, readActiveDatabaseIdentity, generateDatabaseIdentity, promoteActiveDatabaseIdentity,
+  readActiveDatabaseIdentity, generateDatabaseIdentity, promoteActiveDatabaseIdentity,
 } from './databaseIdentity.js';
 import { runDevResetWithVerifiedBackup, createVerifiedPreResetBackup, resolveDevResetBackupDir } from './devResetBackup.js';
 import { performDevReset, RESET_CONFIRMATION_PHRASE, RESET_TABLES, PRESERVE_TABLES } from './devReset.js';
@@ -86,6 +96,35 @@ async function defaultCreatePrisma(databaseUrl) {
   return new PrismaClient({ datasources: { db: { url: withSingleConnection(databaseUrl) } } });
 }
 
+// Deterministic developer-local root: %LOCALAPPDATA%\Studix\developer (per-user, writable, stable
+// across runs), else <home>\.studix\developer. Never a random temp folder; null when neither exists.
+export function resolveDeveloperRoot(env, { homedir = os.homedir } = {}) {
+  if (env.LOCALAPPDATA) return path.join(env.LOCALAPPDATA, 'Studix', 'developer');
+  let home = '';
+  try { home = homedir() || ''; } catch { home = ''; }
+  return home ? path.join(home, '.studix', 'developer') : null;
+}
+
+/**
+ * The three paths the reset writes: each explicit override when set (honored exactly), otherwise
+ * the developer-local fallback. A path that cannot be resolved is null (the caller refuses).
+ */
+export function resolveDeveloperPaths(env, opts = {}) {
+  const root = resolveDeveloperRoot(env, opts);
+  const fallback = (...segments) => (root ? path.join(root, ...segments) : null);
+  return {
+    root,
+    backupDir: env.STUDIX_BACKUP_DIR || fallback('backups'),
+    restoreLockPath: env.STUDIX_RESTORE_LOCK_PATH || fallback('config', 'restore-state.lock'),
+    identityPath: env.STUDIX_DB_IDENTITY_PATH || fallback('config', 'db-identity.json'),
+    explicit: {
+      backupDir: Boolean(env.STUDIX_BACKUP_DIR),
+      restoreLockPath: Boolean(env.STUDIX_RESTORE_LOCK_PATH),
+      identityPath: Boolean(env.STUDIX_DB_IDENTITY_PATH),
+    },
+  };
+}
+
 // A real write+delete of a probe file (created exclusively) — the only reliable writability
 // test on Windows, where fs.access(W_OK) does not consult NTFS ACLs.
 export function probeWritableDir(dir, { fsImpl = fs, pid = process.pid } = {}) {
@@ -119,6 +158,7 @@ export async function runDevResetCli({
     generateIdentityFn = generateDatabaseIdentity,
     promoteIdentityFn = promoteActiveDatabaseIdentity,
     probeWritableDirFn = probeWritableDir,
+    homedir = os.homedir,
   } = deps;
 
   const databaseUrl = env.DATABASE_URL;
@@ -168,14 +208,17 @@ export async function runDevResetCli({
       refuse(`DATABASE_URL targets database "${target.databaseName}", not the expected developer database "${expectedDatabaseName}".`);
     }
 
-    const backupDir = env.STUDIX_BACKUP_DIR || getBackupDir();
-    const restoreLockPath = env.STUDIX_RESTORE_LOCK_PATH || resolveRestoreLockPath();
-    const identityPath = env.STUDIX_DB_IDENTITY_PATH || resolveDatabaseIdentityPath();
+    const paths = resolveDeveloperPaths(env, { homedir });
+    const { backupDir, restoreLockPath, identityPath } = paths;
+    if (!backupDir || !restoreLockPath || !identityPath) {
+      refuse('No developer-local folder could be resolved (neither LOCALAPPDATA nor a home directory). Set STUDIX_BACKUP_DIR, STUDIX_RESTORE_LOCK_PATH and STUDIX_DB_IDENTITY_PATH.');
+    }
     const backupLockPath = resolveBackupLockPath(backupDir);
+    const source = (explicit, name) => (explicit ? name : 'developer default');
     for (const [label, dir] of [
-      ['backup directory (STUDIX_BACKUP_DIR)', resolveDevResetBackupDir(backupDir)],
-      ['restore lock directory (STUDIX_RESTORE_LOCK_PATH)', path.dirname(restoreLockPath)],
-      ['database identity directory (STUDIX_DB_IDENTITY_PATH)', path.dirname(identityPath)],
+      [`backup directory (${source(paths.explicit.backupDir, 'STUDIX_BACKUP_DIR')})`, resolveDevResetBackupDir(backupDir)],
+      [`restore lock directory (${source(paths.explicit.restoreLockPath, 'STUDIX_RESTORE_LOCK_PATH')})`, path.dirname(restoreLockPath)],
+      [`database identity directory (${source(paths.explicit.identityPath, 'STUDIX_DB_IDENTITY_PATH')})`, path.dirname(identityPath)],
     ]) {
       try {
         probeWritableDirFn(dir);
@@ -189,7 +232,7 @@ export async function runDevResetCli({
     } catch (err) {
       refuse(`The database identity file is unreadable or invalid (${identityPath}): ${err.message}`);
     }
-    ok('Backup configuration verified');
+    ok(`Backup configuration verified (backups: ${resolveDevResetBackupDir(backupDir)})`);
 
     prisma = await createPrisma(databaseUrl);
     const [{ current_database: connectedName }] = await prisma.$queryRawUnsafe('SELECT current_database()');
@@ -255,6 +298,11 @@ export async function runDevResetCli({
       return EXIT.postResetFailed;
     }
     ok(`Database identity rotated${previousIdentity ? '' : ' (no previous identity existed)'}`);
+    if (!paths.explicit.identityPath) {
+      say(`  Note: rotated the developer identity at ${identityPath}. The backend reads its identity from`);
+      say('  STUDIX_DB_IDENTITY_PATH (or %ProgramData%), so browsers are NOT invalidated automatically —');
+      say(`  clear the keys below manually, or set STUDIX_DB_IDENTITY_PATH=${identityPath} in backend/.env.`);
+    }
 
     say('');
     say('Developer reset completed successfully.');

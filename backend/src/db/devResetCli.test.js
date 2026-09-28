@@ -7,7 +7,11 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { runDevResetCli, EXIT, BROWSER_STATE_KEYS, redact } from './devResetCli.js';
+import process from 'process';
+import { runDevResetCli, EXIT, BROWSER_STATE_KEYS, redact, resolveDeveloperPaths, resolveDeveloperRoot } from './devResetCli.js';
+import { getBackupDir } from './backup.js';
+import { resolveRestoreLockPath } from './restoreLock.js';
+import { resolveDatabaseIdentityPath } from './databaseIdentity.js';
 import { runDevResetWithVerifiedBackup } from './devResetBackup.js';
 import { RESET_CONFIRMATION_PHRASE } from './devReset.js';
 
@@ -273,5 +277,129 @@ describe('orchestration and reporting', () => {
   it('redact scrubs connection strings and explicit secrets', () => {
     expect(redact(`x ${DB_URL} y`)).toBe('x postgresql://[REDACTED] y');
     expect(redact('pw=hunter22', ['hunter22'])).toBe('pw=[REDACTED]');
+  });
+});
+
+describe('developer path configuration (optional overrides, stable developer-local fallback)', () => {
+  // Only the two required developer settings — no path variables.
+  function minimalEnv(overrides = {}) {
+    return { DATABASE_URL: DB_URL, STUDIX_DEV_TOOLS: '1', STUDIX_DEV_RESET_DATABASE: 'studix_dev', ...overrides };
+  }
+
+  const LOCAL = path.join(path.parse(process.cwd()).root, 'Users', 'dev', 'AppData', 'Local');
+
+  it('1. explicit overrides are honored exactly', () => {
+    const backup = path.join(LOCAL, 'explicit', 'b');
+    const lock = path.join(LOCAL, 'explicit', 'c', 'r.lock');
+    const id = path.join(LOCAL, 'explicit', 'c', 'id.json');
+    const env = { LOCALAPPDATA: LOCAL, STUDIX_BACKUP_DIR: backup, STUDIX_RESTORE_LOCK_PATH: lock, STUDIX_DB_IDENTITY_PATH: id };
+    expect(resolveDeveloperPaths(env)).toMatchObject({
+      backupDir: backup, restoreLockPath: lock, identityPath: id,
+      explicit: { backupDir: true, restoreLockPath: true, identityPath: true },
+    });
+  });
+
+  it('2/3. missing variables resolve to a deterministic developer-local layout (no random temp folder)', () => {
+    const env = { LOCALAPPDATA: LOCAL };
+    const root = path.join(LOCAL, 'Studix', 'developer');
+    const first = resolveDeveloperPaths(env);
+    expect(first).toMatchObject({
+      root,
+      backupDir: path.join(root, 'backups'),
+      restoreLockPath: path.join(root, 'config', 'restore-state.lock'),
+      identityPath: path.join(root, 'config', 'db-identity.json'),
+      explicit: { backupDir: false, restoreLockPath: false, identityPath: false },
+    });
+    expect(resolveDeveloperPaths(env)).toEqual(first);
+    expect(first.backupDir.startsWith(os.tmpdir())).toBe(false);
+  });
+
+  it('falls back to <home>/.studix/developer when LOCALAPPDATA is absent; null when neither exists', () => {
+    expect(resolveDeveloperRoot({}, { homedir: () => '/home/dev' })).toBe(path.join('/home/dev', '.studix', 'developer'));
+    expect(resolveDeveloperRoot({}, { homedir: () => '' })).toBeNull();
+    expect(resolveDeveloperRoot({}, { homedir: () => { throw new Error('no home'); } })).toBeNull();
+  });
+
+  it('6. the identity fallback is stable across repeated resolution and repeated runs', async () => {
+    const local = tempDir();
+    const configPaths = [];
+    for (let i = 0; i < 2; i += 1) {
+      const h = harness({ env: minimalEnv({ LOCALAPPDATA: local }) });
+      expect(await h.run()).toBe(EXIT.success);
+      configPaths.push(h.deps.promoteIdentityFn.mock.calls[0][0].configPath);
+    }
+    expect(configPaths[0]).toBe(path.join(local, 'Studix', 'developer', 'config', 'db-identity.json'));
+    expect(configPaths[1]).toBe(configPaths[0]);
+  });
+
+  it('4/5/10. with no path variables the CLI creates the fallback folders, proves them writable, and hands them to step 2', async () => {
+    const local = tempDir();
+    const root = path.join(local, 'Studix', 'developer');
+    const h = harness({ env: minimalEnv({ LOCALAPPDATA: local }) });
+    expect(await h.run()).toBe(EXIT.success);
+    expect(fs.statSync(path.join(root, 'backups', 'dev-reset')).isDirectory()).toBe(true);
+    expect(fs.statSync(path.join(root, 'config')).isDirectory()).toBe(true);
+    expect(fs.readdirSync(path.join(root, 'config')).filter((f) => f.includes('probe'))).toEqual([]); // probe cleaned up
+    expect(h.deps.runResetFn.mock.calls[0][0]).toMatchObject({
+      backupDir: path.join(root, 'backups'),
+      restoreLockPath: path.join(root, 'config', 'restore-state.lock'),
+      backupLockPath: path.join(root, 'backups', '.routine-backup.lock'),
+    });
+    expect(h.deps.readIdentityFn).toHaveBeenCalledWith({ configPath: path.join(root, 'config', 'db-identity.json') });
+    // the fallback identity is honestly flagged as not shared with the backend
+    expect(h.lines.join('\n')).toMatch(/browsers are NOT invalidated automatically/);
+  });
+
+  it('an explicit STUDIX_DB_IDENTITY_PATH suppresses the not-shared note', async () => {
+    const local = tempDir();
+    const h = harness({ env: minimalEnv({ LOCALAPPDATA: local, STUDIX_DB_IDENTITY_PATH: path.join(local, 'shared', 'db-identity.json') }) });
+    expect(await h.run()).toBe(EXIT.success);
+    expect(h.lines.join('\n')).not.toMatch(/NOT invalidated automatically/);
+  });
+
+  it('7. the application/production defaults are unchanged (still <ProgramData>/Studix, not the developer fallback)', () => {
+    const saved = {};
+    for (const k of ['STUDIX_BACKUP_DIR', 'STUDIX_RESTORE_LOCK_PATH', 'STUDIX_DB_IDENTITY_PATH', 'ProgramData', 'LOCALAPPDATA']) {
+      saved[k] = process.env[k];
+      delete process.env[k];
+    }
+    const programData = path.join(LOCAL, 'fake-ProgramData');
+    process.env.ProgramData = programData;
+    process.env.LOCALAPPDATA = LOCAL;
+    try {
+      expect(getBackupDir()).toBe(path.join(programData, 'Studix', 'backups'));
+      expect(resolveRestoreLockPath()).toBe(path.join(programData, 'Studix', 'config', 'restore-state.lock'));
+      expect(resolveDatabaseIdentityPath()).toBe(path.join(programData, 'Studix', 'config', 'db-identity.json'));
+      expect(resolveDeveloperPaths(process.env).backupDir).not.toBe(getBackupDir());
+    } finally {
+      for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  });
+
+  it('8. an invalid explicit path still fails closed (identity directory is a file)', async () => {
+    const local = tempDir();
+    const blocker = path.join(local, 'blocker');
+    fs.writeFileSync(blocker, 'x');
+    const h = harness({ env: minimalEnv({ LOCALAPPDATA: local, STUDIX_DB_IDENTITY_PATH: path.join(blocker, 'db-identity.json') }) });
+    expect(await h.run()).toBe(EXIT.refused);
+    expect(h.lines.join('\n')).toMatch(/database identity directory \(STUDIX_DB_IDENTITY_PATH\) is not writable/);
+    expectNothingHappened(h);
+  });
+
+  it('9. an unusable fallback location fails closed (LOCALAPPDATA is a file)', async () => {
+    const local = tempDir();
+    const blocker = path.join(local, 'not-a-folder');
+    fs.writeFileSync(blocker, 'x');
+    const h = harness({ env: minimalEnv({ LOCALAPPDATA: blocker }) });
+    expect(await h.run()).toBe(EXIT.refused);
+    expect(h.lines.join('\n')).toMatch(/backup directory \(developer default\) is not writable/);
+    expectNothingHappened(h);
+  });
+
+  it('11. when no developer folder can be resolved at all, nothing is backed up or reset', async () => {
+    const h = harness({ env: minimalEnv(), deps: { homedir: () => '' } });
+    expect(await h.run()).toBe(EXIT.refused);
+    expect(h.lines.join('\n')).toMatch(/No developer-local folder could be resolved/);
+    expectNothingHappened(h);
   });
 });
