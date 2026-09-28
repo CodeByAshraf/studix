@@ -8,7 +8,11 @@
 // Eligibility for one (student, group, date):
 //   1. an enrollment row with student_id/group_id matching
 //   2. enrollment.start_date <= date, and enrollment.end_date is NULL or date <= end_date
-//   3. dayCodeOf(date) is in (enrollment.attend_days ?? group.days)
+//   3. dayCodeOf(date) is one of group.days (the group meets that weekday), AND
+//   4. enrollment.attend_days is NULL (every group day) or contains dayCodeOf(date) —
+//      group.days says when the group meets, attend_days only narrows it for this student;
+//      an explicit attend_days can never make a student eligible on a day the group does
+//      not meet.
 //
 // Group Closure (Attendance Integration) — deliberately NOT filtered by status='active':
 // every enrollmentService.js closure path (withdrawEnrollmentTx/setPrimaryGroupTx's
@@ -53,6 +57,12 @@ function isDayAllowed(allowedDays, dateObj) {
   return days.includes(dayCodeOf(dateObj));
 }
 
+// Rules 3+4 above: the group must meet that weekday, and a non-NULL attend_days must include it.
+function isEnrollmentDayAllowed(enrollment, groupDays, dateObj) {
+  if (!isDayAllowed(groupDays, dateObj)) return false;
+  return enrollment.attend_days == null || isDayAllowed(enrollment.attend_days, dateObj);
+}
+
 /**
  * The active, date-eligible enrollment rows for one group on one date (Primary and
  * Additional both included — no role filter). Pass `client` (a Prisma transaction client)
@@ -72,7 +82,7 @@ export async function getEligibleEnrollmentsForGroupDate(groupId, date, client =
     },
   });
 
-  return enrollments.filter((e) => isDayAllowed(e.attend_days ?? group.days, dateObj));
+  return enrollments.filter((e) => isEnrollmentDayAllowed(e, group.days, dateObj));
 }
 
 /**
@@ -101,5 +111,5 @@ export async function isStudentEligibleForGroupDate(studentId, groupId, date, cl
     },
   });
   if (!enrollment) return false;
-  return isDayAllowed(enrollment.attend_days ?? group.days, dateObj);
+  return isEnrollmentDayAllowed(enrollment, group.days, dateObj);
 }

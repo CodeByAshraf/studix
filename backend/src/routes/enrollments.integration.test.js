@@ -44,9 +44,11 @@ describe('routes/enrollments.js — real PostgreSQL integration', () => {
     return `${prefix}_${seq}_${Date.now()}`;
   }
 
+  // Fix 2 — attend_days must be a subset of the group's meeting days (resolveAttendDaysTx),
+  // so every seeded group meets on the days these tests schedule (sat/tue).
   async function seedGroup(name = 'مجموعة') {
     const id = nextId('g');
-    await client.groups.create({ data: { id, name, price: 100 } });
+    await client.groups.create({ data: { id, name, price: 100, days: ['sat', 'tue'] } });
     return id;
   }
 

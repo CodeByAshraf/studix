@@ -14,9 +14,19 @@ import { ToastProvider } from '../../components/Toast';
 
 vi.mock('../../services/api', async () => {
   const actual = await vi.importActual('../../services/api');
-  return { ...actual, pgGetAttendanceAggregate: vi.fn() };
+  return { ...actual, pgGetAttendanceAggregate: vi.fn(), pgGetGroupEnrollments: vi.fn() };
 });
-import { pgGetAttendanceAggregate } from '../../services/api';
+import { pgGetAttendanceAggregate, pgGetGroupEnrollments } from '../../services/api';
+
+// Fix 2 — the group filter's members come from active enrollments (GET /api/enrollments?
+// groupId=); every seeded student holds the active Primary enrollment the real write paths
+// create alongside groupId.
+function mockGroupEnrollments() {
+  pgGetGroupEnrollments.mockImplementation(({ groupId } = {}) => Promise.resolve(
+    useAppStore.getState().students
+      .filter((st) => st.groupId && (!groupId || st.groupId === groupId))
+      .map((st) => ({ id: `e-${st.id}`, studentId: st.id, groupId: st.groupId, role: 'primary', status: 'active' }))));
+}
 
 const GROUP_A = { id: 'g1', name: 'مجموعة أ', grade: 'الأول الثانوي', color: '#3b82f6' };
 const GROUP_B = { id: 'g2', name: 'مجموعة ب', grade: 'الثاني الثانوي', color: '#10b981' };
@@ -45,7 +55,7 @@ function sortedStudentIds(call) {
 }
 
 describe('AttendanceReports — "كثيرو الغياب" tab uses the scoped/aggregate GET (C4 Attendance migration Phase 2)', () => {
-  beforeEach(() => { vi.clearAllMocks(); });
+  beforeEach(() => { vi.clearAllMocks(); mockGroupEnrollments(); });
 
   it('fetches GET /api/attendance/aggregate?groupBy=student&studentIds=<active ids> exactly once on open, with no groupId', async () => {
     seed();

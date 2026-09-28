@@ -99,5 +99,11 @@ function sanitizeStudentData(data) {
     notes:       clean.notes?.trim() || '',
     status:      clean.status || 'active',
     monthlyFee:  data.monthlyFee != null && data.monthlyFee !== '' ? Number(data.monthlyFee) : null,
+    // Fix 2 — the enrollment schedule (Primary attend_days + the complete Additional Groups
+    // list), applied by the backend in the same transaction as the student row. Omitted when
+    // the caller didn't set it (e.g. the Groups-screen transfer), so those enrollments stay as
+    // they are.
+    ...(data.primaryAttendDays !== undefined && { primaryAttendDays: data.primaryAttendDays }),
+    ...(data.additionalGroups !== undefined && { additionalGroups: data.additionalGroups }),
   };
 }

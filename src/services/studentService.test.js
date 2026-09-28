@@ -37,3 +37,25 @@ describe('createStudent/updateStudent — groupId null-normalization (Phase 3B)'
     expect(errors.phone).toBeTruthy();
   });
 });
+
+// Fix 2 — the enrollment schedule rides along with the student (applied by the backend in the
+// same transaction). Omitted from the payload when the caller never set it, so callers such as
+// the Groups-screen Primary transfer (updateStudent({...s, groupId})) leave enrollments alone.
+describe('createStudent/updateStudent — enrollment schedule fields', () => {
+  it('passes primaryAttendDays and additionalGroups through unchanged', () => {
+    const additionalGroups = [{ groupId: 'gB', attendDays: ['mon'] }];
+    const created = createStudent({ ...VALID_FIELDS, groupId: 'gA', primaryAttendDays: ['sat'], additionalGroups }, []);
+    expect(created.primaryAttendDays).toEqual(['sat']);
+    expect(created.additionalGroups).toEqual(additionalGroups);
+
+    const updated = updateStudent('s1', { ...VALID_FIELDS, groupId: 'gA', primaryAttendDays: null, additionalGroups: [] }, []);
+    expect(updated.primaryAttendDays).toBeNull();
+    expect(updated.additionalGroups).toEqual([]);
+  });
+
+  it('omits both fields entirely when they were not provided', () => {
+    const updated = updateStudent('s1', { ...VALID_FIELDS, groupId: 'gA' }, []);
+    expect(updated).not.toHaveProperty('primaryAttendDays');
+    expect(updated).not.toHaveProperty('additionalGroups');
+  });
+});

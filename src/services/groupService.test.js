@@ -4,7 +4,7 @@
 // A payment refunded (partially or fully) after being marked 'paid' kept counting as fully
 // collected forever. Now nets out active refunds via getRefundedAmount (treasury_txn).
 import { describe, it, expect } from 'vitest';
-import { getGroupStats } from './groupService';
+import { getGroupStats, groupMeetingDays, selectedAttendDays, toAttendDays } from './groupService';
 
 const GROUP = { id: 'g1', name: 'مجموعة أ', price: 1000, max: 30 };
 
@@ -128,5 +128,27 @@ describe('getGroupStats — monthly figures are year-aware (BUG-06)', () => {
     expect(stats.monthlyCollected).toBe(0);
     expect(stats.totalRevenue).toBe(0);
     expect(stats.collectionRate).toBe(0);
+  });
+});
+
+// Fix 2 — attend_days <-> selected-days conversion used by every enrollment day picker.
+describe('enrollment attendance-day helpers', () => {
+  const G = { days: ['mon', 'sat'] }; // stored order is irrelevant — week order is canonical
+
+  it('groupMeetingDays returns the group days in week order, and [] for a group without days', () => {
+    expect(groupMeetingDays(G)).toEqual(['sat', 'mon']);
+    expect(groupMeetingDays({ days: null })).toEqual([]);
+  });
+
+  it('selectedAttendDays: null means every meeting day; an array keeps only days the group meets', () => {
+    expect(selectedAttendDays(null, G)).toEqual(['sat', 'mon']);
+    expect(selectedAttendDays(['sat', 'tue'], G)).toEqual(['sat']);
+  });
+
+  it('toAttendDays: all meeting days (or nothing selected) → null, never []; a subset → that subset', () => {
+    expect(toAttendDays(['sat', 'mon'], G)).toBeNull();
+    expect(toAttendDays([], G)).toBeNull();
+    expect(toAttendDays(['mon'], G)).toEqual(['mon']);
+    expect(toAttendDays(['sat'], { days: null })).toBeNull();
   });
 });

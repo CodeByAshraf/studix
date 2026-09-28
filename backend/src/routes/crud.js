@@ -10,7 +10,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { snakeToCamel, camelToSnake } from '../lib/caseMapper.js';
-import { setPrimaryGroupTx, withdrawEnrollmentTx, findActivePrimary } from '../lib/enrollmentService.js';
+import { applyStudentEnrollmentsTx } from '../lib/enrollmentService.js';
 import { runInTransaction } from '../lib/transaction.js';
 import { enforceCreatePolicy } from './crudPolicies.js';
 
@@ -162,16 +162,22 @@ export function makeCrudRouter(modelName, opts = {}) {
     // Pulled out of `data` here and applied inside one transaction shared with any other
     // student fields from the same request, so the whole PUT/PATCH still commits or rolls
     // back atomically.
-    if (modelName === 'students' && Object.prototype.hasOwnProperty.call(data, 'group_id')) {
-      const groupId = data.group_id;
+    // The same transaction also carries the student's group schedule when the request sends
+    // it (primaryAttendDays = the Primary enrollment's attend_days; additionalGroups = the
+    // complete [{ groupId, attendDays }] Additional list) — neither is a students column, so
+    // prepareWriteData dropped them; they are read from the body here instead. Omitted, both
+    // leave the current enrollments exactly as they are.
+    const body = req.body || {};
+    const hasSchedule = body.primaryAttendDays !== undefined || body.additionalGroups !== undefined;
+    if (modelName === 'students' && (Object.prototype.hasOwnProperty.call(data, 'group_id') || hasSchedule)) {
+      const groupId = Object.prototype.hasOwnProperty.call(data, 'group_id') ? data.group_id : undefined;
       delete data.group_id;
       const row = await runInTransaction(async (tx) => {
-        if (groupId === null) {
-          const current = await findActivePrimary(tx, parsed.id);
-          if (current) await withdrawEnrollmentTx(tx, current.id);
-        } else {
-          await setPrimaryGroupTx(tx, parsed.id, groupId);
-        }
+        await applyStudentEnrollmentsTx(tx, parsed.id, {
+          groupId,
+          primaryAttendDays: body.primaryAttendDays,
+          additionalGroups: body.additionalGroups,
+        });
         return tx.students.update({ where: { id: parsed.id }, data });
       });
       return res.json({ ok: true, data: serializeBigInt(snakeToCamel(row)) });

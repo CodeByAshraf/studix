@@ -21,9 +21,10 @@ vi.mock('../../services/api', async () => {
     pgGetStudentEnrollments: vi.fn(),
     pgAddAdditionalGroup: vi.fn(),
     pgWithdrawEnrollment: vi.fn(),
+    pgUpdateEnrollmentSchedule: vi.fn(),
   };
 });
-import { pgGetPayments, pgGetStudentEnrollments, pgAddAdditionalGroup, pgWithdrawEnrollment } from '../../services/api';
+import { pgGetPayments, pgGetStudentEnrollments, pgAddAdditionalGroup, pgWithdrawEnrollment, pgUpdateEnrollmentSchedule } from '../../services/api';
 
 const S1 = 's1';
 const GROUP_A = 'gA';
@@ -38,9 +39,11 @@ const BASE_STUDENT = {
 function seedState(extra = {}) {
   useAppStore.setState({
     groups: [
-      { id: GROUP_A, name: 'مجموعة أ', grade: 'الأول', max: 20, subject: 'رياضيات' },
-      { id: GROUP_B, name: 'مجموعة ب', grade: 'الأول', max: 20, subject: 'فيزياء' },
-      { id: GROUP_C, name: 'مجموعة ج', grade: 'الأول', max: 20, subject: 'كيمياء' },
+      // Fix 2 — each group carries its real meeting days (the day pickers show only these).
+      { id: GROUP_A, name: 'مجموعة أ', grade: 'الأول', max: 20, subject: 'رياضيات', days: ['sat', 'mon'] },
+      { id: GROUP_B, name: 'مجموعة ب', grade: 'الأول', max: 20, subject: 'فيزياء', days: ['sat', 'tue'] },
+      { id: GROUP_C, name: 'مجموعة ج', grade: 'الأول', max: 20, subject: 'كيمياء', days: ['wed'] },
+      { id: 'gOther', name: 'مجموعة صف آخر', grade: 'الثاني', max: 20, subject: 'رياضيات', days: ['sun'] },
     ],
     students: [BASE_STUDENT],
     attendance: [], exams: [], grades: [], parents: [],
@@ -94,8 +97,9 @@ describe('StudentProfile — Groups tab (Phase 3B)', () => {
 
     expect(await screen.findByText('مجموعة أ')).toBeInTheDocument();
     expect(screen.getByText('مجموعة ب')).toBeInTheDocument();
-    expect(screen.getByText(/السبت/)).toBeInTheDocument();
-    expect(screen.getByText(/الثلاثاء/)).toBeInTheDocument();
+    // Fix 2 — the Primary row now also shows its effective days, so match each row exactly
+    expect(screen.getByText('أيام الحضور: السبت، الثلاثاء')).toBeInTheDocument();
+    expect(screen.getByText('أيام الحضور: كل أيام المجموعة (السبت - الاثنين)')).toBeInTheDocument();
   });
 
   it('3. student with Additional only (no Primary): shows "no Primary Group" and the Additional row', async () => {
@@ -132,7 +136,8 @@ describe('StudentProfile — Groups tab (Phase 3B)', () => {
 
     fireEvent.click(screen.getByText('+ إضافة مجموعة'));
     fireEvent.change(screen.getByDisplayValue('اختر مجموعة إضافية...'), { target: { value: GROUP_B } });
-    fireEvent.click(screen.getByText('السبت'));
+    // Fix 2 — group B meets sat+tue: both preselected; deselecting Tuesday leaves ['sat']
+    fireEvent.click(screen.getByRole('button', { name: 'الثلاثاء' }));
     fireEvent.click(screen.getByText('إضافة'));
 
     await waitFor(() => expect(pgAddAdditionalGroup).toHaveBeenCalledWith(
@@ -173,5 +178,92 @@ describe('StudentProfile — Groups tab (Phase 3B)', () => {
     expect(optionTexts.some(t => t.includes('مجموعة أ'))).toBe(false); // already Primary
     expect(optionTexts.some(t => t.includes('مجموعة ب'))).toBe(false); // already Additional
     expect(optionTexts.some(t => t.includes('مجموعة ج'))).toBe(true);  // not yet enrolled — selectable
+  });
+
+  // ── Fix 2 — attendance days from the group's own schedule, editable in place ──────────
+  it("8. the add form's day picker shows only the chosen group's meeting days (not all 7), all selected by default → null", async () => {
+    seedState();
+    pgGetStudentEnrollments.mockResolvedValue([primaryEnrollment()]);
+    pgAddAdditionalGroup.mockResolvedValue(additionalEnrollment());
+    renderProfile();
+    openGroupsTab();
+    await screen.findByText('مجموعة أ');
+
+    fireEvent.click(screen.getByText('+ إضافة مجموعة'));
+    fireEvent.change(screen.getByDisplayValue('اختر مجموعة إضافية...'), { target: { value: GROUP_B } });
+
+    const picker = screen.getByRole('group', { name: 'أيام الحضور' });
+    expect(within(picker).getAllByRole('button').map(b => b.textContent)).toEqual(['السبت', 'الثلاثاء']);
+    expect(within(picker).getAllByRole('button').every(b => b.getAttribute('aria-pressed') === 'true')).toBe(true);
+
+    fireEvent.click(screen.getByText('إضافة'));
+    await waitFor(() => expect(pgAddAdditionalGroup).toHaveBeenCalledWith(
+      S1, expect.objectContaining({ groupId: GROUP_B, attendDays: null })
+    ));
+  });
+
+  it("9. the add dropdown lists only groups of the student's grade", async () => {
+    seedState();
+    pgGetStudentEnrollments.mockResolvedValue([primaryEnrollment()]);
+    renderProfile();
+    openGroupsTab();
+    await screen.findByText('مجموعة أ');
+
+    fireEvent.click(screen.getByText('+ إضافة مجموعة'));
+
+    const optionTexts = within(screen.getByDisplayValue('اختر مجموعة إضافية...')).getAllByRole('option').map(o => o.textContent);
+    expect(optionTexts.some(t => t.includes('مجموعة صف آخر'))).toBe(false);
+    expect(optionTexts.some(t => t.includes('مجموعة ج'))).toBe(true);
+  });
+
+  it("10. editing an Additional Group's days calls PATCH (pgUpdateEnrollmentSchedule) and refreshes", async () => {
+    seedState();
+    pgGetStudentEnrollments.mockResolvedValue([primaryEnrollment(), additionalEnrollment()]);
+    pgUpdateEnrollmentSchedule.mockResolvedValue(additionalEnrollment({ attendDays: ['tue'] }));
+    renderProfile();
+    openGroupsTab();
+    await screen.findByText('مجموعة ب');
+    const callsBefore = pgGetStudentEnrollments.mock.calls.length;
+
+    fireEvent.click(screen.getAllByText('تعديل الأيام')[1]); // [0] Primary, [1] Additional
+    fireEvent.click(screen.getByRole('button', { name: 'السبت' }));
+    fireEvent.click(screen.getByText('حفظ الأيام'));
+
+    await waitFor(() => expect(pgUpdateEnrollmentSchedule).toHaveBeenCalledWith('e-additional', { attendDays: ['tue'] }));
+    await waitFor(() => expect(pgGetStudentEnrollments.mock.calls.length).toBeGreaterThan(callsBefore));
+  });
+
+  it("11. editing the Primary Group's days offers only the Primary group's days and sends the subset", async () => {
+    seedState();
+    pgGetStudentEnrollments.mockResolvedValue([primaryEnrollment()]);
+    pgUpdateEnrollmentSchedule.mockResolvedValue(primaryEnrollment({ attendDays: ['sat'] }));
+    renderProfile();
+    openGroupsTab();
+    await screen.findByText('مجموعة أ');
+
+    fireEvent.click(screen.getByText('تعديل الأيام'));
+    const picker = screen.getByRole('group', { name: 'أيام الحضور' });
+    expect(within(picker).getAllByRole('button').map(b => b.textContent)).toEqual(['السبت', 'الاثنين']);
+    fireEvent.click(within(picker).getByRole('button', { name: 'الاثنين' }));
+    fireEvent.click(screen.getByText('حفظ الأيام'));
+
+    await waitFor(() => expect(pgUpdateEnrollmentSchedule).toHaveBeenCalledWith('e-primary', { attendDays: ['sat'] }));
+  });
+
+  it('12. the last selected day cannot be deselected (an empty attend_days is never produced)', async () => {
+    seedState();
+    pgGetStudentEnrollments.mockResolvedValue([primaryEnrollment({ attendDays: ['sat'] })]);
+    pgUpdateEnrollmentSchedule.mockResolvedValue(primaryEnrollment({ attendDays: ['sat'] }));
+    renderProfile();
+    openGroupsTab();
+    await screen.findByText('مجموعة أ');
+
+    fireEvent.click(screen.getByText('تعديل الأيام'));
+    const picker = screen.getByRole('group', { name: 'أيام الحضور' });
+    fireEvent.click(within(picker).getByRole('button', { name: 'السبت' })); // the only selected day
+    expect(within(picker).getByRole('button', { name: 'السبت' })).toHaveAttribute('aria-pressed', 'true');
+    fireEvent.click(screen.getByText('حفظ الأيام'));
+
+    await waitFor(() => expect(pgUpdateEnrollmentSchedule).toHaveBeenCalledWith('e-primary', { attendDays: ['sat'] }));
   });
 });

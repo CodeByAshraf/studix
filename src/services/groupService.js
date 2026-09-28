@@ -81,6 +81,28 @@ export function buildGroupMembership(enrollments = []) {
   return byGroup;
 }
 
+// ── Enrollment attendance days (Fix 2) ───────────────────────────
+// A group's meeting days, in the canonical week order, ignoring anything unknown.
+export function groupMeetingDays(group) {
+  const days = Array.isArray(group?.days) ? group.days : [];
+  return ALL_DAYS.filter((d) => days.includes(d));
+}
+
+// attend_days → the days shown as selected: NULL means every day the group meets.
+export function selectedAttendDays(attendDays, group) {
+  const meeting = groupMeetingDays(group);
+  return Array.isArray(attendDays) ? meeting.filter((d) => attendDays.includes(d)) : meeting;
+}
+
+// Selected days → attend_days to store: every meeting day (or a group with no configured
+// days) is NULL ("follows the group"); never an empty array.
+export function toAttendDays(selected, group) {
+  const meeting = groupMeetingDays(group);
+  const picked = meeting.filter((d) => selected.includes(d));
+  if (meeting.length === 0 || picked.length === 0 || picked.length === meeting.length) return null;
+  return picked;
+}
+
 // ── Client-side helpers ────────────────────────────────────────
 // C4 Attendance migration Phase 2: the 4th parameter used to be the FULL global attendance
 // array, filtered internally by this function (`attendance.filter(a => a.groupId ===

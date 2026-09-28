@@ -1,11 +1,26 @@
 // src/modules/students/StudentForm.jsx
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useAppStore } from '../../store/app.store';
 import useForm       from '../../hooks/useForm';
 import { validateStudent } from '../../services/studentService';
-import { GRADES }    from '../../services/groupService';
+import { GRADES, formatDays, selectedAttendDays, toAttendDays } from '../../services/groupService';
+import { pgGetStudentEnrollments } from '../../services/api';
 import FormField     from '../../components/forms/FormField';
 import Button        from '../../components/ui/Button';
+import AttendDaysPicker from './components/AttendDaysPicker';
+
+// Fix 2 — a stored/edited attend_days re-checked against the group's CURRENT meeting days:
+// days the group no longer meets are dropped; if none remain the user must pick again (never
+// silently widened to "all days"). null stays null ("follows the group").
+function normalizeAttendDays(days, group) {
+  if (days == null) return { value: null };
+  const kept = selectedAttendDays(days, group);
+  if (kept.length === 0) return { error: true };
+  return { value: toAttendDays(kept, group) };
+}
+
+let rowSeq = 0;
+const newRow = (groupId = '', attendDays = null) => ({ key: `row-${++rowSeq}`, groupId, attendDays });
 
 const EMPTY = {
   name: '', phone: '', parentPhone: '', grade: '',
@@ -62,6 +77,19 @@ export default function StudentForm({ initialValues, editId, onSubmit, onCancel,
     (vals) => validateStudent(vals, students, editId)
   );
 
+  // Enrollment schedule (Fix 2): Student + Group + Selected Days = Enrollment. primaryDays is
+  // the Primary enrollment's attend_days (null = every day the group meets); additional is the
+  // complete Additional Groups list, each row with its own attend_days. Both are sent with the
+  // student and applied by the backend in one transaction (studentCreate.js / crud.js).
+  const [primaryDays, setPrimaryDays]     = useState(null);
+  const [hasAdditional, setHasAdditional] = useState(false);
+  const [additional, setAdditional]       = useState([]);
+  const [scheduleError, setScheduleError] = useState('');
+  // Edit: the student's current enrollments must load before the schedule can be saved —
+  // 'failed' saves the student WITHOUT schedule fields, so the backend leaves every enrollment
+  // untouched rather than overwriting it with an empty list.
+  const [scheduleState, setScheduleState] = useState(editId ? 'loading' : 'ready');
+
   // المجموعات المعروضة تُفلتر حسب الصف المختار: طالب أولى ثانوي يرى مجموعات
   // أولى ثانوي فقط. قبل اختيار الصف لا تظهر أي مجموعة (لتفادي اختيار خاطئ).
   const gradeGroups = values.grade
@@ -83,6 +111,86 @@ export default function StudentForm({ initialValues, editId, onSubmit, onCancel,
   const handleGradeChange = (e) => {
     handleChange(e);
     if (values.groupId) setField('groupId', '');
+    setPrimaryDays(null);
+  };
+
+  // ── Enrollment schedule (Fix 2) — state declared above, next to useForm ──
+  useEffect(() => {
+    if (!editId) { setScheduleState('ready'); return undefined; }
+    let cancelled = false;
+    setScheduleState('loading');
+    pgGetStudentEnrollments(editId)
+      .then((rows) => {
+        if (cancelled) return;
+        const primary = rows.find((r) => r.role === 'primary');
+        const rowsAdditional = rows.filter((r) => r.role === 'additional')
+          .map((r) => newRow(r.groupId, r.attendDays ?? null));
+        setPrimaryDays(primary?.attendDays ?? null);
+        setAdditional(rowsAdditional);
+        setHasAdditional(rowsAdditional.length > 0);
+        setScheduleState('ready');
+      })
+      .catch(() => { if (!cancelled) setScheduleState('failed'); });
+    return () => { cancelled = true; };
+  }, [editId]);
+
+  const handlePrimaryChange = (e) => {
+    handleChange(e);
+    setPrimaryDays(null); // a newly chosen Primary Group starts with all of its days
+    setScheduleError('');
+  };
+
+  const groupById = (id) => groups.find((g) => g.id === id);
+
+  // Additional Group options for one row: same-grade groups (plus the row's own current group,
+  // e.g. legacy data from another grade), never the Primary or a group another row already has.
+  const additionalOptions = (row) => {
+    const taken = new Set([values.groupId, ...additional.filter((a) => a.key !== row.key).map((a) => a.groupId)]);
+    const own = row.groupId && !gradeGroups.some((g) => g.id === row.groupId) ? [groupById(row.groupId)].filter(Boolean) : [];
+    return [...own, ...gradeGroups].filter((g) => !taken.has(g.id) || g.id === row.groupId);
+  };
+
+  const updateRow = (key, patch) => {
+    setAdditional((prev) => prev.map((a) => (a.key === key ? { ...a, ...patch } : a)));
+    setScheduleError('');
+  };
+
+  const toggleAdditional = (checked) => {
+    setHasAdditional(checked);
+    setAdditional(checked ? [newRow()] : []);
+    setScheduleError('');
+  };
+
+  // Validates the schedule and builds the request fields, or returns { error }.
+  const buildSchedule = () => {
+    if (scheduleState !== 'ready') return {};
+    const rows = hasAdditional ? additional : [];
+    if (rows.some((a) => !a.groupId)) return { error: 'اختر المجموعة لكل مجموعة إضافية أو احذف السطر الفارغ.' };
+    const ids = rows.map((a) => a.groupId);
+    if (new Set(ids).size !== ids.length) return { error: 'لا يمكن اختيار نفس المجموعة الإضافية مرتين.' };
+    if (values.groupId && ids.includes(values.groupId)) return { error: 'المجموعة الرئيسية لا يمكن اختيارها كمجموعة إضافية أيضاً.' };
+
+    let primaryAttendDays;
+    if (values.groupId) {
+      const p = normalizeAttendDays(primaryDays, groupById(values.groupId));
+      if (p.error) return { error: 'اختر أيام حضور الطالب في المجموعة الرئيسية.' };
+      primaryAttendDays = p.value;
+    }
+    const additionalGroups = [];
+    for (const a of rows) {
+      const n = normalizeAttendDays(a.attendDays, groupById(a.groupId));
+      if (n.error) return { error: `اختر أيام الحضور في "${groupById(a.groupId)?.name || 'المجموعة الإضافية'}".` };
+      additionalGroups.push({ groupId: a.groupId, attendDays: n.value });
+    }
+    return { fields: { primaryAttendDays, additionalGroups } };
+  };
+
+  const handleSubmit = () => {
+    const valid = validate();
+    const schedule = buildSchedule();
+    setScheduleError(schedule.error || '');
+    if (!valid || schedule.error) return;
+    onSubmit({ ...values, ...schedule.fields });
   };
 
   useEffect(() => {
@@ -136,7 +244,7 @@ export default function StudentForm({ initialValues, editId, onSubmit, onCancel,
         {/* المجموعة الرئيسية — تُعرض مجموعات الصف المختار فقط. Phase 3B: اختيارية — يمكن
             تسجيل/تعديل طالب بلا مجموعة رئيسية (المجموعات الإضافية تُدار من ملف الطالب). */}
         <Field label="المجموعة الرئيسية" error={err('groupId')}>
-          <Sel name="groupId" value={values.groupId} onChange={handleChange} invalid={isEr('groupId')}>
+          <Sel name="groupId" value={values.groupId} onChange={handlePrimaryChange} invalid={isEr('groupId')}>
             <option value="">
               {!values.grade
                 ? 'اختر السنة الدراسية أولاً...'
@@ -146,6 +254,13 @@ export default function StudentForm({ initialValues, editId, onSubmit, onCancel,
             </option>
             {visibleGroups.map(g => <option key={g.id} value={g.id}>{g.name} — {g.subject}</option>)}
           </Sel>
+          {selectedGroupObj && scheduleState === 'ready' && (
+            <div style={{ marginTop:8 }}>
+              <AttendDaysPicker group={selectedGroupObj} value={primaryDays}
+                onChange={(d) => { setPrimaryDays(d); setScheduleError(''); }}
+                label="أيام حضور الطالب في المجموعة الرئيسية"/>
+            </div>
+          )}
         </Field>
           {/* رسوم الشهر (خاصة بالطالب) */}
           <Field label="رسوم الشهر (ج.م)" required error={err('monthlyFee')}>
@@ -181,9 +296,67 @@ export default function StudentForm({ initialValues, editId, onSubmit, onCancel,
         </div>
       </div>
 
+      {/* ── المجموعات الإضافية (Fix 2) — كل مجموعة بأيام حضورها الخاصة، بلا رسوم إضافية ── */}
+      <div style={{ marginTop:16, paddingTop:14, borderTop:'1px solid var(--border)', display:'flex', flexDirection:'column', gap:10 }}>
+        {scheduleState === 'loading' && (
+          <div style={{ fontSize:'0.75rem', color:'var(--text3)' }}>جارٍ تحميل مجموعات الطالب...</div>
+        )}
+        {scheduleState === 'failed' && (
+          <div style={{ fontSize:'0.75rem', color:'var(--orange)' }}>
+            تعذّر تحميل مجموعات الطالب — ستُحفَظ بيانات الطالب فقط، دون أي تغيير على مجموعاته أو أيام حضوره.
+          </div>
+        )}
+        {scheduleState === 'ready' && (
+          <>
+            <label style={{ display:'flex', alignItems:'center', gap:8, fontSize:'0.82rem', fontWeight:700, cursor:'pointer' }}>
+              <input type="checkbox" checked={hasAdditional} onChange={(e) => toggleAdditional(e.target.checked)}/>
+              الطالب يحضر مجموعة أخرى (مجموعة إضافية)
+            </label>
+            {hasAdditional && additional.map((row, i) => {
+              const rowGroup = groupById(row.groupId);
+              return (
+                <div key={row.key} data-testid={`additional-row-${i}`}
+                  style={{ background:'var(--surface2)', border:'1px solid var(--border)', borderRadius:12, padding:12, display:'flex', flexDirection:'column', gap:8 }}>
+                  <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+                    <div style={{ flex:1 }}>
+                      <Sel name={`additional-${i}`} value={row.groupId}
+                        onChange={(e) => updateRow(row.key, { groupId: e.target.value, attendDays: null })}>
+                        <option value="">{values.grade ? 'اختر المجموعة الإضافية...' : 'اختر السنة الدراسية أولاً...'}</option>
+                        {additionalOptions(row).map(g => (
+                          <option key={g.id} value={g.id}>{g.name} — {g.subject}{g.days?.length ? ` (${formatDays(g.days)})` : ''}</option>
+                        ))}
+                      </Sel>
+                    </div>
+                    <Button variant="ghost" size="sm"
+                      onClick={() => {
+                        const next = additional.filter(a => a.key !== row.key);
+                        setAdditional(next);
+                        if (next.length === 0) setHasAdditional(false);
+                        setScheduleError('');
+                      }}>حذف</Button>
+                  </div>
+                  {rowGroup && (
+                    <AttendDaysPicker group={rowGroup} value={row.attendDays}
+                      onChange={(d) => updateRow(row.key, { attendDays: d })}/>
+                  )}
+                </div>
+              );
+            })}
+            {hasAdditional && (
+              <div>
+                <Button variant="ghost" size="sm" onClick={() => setAdditional(prev => [...prev, newRow()])}>+ إضافة مجموعة أخرى</Button>
+              </div>
+            )}
+          </>
+        )}
+        {scheduleError && (
+          <div style={{ fontSize:'0.75rem', color:'var(--red)' }}>⚠ {scheduleError}</div>
+        )}
+      </div>
+
       <div style={{ display:'flex', justifyContent:'flex-end', gap:10, marginTop:20, paddingTop:16, borderTop:'1px solid var(--border)' }}>
         <Button variant="secondary" onClick={onCancel}>إلغاء</Button>
-        <Button variant="primary" loading={loading} onClick={() => { if (validate()) onSubmit(values); }}>
+        <Button variant="primary" loading={loading} disabled={scheduleState === 'loading'} onClick={handleSubmit}>
           💾 {editId ? 'حفظ التعديلات' : 'تسجيل الطالب'}
         </Button>
       </div>

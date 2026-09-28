@@ -8,7 +8,7 @@ import Button        from '../../components/ui/Button';
 import StatusToggle, { StatusQuickBtn } from './components/StatusToggle';
 import AttendanceStats from './components/AttendanceStats';
 import { STATUS_META } from '../../services/attendanceService';
-import { pgSaveAttendanceSession, pgGetEligibleStudentsForSession, pgGetAttendance } from '../../services/api';
+import { pgSaveAttendanceSession, pgGetEligibleStudentsForSession, pgGetAttendance, pgGetGroupEnrollments } from '../../services/api';
 import { useAsyncData } from '../../hooks/useAsyncData';
 import { useAvatarStyle } from '../students/components/StudentAvatar';
 import { formatDate } from '../../utils/helpers';
@@ -105,6 +105,19 @@ export default function SessionMarking({ onDone }) {
   useEffect(() => {
     if (rosterError) toast.error(rosterError.message || 'فشل تحميل قائمة الطلاب المؤهَّلين لهذه الحصة');
   }, [rosterError]);
+
+  // Group dropdown counts (Fix 2): active members per group from ONE GET /api/enrollments
+  // (Primary + Additional — the same enrollment source as the roster), not students.groupId.
+  // Membership only; the exact per-date roster still comes from the eligibility endpoint above.
+  const { data: allEnrollments = [] } = useAsyncData(() => pgGetGroupEnrollments(), [], []);
+  const activeCountByGroup = useMemo(() => {
+    const activeIds = new Set(students.filter(s => s.status === 'active').map(s => s.id));
+    const counts = new Map();
+    allEnrollments.forEach((e) => {
+      if (activeIds.has(e.studentId)) counts.set(e.groupId, (counts.get(e.groupId) || 0) + 1);
+    });
+    return counts;
+  }, [allEnrollments, students]);
 
   const groupStudents = useMemo(() => {
     const eligibleSet = new Set(eligibleIds);
@@ -244,10 +257,9 @@ export default function SessionMarking({ onDone }) {
               <select value={selectedGroup} onChange={e => setSelectedGroup(e.target.value)} style={{ ...INP_STYLE, width:'100%', cursor:'pointer' }} {...INP_EVENTS}>
                 <option value="">اختر المجموعة...</option>
                 {groups.map(g => {
-                  // تقريبي عمداً (Primary Group فقط) — لا يُجلَب عدد مؤهَّل حقيقي لكل مجموعة هنا
-                  // (يتطلّب استدعاء شبكة منفصلاً لكل مجموعة قبل أي اختيار) — العدد الدقيق
-                  // (enrollment/date/day) يظهر في معاينة "عدد الطلاب" أدناه فور اختيار المجموعة والتاريخ.
-                  const count = students.filter(s => s.groupId === g.id && s.status === 'active').length;
+                  // عدد الأعضاء النشطين (رئيسية + إضافية) من التسجيلات — العدد المؤهَّل لتاريخ/يوم
+                  // محدَّد يظهر في معاينة "عدد الطلاب" أدناه فور اختيار المجموعة والتاريخ.
+                  const count = activeCountByGroup.get(g.id) || 0;
                   return <option key={g.id} value={g.id}>{g.name} ({count} طالب)</option>;
                 })}
               </select>

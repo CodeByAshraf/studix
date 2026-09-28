@@ -8,7 +8,7 @@ import { formatDate }  from '../../utils/helpers';
 import { useAvatarStyle } from '../students/components/StudentAvatar';
 import { PrintHeader } from '../../components/shared';
 import { openGroupSessionReport, openStudentAttendanceReport } from './buildAttendanceReport';
-import { pgGetEligibleStudentsForSession, pgGetAttendance, pgGetAttendanceAggregate } from '../../services/api';
+import { pgGetEligibleStudentsForSession, pgGetAttendance, pgGetAttendanceAggregate, pgGetGroupEnrollments } from '../../services/api';
 import { useAsyncData } from '../../hooks/useAsyncData';
 import { useToast } from '../../components/Toast';
 import Button from '../../components/ui/Button';
@@ -155,6 +155,19 @@ function ReportByStudent({ students }) {
 // ════════════════════════════════════════════════════════════
 // REPORT 2 — BY GROUP
 // ════════════════════════════════════════════════════════════
+// Fix 2 — a group's members are its ACTIVE enrollments (Primary + Additional, GET
+// /api/enrollments?groupId=) — the same source the attendance roster uses — not
+// students.groupId. Empty set while no group is selected.
+function useGroupMemberIds(groupId) {
+  const toast = useToast();
+  const { data: enrollments = [], error } = useAsyncData(
+    () => (groupId ? pgGetGroupEnrollments({ groupId }) : Promise.resolve([])), [groupId], []);
+  useEffect(() => {
+    if (error) toast.error(error.message || 'فشل تحميل طلاب المجموعة');
+  }, [error]);
+  return useMemo(() => new Set(enrollments.map((e) => e.studentId)), [enrollments]);
+}
+
 function ReportByGroup({ groups, students }) {
   const [selectedGroup, setSelectedGroup] = useState('');
   const [expandedDate, setExpandedDate]  = useState(null);
@@ -176,7 +189,8 @@ function ReportByGroup({ groups, students }) {
 
   const stats   = useMemo(() => getGroupAttendanceStats(selectedGroup, attendance), [selectedGroup, attendance]);
   const sessions = useMemo(() => getGroupSessions(selectedGroup, attendance), [selectedGroup, attendance]);
-  const groupStudents = useMemo(() => students.filter(s => s.groupId === selectedGroup), [students, selectedGroup]);
+  const memberIds = useGroupMemberIds(selectedGroup);
+  const groupStudents = useMemo(() => students.filter(s => memberIds.has(s.id)), [students, memberIds]);
 
   return (
     <div>
@@ -282,9 +296,10 @@ function ReportFrequentAbsentees({ students, groups }) {
   const [filterGroup, setFilterGroup] = useState('');
   const toast = useToast();
 
+  const memberIds = useGroupMemberIds(filterGroup);
   const filtered = useMemo(() =>
-    filterGroup ? students.filter(s => s.groupId === filterGroup) : students,
-  [students, filterGroup]);
+    filterGroup ? students.filter(s => memberIds.has(s.id)) : students,
+  [students, filterGroup, memberIds]);
 
   // C4 Attendance migration Phase 2 (final consumer): scoped GET
   // /api/attendance/aggregate?groupBy=student&studentIds=<active ids>[&groupId=] instead of

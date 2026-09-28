@@ -10,9 +10,10 @@ import { formatDate, formatCurrency } from '../../utils/helpers';
 import { getNetRevenue } from '../../services/paymentService';
 import {
   pgGetPayments, pgUpdateStudent, pgGetAttendance, pgGetGrades,
-  pgGetStudentEnrollments, pgAddAdditionalGroup, pgWithdrawEnrollment,
+  pgGetStudentEnrollments, pgAddAdditionalGroup, pgWithdrawEnrollment, pgUpdateEnrollmentSchedule,
 } from '../../services/api';
-import { ALL_DAYS, DAYS_AR } from '../../services/groupService';
+import { DAYS_AR, formatDays } from '../../services/groupService';
+import AttendDaysPicker from './components/AttendDaysPicker';
 import { useAsyncData } from '../../hooks/useAsyncData';
 import { useErrorHandler } from '../../hooks/useErrorHandler';
 import { useToast } from '../../components/Toast';
@@ -418,11 +419,28 @@ const DATE_INPUT_STYLE = {
   ...SELECT_STYLE, cursor:'text', flex:1,
 };
 
-function EnrollmentRow({ enrollment, group, onWithdraw, withdrawing }) {
+// Fix 2 — each enrollment row shows its effective attendance days and can edit them in place
+// (PATCH /api/enrollments/:id, the existing schedule API — Primary and Additional alike). The
+// picker offers only the group's own meeting days.
+function EnrollmentRow({ enrollment, group, onWithdraw, withdrawing, onScheduleSaved }) {
+  const toast = useToast();
+  const { loading: saving, run } = useErrorHandler(toast);
+  const [editing, setEditing] = useState(false);
+  const [days, setDays] = useState(enrollment.attendDays ?? null);
+
+  const saveDays = async () => {
+    await run(async () => {
+      await pgUpdateEnrollmentSchedule(enrollment.id, { attendDays: days });
+      setEditing(false);
+      onScheduleSaved?.();
+    }, { successMsg: 'تم تحديث أيام الحضور ✓', errorMsg: 'تعذّر تحديث أيام الحضور' });
+  };
+
   return (
+    <div style={{ borderBottom:'1px solid var(--border)' }}>
     <div style={{
       display:'flex', alignItems:'center', justifyContent:'space-between', gap:12,
-      padding:'12px 14px', borderBottom:'1px solid var(--border)',
+      padding:'12px 14px',
     }}>
       <div style={{ flex:1, minWidth:0 }}>
         <div style={{ fontWeight:700, fontSize:'0.88rem' }}>{group?.name || 'مجموعة غير معروفة'}</div>
@@ -433,31 +451,48 @@ function EnrollmentRow({ enrollment, group, onWithdraw, withdrawing }) {
           {enrollment.endDate && (
             <span>إلى {formatDate(enrollment.endDate, { month:'short', day:'numeric', year:'numeric' })}</span>
           )}
-          {Array.isArray(enrollment.attendDays) && enrollment.attendDays.length > 0 && (
+          {Array.isArray(enrollment.attendDays) && enrollment.attendDays.length > 0 ? (
             <span>أيام الحضور: {enrollment.attendDays.map(d => DAYS_AR[d] || d).join('، ')}</span>
+          ) : group?.days?.length > 0 && (
+            <span>أيام الحضور: كل أيام المجموعة ({formatDays(group.days)})</span>
           )}
         </div>
       </div>
+      {group && !editing && (
+        <Button variant="ghost" size="sm" onClick={() => { setDays(enrollment.attendDays ?? null); setEditing(true); }}>تعديل الأيام</Button>
+      )}
       {onWithdraw && (
         <Button variant="ghost" size="sm" loading={withdrawing} onClick={() => onWithdraw(enrollment)}>سحب</Button>
       )}
+    </div>
+    {editing && (
+      <div style={{ padding:'0 14px 12px', display:'flex', flexDirection:'column', gap:8 }}>
+        <AttendDaysPicker group={group} value={days} onChange={setDays}/>
+        <div style={{ display:'flex', justifyContent:'flex-end', gap:8 }}>
+          <Button variant="secondary" size="sm" onClick={() => setEditing(false)}>إلغاء</Button>
+          <Button variant="primary" size="sm" loading={saving} onClick={saveDays}>حفظ الأيام</Button>
+        </div>
+      </div>
+    )}
     </div>
   );
 }
 
 // يمنع اختيار مجموعة الطالب فيها بالفعل تسجيل نشط (رئيسي أو إضافي) — excludeGroupIds
 // يأتي من enrollments النشطة الحالية (دفاع في العمق فوق رفض الخادم نفسه لهذا التكرار).
-function AddAdditionalGroupForm({ studentId, excludeGroupIds, groups, onAdded, onCancel }) {
+// Fix 2: groups are limited to the student's grade (same rule as the Student form's Primary/
+// Additional selectors), and the day picker shows only the chosen group's meeting days —
+// null (default, all selected) = attends every day that group meets.
+function AddAdditionalGroupForm({ studentId, grade, excludeGroupIds, groups, onAdded, onCancel }) {
   const toast = useToast();
   const { loading, run } = useErrorHandler(toast);
   const [groupId, setGroupId]     = useState('');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate]     = useState('');
-  const [days, setDays]           = useState([]);
+  const [days, setDays]           = useState(null);
 
-  const availableGroups = groups.filter(g => !excludeGroupIds.includes(g.id));
-
-  const toggleDay = (d) => setDays(prev => prev.includes(d) ? prev.filter(x => x !== d) : [...prev, d]);
+  const availableGroups = groups.filter(g => !excludeGroupIds.includes(g.id) && (!grade || g.grade === grade));
+  const selectedGroup = groups.find(g => g.id === groupId);
 
   const handleSubmit = async () => {
     if (!groupId) { toast.warning('اختر مجموعة'); return; }
@@ -466,7 +501,7 @@ function AddAdditionalGroupForm({ studentId, excludeGroupIds, groups, onAdded, o
         groupId,
         startDate: startDate || undefined,
         endDate: endDate || undefined,
-        attendDays: days.length ? days : undefined,
+        attendDays: days,
       });
       onAdded(created);
     }, { successMsg: 'تمت إضافة المجموعة الإضافية ✓', errorMsg: 'تعذّر إضافة المجموعة' });
@@ -474,7 +509,7 @@ function AddAdditionalGroupForm({ studentId, excludeGroupIds, groups, onAdded, o
 
   return (
     <div style={{ background:'var(--surface2)', border:'1px solid var(--border)', borderRadius:12, padding:14, marginBottom:14, display:'flex', flexDirection:'column', gap:10 }}>
-      <select value={groupId} onChange={e => setGroupId(e.target.value)} style={SELECT_STYLE}>
+      <select value={groupId} onChange={e => { setGroupId(e.target.value); setDays(null); }} style={SELECT_STYLE}>
         <option value="">اختر مجموعة إضافية...</option>
         {availableGroups.map(g => <option key={g.id} value={g.id}>{g.name} — {g.subject}</option>)}
       </select>
@@ -486,23 +521,7 @@ function AddAdditionalGroupForm({ studentId, excludeGroupIds, groups, onAdded, o
           aria-label="تاريخ الانتهاء (اختياري)" style={DATE_INPUT_STYLE}/>
       </div>
 
-      <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
-        {ALL_DAYS.map(d => {
-          const active = days.includes(d);
-          return (
-            <button key={d} type="button" onClick={() => toggleDay(d)} aria-pressed={active}
-              style={{
-                padding:'5px 11px', borderRadius:7, fontSize:'0.72rem', fontWeight:700,
-                cursor:'pointer', fontFamily:'Cairo,sans-serif',
-                border: `1.5px solid ${active ? 'var(--accent)' : 'var(--border)'}`,
-                background: active ? 'rgba(13,148,136,.12)' : 'transparent',
-                color: active ? 'var(--accent)' : 'var(--text3)',
-              }}>
-              {DAYS_AR[d]}
-            </button>
-          );
-        })}
-      </div>
+      {selectedGroup && <AttendDaysPicker group={selectedGroup} value={days} onChange={setDays}/>}
 
       <div style={{ display:'flex', justifyContent:'flex-end', gap:8 }}>
         <Button variant="secondary" size="sm" onClick={onCancel}>إلغاء</Button>
@@ -512,10 +531,12 @@ function AddAdditionalGroupForm({ studentId, excludeGroupIds, groups, onAdded, o
   );
 }
 
-function GroupsTab({ studentId, groups, refreshKey, bumpRefresh }) {
+// studentVersion (the student's updatedAt) re-fetches enrollments after the student is saved
+// from the edit form, which now carries the whole group schedule (Fix 2).
+function GroupsTab({ studentId, grade, studentVersion, groups, refreshKey, bumpRefresh }) {
   const toast = useToast();
   const { data: enrollments = [], error } = useAsyncData(
-    () => pgGetStudentEnrollments(studentId), [studentId, refreshKey], []);
+    () => pgGetStudentEnrollments(studentId), [studentId, refreshKey, studentVersion], []);
   const [adding, setAdding] = useState(false);
   const [confirmWithdraw, setConfirmWithdraw] = useState(null);
   const { loading: withdrawing, run: runWithdraw } = useErrorHandler(toast);
@@ -542,7 +563,8 @@ function GroupsTab({ studentId, groups, refreshKey, bumpRefresh }) {
       <SectionHead title="المجموعة الرئيسية"/>
       {primary ? (
         <div style={{ border:'1px solid var(--border)', borderRadius:12, marginBottom:20, overflow:'hidden' }}>
-          <EnrollmentRow enrollment={primary} group={groups.find(g => g.id === primary.groupId)}/>
+          <EnrollmentRow key={primary.id} enrollment={primary} group={groups.find(g => g.id === primary.groupId)}
+            onScheduleSaved={bumpRefresh}/>
         </div>
       ) : (
         <div style={{ textAlign:'center', padding:'20px 0', color:'var(--text3)', fontSize:'0.85rem', marginBottom:20 }}>
@@ -558,6 +580,7 @@ function GroupsTab({ studentId, groups, refreshKey, bumpRefresh }) {
       {adding && (
         <AddAdditionalGroupForm
           studentId={studentId}
+          grade={grade}
           excludeGroupIds={activeGroupIds}
           groups={groups}
           onAdded={() => { setAdding(false); bumpRefresh(); }}
@@ -574,7 +597,8 @@ function GroupsTab({ studentId, groups, refreshKey, bumpRefresh }) {
           {additional.map(e => (
             <EnrollmentRow key={e.id} enrollment={e} group={groups.find(g => g.id === e.groupId)}
               onWithdraw={(en) => setConfirmWithdraw(en)}
-              withdrawing={withdrawing && confirmWithdraw?.id === e.id}/>
+              withdrawing={withdrawing && confirmWithdraw?.id === e.id}
+              onScheduleSaved={bumpRefresh}/>
           ))}
         </div>
       )}
@@ -829,7 +853,8 @@ export default function StudentProfile({ studentId, onBack, onEdit }) {
               <NotesTab student={student} onSaveNotes={handleSaveNotes}/>
             )}
             {activeTab === 'groups' && (
-              <GroupsTab studentId={studentId} groups={groups} refreshKey={enrollmentsRefreshKey}
+              <GroupsTab studentId={studentId} grade={student?.grade} studentVersion={student?.updatedAt}
+                groups={groups} refreshKey={enrollmentsRefreshKey}
                 bumpRefresh={() => setEnrollmentsRefreshKey(k => k + 1)}/>
             )}
           </SectionBoundary>

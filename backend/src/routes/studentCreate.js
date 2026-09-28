@@ -23,7 +23,7 @@ import { runInTransaction } from '../lib/transaction.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { snakeToCamel } from '../lib/caseMapper.js';
 import { prepareWriteData } from './crud.js';
-import { setPrimaryGroupTx } from '../lib/enrollmentService.js';
+import { applyStudentEnrollmentsTx } from '../lib/enrollmentService.js';
 import { computeNextStudentCode } from '../lib/studentCode.js';
 
 // نفس تسلسل BigInt→نص المكرَّر عمداً في crud.js/admissionActivation.js/payments.js —
@@ -113,9 +113,15 @@ export async function createStudentDirect(body) {
         // is a harmless no-op write here — the value already matches — kept for one
         // single source of truth on "how a Primary Group gets set" rather than a second,
         // creation-only copy of that logic).
-        if (data.group_id) {
-          await setPrimaryGroupTx(tx, created.id, data.group_id, { effectiveDate: data.enroll_date });
-        }
+        // Enrollment schedule: the Primary's attend_days (body.primaryAttendDays) and every
+        // Additional Group (body.additionalGroups) go through the same transaction — any
+        // invalid enrollment rolls back the student row too, never a half-created student.
+        await applyStudentEnrollmentsTx(tx, created.id, {
+          groupId: data.group_id || undefined,
+          primaryAttendDays: data.group_id ? body?.primaryAttendDays : undefined,
+          additionalGroups: body?.additionalGroups,
+          effectiveDate: data.enroll_date,
+        });
         return created;
       });
       return serializeBigInt(snakeToCamel(row));
