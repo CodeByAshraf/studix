@@ -20,7 +20,7 @@ describe('routes/examStart.js — Start Exam action (Exams Phase 3D, real Postgr
     return;
   }
 
-  let scratch, client, startExam;
+  let scratch, client, startExam, examsCrud;
   let seq = 0;
 
   const GRADE_6 = 'الصف السادس الابتدائي';
@@ -29,7 +29,23 @@ describe('routes/examStart.js — Start Exam action (Exams Phase 3D, real Postgr
     scratch = await setupScratchDb('exam_start');
     client = scratch.client;
     ({ startExam } = await import('./examStart.js'));
+    // The generic /api/exams router exactly as server.js mounts it (writable, exams policy).
+    const { makeCrudRouter } = await import('./crud.js');
+    const { CRUD_POLICIES } = await import('./crudPolicies.js');
+    examsCrud = makeCrudRouter('exams', { writable: true, policy: CRUD_POLICIES.exams });
   }, 60_000);
+
+  function callCrud(method, url, body) {
+    return new Promise((resolve, reject) => {
+      const req = { method, url, headers: {}, body };
+      const res = {
+        statusCode: 200,
+        status(c) { this.statusCode = c; return this; },
+        json(b) { resolve({ statusCode: this.statusCode, body: b }); return this; },
+      };
+      examsCrud.handle(req, res, (err) => (err ? reject(err) : reject(new Error('no route matched'))));
+    });
+  }
 
   afterAll(async () => {
     if (scratch) await teardownScratchDb(scratch);
@@ -121,5 +137,67 @@ describe('routes/examStart.js — Start Exam action (Exams Phase 3D, real Postgr
 
     const reread = await client.exams.findUnique({ where: { id: exam.id } });
     expect(reread).toMatchObject({ id: exam.id, duration_minutes: null, scheduled_time: null, actual_started_at: null });
+  });
+
+  // ── The start time is writable ONLY through /start — never through the generic CRUD ──────
+  it('a generic PUT cannot change an existing actual_started_at (400, stored value unchanged)', async () => {
+    const exam = await seedExam();
+    const started = await startExam(exam.id);
+
+    await expect(callCrud('PUT', `/${exam.id}`, { actualStartedAt: '2020-01-01T00:00:00.000Z' }))
+      .rejects.toMatchObject({ status: 400 });
+
+    const reread = await client.exams.findUnique({ where: { id: exam.id } });
+    expect(reread.actual_started_at.toISOString()).toBe(started.actualStartedAt);
+  });
+
+  it('a generic PUT cannot clear actual_started_at with null (400, stored value unchanged)', async () => {
+    const exam = await seedExam();
+    const started = await startExam(exam.id);
+
+    await expect(callCrud('PUT', `/${exam.id}`, { actualStartedAt: null }))
+      .rejects.toMatchObject({ status: 400 });
+
+    const reread = await client.exams.findUnique({ where: { id: exam.id } });
+    expect(reread.actual_started_at.toISOString()).toBe(started.actualStartedAt);
+  });
+
+  it('a generic POST cannot create an exam with a start time (400, nothing inserted)', async () => {
+    const name = nextId('امتحان مرفوض');
+    await expect(callCrud('POST', '/', {
+      name, grade: GRADE_6, date: '2026-03-10T00:00:00.000Z', total: 100, pass: 50, durationMinutes: 60,
+      actualStartedAt: '2020-01-01T00:00:00.000Z',
+    })).rejects.toMatchObject({ status: 400 });
+
+    expect(await client.exams.count({ where: { name } })).toBe(0);
+  });
+
+  it('a normal generic edit without the field still works and keeps the start time', async () => {
+    const exam = await seedExam();
+    const started = await startExam(exam.id);
+
+    const res = await callCrud('PUT', `/${exam.id}`, { name: 'اسم معدَّل', durationMinutes: 90 });
+    expect(res.statusCode).toBe(200);
+
+    const reread = await client.exams.findUnique({ where: { id: exam.id } });
+    expect(reread).toMatchObject({ name: 'اسم معدَّل', duration_minutes: 90 });
+    expect(reread.actual_started_at.toISOString()).toBe(started.actualStartedAt);
+  });
+
+  it('/start still establishes the start time normally after refused generic attempts (server clock, first start wins)', async () => {
+    const exam = await seedExam();
+    await expect(callCrud('PUT', `/${exam.id}`, { actualStartedAt: '2020-01-01T00:00:00.000Z' }))
+      .rejects.toMatchObject({ status: 400 });
+    expect((await client.exams.findUnique({ where: { id: exam.id } })).actual_started_at).toBeNull();
+
+    const before = Date.now();
+    const first = await startExam(exam.id);
+    const startedMs = new Date(first.actualStartedAt).getTime();
+    expect(startedMs).toBeGreaterThanOrEqual(before - 1000);
+    expect(startedMs).toBeLessThanOrEqual(Date.now() + 1000);
+    expect(first.phase).toBe('in_progress');
+
+    const second = await startExam(exam.id);
+    expect(second.actualStartedAt).toBe(first.actualStartedAt);
   });
 });

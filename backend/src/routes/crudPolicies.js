@@ -92,6 +92,18 @@ function validateTotalNotBelowScores({ totalField, scoreModel, fkField, label })
   };
 }
 
+// exams.actual_started_at is written only by POST /api/exams/:id/start (examStart.js: server
+// clock, first start wins, never reset). A generic create/update must never set, change or
+// clear it — any request carrying the column at all (even null) is refused. The app's own exam
+// create/edit payloads (examService.js createExam/updateExam) never include it.
+function rejectExamStartTime({ data }) {
+  if (hasField(data, 'actual_started_at')) {
+    throw httpError(400, 'وقت بدء الامتحان يُسجَّل فقط عبر "بدء الامتحان" (POST /api/exams/:id/start) — لا يمكن تعيينه أو تعديله أو مسحه هنا.');
+  }
+}
+
+const validateExamTotal = validateTotalNotBelowScores({ totalField: 'total', scoreModel: 'grades', fkField: 'exam_id', label: 'الدرجة الكلية للامتحان' });
+
 export const CRUD_POLICIES = Object.freeze({
   // Attendance rows are written only by /api/attendance-sessions (completed-session lock,
   // enrollment eligibility, one transaction per session).
@@ -113,7 +125,11 @@ export const CRUD_POLICIES = Object.freeze({
     blockDelete: 'حذف تسليمات الواجبات مباشرةً غير متاح — استخدم /api/hw-submissions.',
   },
   exams: {
-    validateUpdate: validateTotalNotBelowScores({ totalField: 'total', scoreModel: 'grades', fkField: 'exam_id', label: 'الدرجة الكلية للامتحان' }),
+    validateCreate: async ({ data }) => rejectExamStartTime({ data }),
+    validateUpdate: async (args) => {
+      rejectExamStartTime(args);
+      await validateExamTotal(args);
+    },
   },
   homeworks: {
     validateUpdate: validateTotalNotBelowScores({ totalField: 'total_score', scoreModel: 'hw_submissions', fkField: 'homework_id', label: 'الدرجة الكلية للواجب' }),
