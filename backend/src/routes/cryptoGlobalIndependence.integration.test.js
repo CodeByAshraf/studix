@@ -48,7 +48,7 @@ describe('BUG-01 — write paths do not depend on globalThis.crypto (real scratc
     ({ makeCrudRouter } = await import('./crud.js'));
 
     await client.cashboxes.create({ data: { id: 'cb1', name: 'Main', opening_balance: 10000, active: true } });
-    await client.groups.create({ data: { id: 'g1', name: 'G1', price: 100 } });
+    await client.groups.create({ data: { id: 'g1', name: 'G1', price: 100, days: ['thu'] } });
     await client.students.create({ data: { id: 's1', code: 'CRYPTO-S1', name: 'Student 1', group_id: 'g1' } });
     // Group Closure (Attendance Integration): saveAttendanceSession now validates each
     // record's studentId against attendanceEligibility.js — s1 needs a real active
