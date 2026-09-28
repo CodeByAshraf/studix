@@ -265,6 +265,8 @@ app.use('/api/students', requireAuth, requirePermission('students'), studentRepo
 //   - DELETE/PATCH /api/enrollments/:enrollmentId (withdraw an Additional Group / update its
 //     attend_days-start_date-end_date) — a new top-level path, entirely separate from
 //     /api/students.
+//   - GET /api/enrollments?groupId= (active enrollments, optionally per group — the Groups
+//     screen's membership source, same table as the attendance roster).
 app.use('/api/students', requireAuth, requirePermission('students'), studentEnrollmentsRouter);
 app.use('/api/enrollments', requireAuth, requirePermission('students'), enrollmentRouter);
 

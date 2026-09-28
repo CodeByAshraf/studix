@@ -8,14 +8,35 @@ import { useErrorHandler } from '../../hooks/useErrorHandler';
 import Button        from '../../components/ui/Button';
 import { formatDate } from '../../utils/helpers';
 import { updateStudent } from '../../services/studentService';
-import { pgUpdateStudent, pgGetPayments } from '../../services/api';
+import { pgUpdateStudent, pgGetPayments, pgGetGroupEnrollments } from '../../services/api';
 import { useAsyncData } from '../../hooks/useAsyncData';
 import { useAvatarStyle } from '../students/components/StudentAvatar';
 import StatusBadge   from '../students/components/StatusBadge';
 import { formatCurrency } from '../../utils/helpers';
 
+// Group Membership unification: this group's ACTIVE enrollments (GET /api/enrollments?
+// groupId=) — the same student_group_enrollments source Attendance's roster uses — instead
+// of students.groupId. Returns Map<studentId, role>; the store's students only supply
+// display fields for those ids. A student with students.groupId set but no active enrollment
+// row is not treated as a member.
+function useGroupMembers(groupId) {
+  const toast = useToast();
+  const { data: enrollments = [], loading, error } = useAsyncData(
+    () => pgGetGroupEnrollments({ groupId }), [groupId], []);
+
+  useEffect(() => {
+    if (error) toast.error(error.message || 'فشل تحميل طلاب المجموعة');
+  }, [error]);
+
+  const members = useMemo(
+    () => new Map(enrollments.map((e) => [e.studentId, e.role])),
+    [enrollments],
+  );
+  return { members, loading };
+}
+
 // ── Single student row ───────────────────────────────────────
-function StudentRow({ student, onSelect, selected, payments }) {
+function StudentRow({ student, onSelect, selected, payments, role }) {
   const { bg, color } = useAvatarStyle(student.name);
   const letters = student.name.split(' ').map(w => w[0]).slice(0, 2).join('');
 
@@ -63,6 +84,9 @@ function StudentRow({ student, onSelect, selected, payments }) {
         <div style={{ fontSize:'0.7rem', color:'var(--text3)', display:'flex', gap:10, marginTop:1 }}>
           <span style={{ fontFamily:'Cairo,sans-serif' }}>{student.code}</span>
           <span>{student.grade}</span>
+          {role === 'additional' && (
+            <span style={{ color:'var(--accent)', fontWeight:700 }}>مجموعة إضافية</span>
+          )}
         </div>
       </div>
 
@@ -114,7 +138,10 @@ function TransferModal({ group, onClose }) {
   // تحديد نص داخل النافذة وسحب الماوس للخارج إلى إغلاقها.
   const downOnBackdrop = useRef(false);
 
-  const groupStudents = students.filter(s => s.groupId === group.id);
+  // Primary members only (role='primary' enrollments for this group) — this modal moves the
+  // Primary Group; Additional members are managed from StudentProfile's Groups tab.
+  const { members } = useGroupMembers(group.id);
+  const groupStudents = students.filter(s => members.get(s.id) === 'primary');
   const otherGroups   = groups.filter(g => g.id !== group.id);
 
   const toggle = useCallback((id) => {
@@ -286,12 +313,16 @@ export default function GroupStudents({ group, onClose, onTransferOpen }) {
     if (paymentsError) toast.error(paymentsError.message || 'فشل تحميل مدفوعات طلاب المجموعة');
   }, [paymentsError]);
 
+  // Primary and Additional members both — a student shows in every group they're actively
+  // enrolled in.
+  const { members, loading: membersLoading } = useGroupMembers(group.id);
+
   const groupStudents = useMemo(() => {
     const q = search.toLowerCase();
     return students
-      .filter(s => s.groupId === group.id)
+      .filter(s => members.has(s.id))
       .filter(s => !q || s.name.toLowerCase().includes(q) || s.code?.toLowerCase().includes(q));
-  }, [students, group.id, search]);
+  }, [students, members, search]);
 
   return (
     <div style={{ display:'flex', flexDirection:'column', height:'100%', minHeight:400 }}>
@@ -318,11 +349,11 @@ export default function GroupStudents({ group, onClose, onTransferOpen }) {
         </div>
         {groupStudents.length === 0 ? (
           <div style={{ textAlign:'center', padding:'40px', color:'var(--text3)', fontSize:'0.85rem' }}>
-            {search ? 'لا توجد نتائج' : 'لا يوجد طلاب في هذه المجموعة'}
+            {membersLoading ? 'جارٍ التحميل...' : search ? 'لا توجد نتائج' : 'لا يوجد طلاب في هذه المجموعة'}
           </div>
         ) : (
           groupStudents.map(s => (
-            <StudentRow key={s.id} student={s} payments={groupPayments}/>
+            <StudentRow key={s.id} student={s} payments={groupPayments} role={members.get(s.id)}/>
           ))
         )}
       </div>

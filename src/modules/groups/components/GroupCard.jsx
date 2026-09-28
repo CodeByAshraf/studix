@@ -44,13 +44,16 @@ const StatChip = memo(function StatChip({ label, value, color = 'var(--text2)' }
 // (GET /api/attendance/aggregate?groupBy=group، نداء واحد فقط لكل المجموعات معاً، نفس
 // مبدأ payments أعلاه بالضبط) بدل قراءة مصفوفة attendance الكاملة من الـ store هنا —
 // getGroupStats نفسها غير مُعدَّلة في جوهرها، فقط تستقبل صفاً مُجمَّعاً بدل مصفوفة خام.
-const GroupCard = memo(function GroupCard({ group, payments, attendanceStats, onEdit, onDelete, onViewStudents, onTransfer }) {
+// members: this group's Map<studentId, role> from active enrollments (GroupsPage, one
+// GET /api/enrollments for all groups) — the counts below come from enrollment membership,
+// the same source as the attendance roster, not from students.groupId.
+const GroupCard = memo(function GroupCard({ group, payments, attendanceStats, members, onEdit, onDelete, onViewStudents, onTransfer }) {
   const students   = useAppStore(s => s.students);
   const treasuryTxn = useAppStore(s => s.treasuryTxn);
 
   const stats = useMemo(
-    () => getGroupStats(group, students, payments, attendanceStats, treasuryTxn),
-    [group, students, payments, attendanceStats, treasuryTxn]
+    () => getGroupStats(group, students, payments, attendanceStats, treasuryTxn, members),
+    [group, students, payments, attendanceStats, treasuryTxn, members]
   );
 
   const capacityPct     = stats.activeCount > 0 ? Math.round(stats.activeCount / group.max * 100) : 0;

@@ -26,6 +26,15 @@ function mockFetch(payments) {
       if (groupId) rows = rows.filter((p) => p.groupId === groupId);
       return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true, data: rows }) });
     }
+    // Group Membership unification — the panel's member list comes from GET /api/enrollments
+    // ?groupId=; both seeded students hold the active Primary enrollment for g1.
+    if (u.includes('/api/enrollments?')) {
+      const groupId = new URL(u).searchParams.get('groupId');
+      const data = useAppStore.getState().students
+        .filter((s) => s.groupId === groupId)
+        .map((s) => ({ id: `e-${s.id}`, studentId: s.id, groupId, role: 'primary', status: 'active' }));
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true, data }) });
+    }
     return Promise.reject(new Error(`unexpected fetch: ${u}`));
   });
 }
@@ -74,5 +83,51 @@ describe('GroupStudents — main component "last payment" column (Phase 4 Cutove
     // s2's row shows 500؛ s1's row (بلا دفعات) يعرض "لا دفعات"
     expect(await screen.findByText(formatCurrency(500))).toBeInTheDocument();
     expect(await screen.findByText('لا دفعات')).toBeInTheDocument();
+  });
+});
+
+// Group Membership unification — the panel's members come from active enrollments (GET
+// /api/enrollments?groupId=, the same student_group_enrollments source as the attendance
+// roster), not from students.groupId.
+describe('GroupStudents — membership comes from active enrollments', () => {
+  function mockEnrollments(enrollments) {
+    globalThis.fetch = vi.fn((url) => {
+      const u = String(url);
+      if (u.includes('/api/payments?')) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true, data: [] }) });
+      }
+      if (u.includes('/api/enrollments?')) {
+        const groupId = new URL(u).searchParams.get('groupId');
+        const data = enrollments.filter((e) => e.groupId === groupId);
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true, data }) });
+      }
+      return Promise.reject(new Error(`unexpected fetch: ${u}`));
+    });
+  }
+
+  it('A/B. shows the Primary member and an Additional member (whose groupId is another group), marking the Additional one', async () => {
+    const S3 = { id: 's3', name: 'سارة', code: 'C3', grade: 'الأول', groupId: 'g2', status: 'active' };
+    useAppStore.setState({ groups: [GROUP], students: [S1, S3] });
+    mockEnrollments([
+      { id: 'e1', studentId: 's1', groupId: 'g1', role: 'primary', status: 'active' },
+      { id: 'e3p', studentId: 's3', groupId: 'g2', role: 'primary', status: 'active' },
+      { id: 'e3a', studentId: 's3', groupId: 'g1', role: 'additional', status: 'active', attendDays: ['sat'] },
+    ]);
+
+    renderPanel();
+
+    expect(await screen.findByText('أحمد')).toBeInTheDocument();
+    expect(await screen.findByText('سارة')).toBeInTheDocument();
+    expect(screen.getAllByText('مجموعة إضافية')).toHaveLength(1);
+  });
+
+  it('D. a student with groupId pointing at this group but no active enrollment is not listed as a member', async () => {
+    useAppStore.setState({ groups: [GROUP], students: [S1, S2] }); // both have groupId 'g1'
+    mockEnrollments([{ id: 'e1', studentId: 's1', groupId: 'g1', role: 'primary', status: 'active' }]);
+
+    renderPanel();
+
+    expect(await screen.findByText('أحمد')).toBeInTheDocument();
+    expect(screen.queryByText('محمد')).not.toBeInTheDocument();
   });
 });

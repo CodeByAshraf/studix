@@ -7,8 +7,8 @@ import { Modal, ConfirmModal } from '../../components/ui/Modal';
 import Button               from '../../components/ui/Button';
 import { useToast }         from '../../components/Toast';
 import { useErrorHandler }  from '../../hooks/useErrorHandler';
-import { createGroup, updateGroup, getGroupStats, formatDays, GROUP_COLORS } from '../../services/groupService';
-import { pgCreateGroup, pgUpdateGroup, pgDeleteGroup, pgGetPayments, pgGetPaymentAggregates, pgGetCommunications, pgGetAttendanceAggregate } from '../../services/api';
+import { createGroup, updateGroup, getGroupStats, formatDays, GROUP_COLORS, buildGroupMembership } from '../../services/groupService';
+import { pgCreateGroup, pgUpdateGroup, pgDeleteGroup, pgGetPayments, pgGetPaymentAggregates, pgGetCommunications, pgGetAttendanceAggregate, pgGetGroupEnrollments } from '../../services/api';
 import { normalizeCollectionForMerge } from '../../store/db.middleware';
 import { zeroFillGroupAggregate } from '../../services/paymentService';
 import { useAsyncData } from '../../hooks/useAsyncData';
@@ -22,15 +22,23 @@ import GroupStudents, { TransferModal } from './GroupStudents';
 // (GET /api/payments/aggregate?groupBy=none — نفس صيغة getNetRevenue(كل الدفعات)
 // بالضبط، مُتحقَّق تكافؤه في تدقيق Phase 4 Step 3) بدل تمرير payments/treasuryTxn
 // الكاملتين لحساب هذا المكوّن نفسه.
-function OverviewBar({ groups, students, totalRevenue }) {
+// Group Membership unification: a student counts toward a group only through an active
+// student_group_enrollments row (membersOf — see GroupsPage), never students.groupId alone.
+const EMPTY_MEMBERS = new Map();
+
+function activeMemberCount(students, members) {
+  return students.filter(s => members.has(s.id) && s.status === 'active').length;
+}
+
+function OverviewBar({ groups, students, membersOf, totalRevenue }) {
   const totalStudents = students.filter(s => s.status === 'active').length;
   const fullGroups    = groups.filter(g => {
-    const count = students.filter(s => s.groupId === g.id && s.status === 'active').length;
+    const count = activeMemberCount(students, membersOf(g.id));
     return count >= g.max;
   }).length;
   const avgFill = groups.length > 0
     ? Math.round(groups.reduce((sum, g) => {
-        const count = students.filter(s => s.groupId === g.id && s.status === 'active').length;
+        const count = activeMemberCount(students, membersOf(g.id));
         return sum + (g.max > 0 ? count / g.max * 100 : 0);
       }, 0) / groups.length)
     : 0;
@@ -113,6 +121,22 @@ export default function GroupsPage() {
     if (groupAttendanceErr) toast.error(groupAttendanceErr.message || 'فشل تحميل إحصاءات حضور المجموعات');
   }, [groupAttendanceErr]);
 
+  // Group Membership unification: ONE GET /api/enrollments (all active enrollments, every
+  // group) — the same student_group_enrollments source Attendance's roster uses — instead of
+  // deriving membership from students.groupId. Primary and Additional both count, so a
+  // student appears under every group they're actively enrolled in. Re-fetched when the
+  // transfer modal closes (a Primary Group transfer changes enrollments).
+  const [membershipKey, setMembershipKey] = useState(0);
+  const refreshMembership = useCallback(() => setMembershipKey((k) => k + 1), []);
+  const { data: enrollments = [], error: enrollmentsErr } = useAsyncData(
+    () => pgGetGroupEnrollments(), [membershipKey], []);
+  const membership = useMemo(() => buildGroupMembership(enrollments), [enrollments]);
+  const membersOf = useCallback((groupId) => membership.get(groupId) ?? EMPTY_MEMBERS, [membership]);
+
+  useEffect(() => {
+    if (enrollmentsErr) toast.error(enrollmentsErr.message || 'فشل تحميل عضوية المجموعات');
+  }, [enrollmentsErr]);
+
   // ── Modal state ───────────────────────────────────────────
   const [modal,         setModal]        = useState({ type: null, group: null });
   const [viewGroup,     setViewGroup]    = useState(null);   // group being viewed
@@ -180,7 +204,20 @@ export default function GroupsPage() {
   // (طلاب سابقون نُقلوا/حُذفوا)، فحذفها سيُرفَض من الخادم رغم أن فحص studentCount مرّ.
   const handleDelete = useCallback(async () => {
     const g = modal.group;
-    const studentCount = students.filter(s => s.groupId === g.id).length;
+    // Group Membership unification: members = active enrollments (fresh at delete time, same
+    // reasoning as the attendance/payments checks below), Primary and Additional both. Any
+    // student still referencing this group through students.group_id is added too — not as
+    // "membership", but because that FK (NO ACTION) makes the server reject the delete anyway.
+    let memberIds;
+    try {
+      memberIds = new Set((await pgGetGroupEnrollments({ groupId: g.id })).map((e) => e.studentId));
+    } catch (e) {
+      toast.error(e.message || 'فشل التحقّق من طلاب المجموعة');
+      closeModal();
+      return;
+    }
+    students.forEach((s) => { if (s.groupId === g.id) memberIds.add(s.id); });
+    const studentCount = memberIds.size;
     if (studentCount > 0) {
       toast.error(`لا يمكن حذف المجموعة — بها ${studentCount} طالب. انقل الطلاب أولاً.`);
       closeModal();
@@ -302,7 +339,7 @@ export default function GroupsPage() {
 
       {/* ── Overview stats ──────────────────── */}
       <SectionBoundary label="Overview Stats">
-        <OverviewBar groups={groups} students={students} totalRevenue={totalRevenue}/>
+        <OverviewBar groups={groups} students={students} membersOf={membersOf} totalRevenue={totalRevenue}/>
       </SectionBoundary>
 
       {/* ── Filters ─────────────────────────── */}
@@ -347,6 +384,7 @@ export default function GroupsPage() {
                     group={group}
                     payments={monthPayments}
                     attendanceStats={attendanceStatsByGroup.get(group.id)}
+                    members={membersOf(group.id)}
                     onEdit={() => openEdit(group)}
                     onDelete={() => openDelete(group)}
                     onViewStudents={() => openViewStudents(group)}
@@ -359,7 +397,7 @@ export default function GroupsPage() {
             // ── LIST VIEW ──────────────────────
             <div style={{ background:'var(--surface)', border:'1px solid var(--border)', borderRadius:14, overflow:'hidden' }}>
               {filtered.map((group, i) => {
-                const count   = students.filter(s => s.groupId === group.id && s.status === 'active').length;
+                const count   = activeMemberCount(students, membersOf(group.id));
                 const fillPct = group.max > 0 ? Math.round(count / group.max * 100) : 0;
                 const isFull  = count >= group.max;
                 // BUG-02: صافي بعد طرح الاسترداد الفعّال — الآن مُحسَب من جهة الخادم
@@ -468,7 +506,7 @@ export default function GroupsPage() {
       {transferGroup && (
         <TransferModal
           group={transferGroup}
-          onClose={() => setTransferGroup(null)}
+          onClose={() => { setTransferGroup(null); refreshMembership(); }}
         />
       )}
     </div>

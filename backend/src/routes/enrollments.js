@@ -11,8 +11,9 @@
 // (same pattern as communications.js/studentReport.js):
 //   - studentEnrollmentsRouter → /api/students/:studentId/enrollments (GET list, POST add
 //     Additional Group) — same "/:studentId/..." shape as studentReport.js's own route.
-//   - enrollmentRouter (default export) → /api/enrollments/:enrollmentId (DELETE withdraw,
-//     PATCH schedule).
+//   - enrollmentRouter (default export) → /api/enrollments (GET active enrollments, optional
+//     ?groupId= — the Groups screen's membership source) and /api/enrollments/:enrollmentId
+//     (DELETE withdraw, PATCH schedule).
 //
 // Primary Group changes are NOT duplicated here — the existing PUT/PATCH /api/students/:id
 // path (crud.js, Phase 1) already routes group_id through setPrimaryGroupTx/
@@ -65,8 +66,29 @@ studentEnrollmentsRouter.post('/:studentId/enrollments', asyncHandler(async (req
   res.status(201).json({ ok: true, data: snakeToCamel(created) });
 }));
 
-// ── /api/enrollments/:enrollmentId ─────────────────────────────────────────────────────
+// ── /api/enrollments ───────────────────────────────────────────────────────────────────
 const enrollmentRouter = Router();
+
+// GET /api/enrollments?groupId= — ACTIVE enrollments (Primary and Additional both included,
+// same "active" definition as GET /api/students/:studentId/enrollments above), optionally
+// scoped to one group. This is the Groups screen's membership source: the same
+// student_group_enrollments table Attendance's roster reads (attendanceEligibility.js), so a
+// group's member list can no longer disagree with students.group_id-only membership. Omitting
+// groupId returns every active enrollment in one call (group cards/counts for all groups at
+// once). No date/day filtering here — that is attendance eligibility, not membership.
+enrollmentRouter.get('/', asyncHandler(async (req, res) => {
+  const { groupId } = req.query || {};
+  if (groupId !== undefined && (typeof groupId !== 'string' || !groupId.trim())) {
+    throw badRequest('groupId غير صالح.');
+  }
+  const rows = await prisma.student_group_enrollments.findMany({
+    where: { status: 'active', ...(groupId !== undefined ? { group_id: groupId } : {}) },
+    orderBy: [{ group_id: 'asc' }, { start_date: 'asc' }],
+  });
+  res.json({ ok: true, data: snakeToCamel(rows) });
+}));
+
+// ── /api/enrollments/:enrollmentId ─────────────────────────────────────────────────────
 
 // DELETE — withdraw an Additional Group enrollment. Scoped to role='additional' only: a
 // Primary Group withdrawal already has its own correct path (PUT /api/students/:id with

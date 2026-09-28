@@ -22,9 +22,10 @@ vi.mock('../../services/api', async () => {
     pgUpdateStudent: vi.fn(),
     pgAddAdditionalGroup: vi.fn(),
     pgWithdrawEnrollment: vi.fn(),
+    pgGetGroupEnrollments: vi.fn(),
   };
 });
-import { pgUpdateStudent, pgAddAdditionalGroup, pgWithdrawEnrollment } from '../../services/api';
+import { pgUpdateStudent, pgAddAdditionalGroup, pgWithdrawEnrollment, pgGetGroupEnrollments } from '../../services/api';
 
 const GROUP_A = 'gA';
 const GROUP_B = 'gB';
@@ -45,12 +46,21 @@ function setBaseState() {
   });
 }
 
-function renderModal(onClose = vi.fn()) {
+// Group Membership unification — the modal's roster is this group's active role='primary'
+// enrollments (GET /api/enrollments?groupId=), not students.groupId. S1/S2 hold the active
+// Primary enrollment for GROUP_A that the real write paths create alongside groupId.
+const PRIMARY_A = [
+  { id: 'e1', studentId: 's1', groupId: GROUP_A, role: 'primary', status: 'active' },
+  { id: 'e2', studentId: 's2', groupId: GROUP_A, role: 'primary', status: 'active' },
+];
+
+async function renderModal(onClose = vi.fn()) {
   render(
     <ToastProvider>
       <TransferModal group={{ id: GROUP_A, name: 'مجموعة أ' }} onClose={onClose} />
     </ToastProvider>
   );
+  await screen.findByText(S1.name); // enrollment-based roster loaded
   return onClose;
 }
 
@@ -62,12 +72,29 @@ function selectAllAndPickTarget() {
 describe('TransferModal — group student transfer (Product Completion Phase 2, Finding 1)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    pgGetGroupEnrollments.mockResolvedValue(PRIMARY_A);
+  });
+
+  it('lists only this group\'s Primary members — an Additional member of the group is not offered for a Primary transfer', async () => {
+    const S3 = { ...S1, id: 's3', name: 'طالب إضافي', code: 'TC003', groupId: GROUP_B };
+    setBaseState();
+    useAppStore.setState({ students: [S1, S2, S3] });
+    pgGetGroupEnrollments.mockResolvedValue([
+      ...PRIMARY_A,
+      { id: 'e3', studentId: 's3', groupId: GROUP_A, role: 'additional', status: 'active' },
+    ]);
+
+    await renderModal();
+
+    expect(pgGetGroupEnrollments).toHaveBeenCalledWith({ groupId: GROUP_A });
+    expect(screen.getByText(S2.name)).toBeInTheDocument();
+    expect(screen.queryByText(S3.name)).not.toBeInTheDocument();
   });
 
   it('all success: calls pgUpdateStudent per selected student, merges the server response, closes the modal', async () => {
     setBaseState();
     pgUpdateStudent.mockImplementation((id, data) => Promise.resolve({ ...data, id, updatedAt: '2026-01-01T00:00:00.000Z' }));
-    const onClose = renderModal();
+    const onClose = await renderModal();
 
     selectAllAndPickTarget();
     fireEvent.click(screen.getByRole('button', { name: /نقل المجموعة الرئيسية \(2\)/ }));
@@ -85,7 +112,7 @@ describe('TransferModal — group student transfer (Product Completion Phase 2, 
   it('all failure: does not mutate local state and keeps the modal open (no fake success)', async () => {
     setBaseState();
     pgUpdateStudent.mockRejectedValue(new Error('PG PUT /students → 500'));
-    const onClose = renderModal();
+    const onClose = await renderModal();
 
     selectAllAndPickTarget();
     fireEvent.click(screen.getByRole('button', { name: /نقل المجموعة الرئيسية \(2\)/ }));
@@ -104,7 +131,7 @@ describe('TransferModal — group student transfer (Product Completion Phase 2, 
       if (id === 's1') return Promise.resolve({ ...data, id, updatedAt: '2026-01-01T00:00:00.000Z' });
       return Promise.reject(new Error('PG PUT /students/s2 → 500'));
     });
-    const onClose = renderModal();
+    const onClose = await renderModal();
 
     selectAllAndPickTarget();
     fireEvent.click(screen.getByRole('button', { name: /نقل المجموعة الرئيسية \(2\)/ }));
@@ -125,7 +152,7 @@ describe('TransferModal — group student transfer (Product Completion Phase 2, 
   it('1. Primary A → Primary C keeps all Additional Groups untouched (no Additional-Group API is ever called by a transfer)', async () => {
     setBaseState();
     pgUpdateStudent.mockImplementation((id, data) => Promise.resolve({ ...data, id, updatedAt: '2026-01-01T00:00:00.000Z' }));
-    const onClose = renderModal();
+    const onClose = await renderModal();
 
     fireEvent.click(screen.getByText('تحديد الكل'));
     fireEvent.change(screen.getByRole('combobox'), { target: { value: GROUP_C } });
@@ -139,7 +166,7 @@ describe('TransferModal — group student transfer (Product Completion Phase 2, 
   it('2. transfer still updates students.groupId (the Primary Group mirror) via pgUpdateStudent', async () => {
     setBaseState();
     pgUpdateStudent.mockImplementation((id, data) => Promise.resolve({ ...data, id, updatedAt: '2026-01-01T00:00:00.000Z' }));
-    renderModal();
+    await renderModal();
 
     fireEvent.click(screen.getByText('تحديد الكل'));
     fireEvent.change(screen.getByRole('combobox'), { target: { value: GROUP_C } });
@@ -152,7 +179,7 @@ describe('TransferModal — group student transfer (Product Completion Phase 2, 
   it('5. no Additional Group is automatically promoted — Additional-Group APIs are never invoked from this modal at all', async () => {
     setBaseState();
     pgUpdateStudent.mockImplementation((id, data) => Promise.resolve({ ...data, id, updatedAt: '2026-01-01T00:00:00.000Z' }));
-    renderModal();
+    await renderModal();
 
     selectAllAndPickTarget();
     fireEvent.click(screen.getByRole('button', { name: /نقل المجموعة الرئيسية \(2\)/ }));
@@ -162,9 +189,9 @@ describe('TransferModal — group student transfer (Product Completion Phase 2, 
     expect(pgWithdrawEnrollment).not.toHaveBeenCalled();
   });
 
-  it('6. canceling the modal makes no change: no pgUpdateStudent call, no store mutation, onClose fires', () => {
+  it('6. canceling the modal makes no change: no pgUpdateStudent call, no store mutation, onClose fires', async () => {
     setBaseState();
-    const onClose = renderModal();
+    const onClose = await renderModal();
 
     fireEvent.click(screen.getByText('تحديد الكل'));
     fireEvent.change(screen.getByRole('combobox'), { target: { value: GROUP_C } });

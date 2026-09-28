@@ -48,6 +48,14 @@ function mockFetch({ payments, groupAggregate = [], attendanceGroupAggregate = [
       attendanceAggregateCalls.push(u);
       return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true, data: attendanceGroupAggregate }) });
     }
+    // Group Membership unification — card counts come from active enrollments; every seeded
+    // student has the active Primary enrollment the real write paths create alongside groupId.
+    if (u.includes('/api/enrollments')) {
+      const data = useAppStore.getState().students
+        .filter((s) => s.groupId)
+        .map((s) => ({ id: `e-${s.id}`, studentId: s.id, groupId: s.groupId, role: 'primary', status: 'active' }));
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true, data }) });
+    }
     return Promise.reject(new Error(`unexpected fetch: ${u}`));
   });
   return { attendanceAggregateCalls };

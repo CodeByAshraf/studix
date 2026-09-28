@@ -153,6 +153,19 @@ export async function pgGetStudentEnrollments(studentId) {
   return json.data;
 }
 
+// pgGetGroupEnrollments: GET /api/enrollments?groupId= — التسجيلات النشطة (Primary +
+// Additional) لمجموعة واحدة، أو لكل المجموعات عند غياب groupId. مصدر عضوية شاشة المجموعات —
+// نفس جدول student_group_enrollments الذي تبني منه قائمة الحضور، لا students.groupId وحده.
+export async function pgGetGroupEnrollments({ groupId } = {}) {
+  const qs = groupId ? `?groupId=${encodeURIComponent(groupId)}` : '';
+  const res = await fetch(`${PG_API_BASE}/api/enrollments${qs}`, {
+    credentials: 'include',
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG GET /enrollments${qs} → ${res.status}`);
+  return json.data;
+}
+
 // pgAddAdditionalGroup: POST /api/students/:studentId/enrollments — يضيف مجموعة إضافية
 // (لا يمسّ students.group_id إطلاقاً). startDate/endDate/attendDays اختيارية.
 export async function pgAddAdditionalGroup(studentId, { groupId, startDate, endDate, attendDays } = {}) {

@@ -68,6 +68,19 @@ export function updateGroup(id, data, existing = []) {
 }
 
 
+// Group membership from active student_group_enrollments rows (GET /api/enrollments) —
+// the same source Attendance's roster uses. Returns Map<groupId, Map<studentId, role>>
+// ('primary' | 'additional'); a student appears under every group they are actively
+// enrolled in. students.groupId alone never makes a student a member here.
+export function buildGroupMembership(enrollments = []) {
+  const byGroup = new Map();
+  for (const e of enrollments) {
+    if (!byGroup.has(e.groupId)) byGroup.set(e.groupId, new Map());
+    byGroup.get(e.groupId).set(e.studentId, e.role);
+  }
+  return byGroup;
+}
+
 // ── Client-side helpers ────────────────────────────────────────
 // C4 Attendance migration Phase 2: the 4th parameter used to be the FULL global attendance
 // array, filtered internally by this function (`attendance.filter(a => a.groupId ===
@@ -78,9 +91,15 @@ export function updateGroup(id, data, existing = []) {
 // `undefined` (as existing unit tests that don't exercise attendance still do) safely
 // produces the same attendancePct: null as before, since `[].total`/`undefined.total` is
 // undefined either way.
-export function getGroupStats(group, students, payments, attendanceStats = {}, treasuryTxn = []) {
-  const groupStudents = students.filter(s => s.groupId === group.id && s.status === 'active');
-  const allStudents   = students.filter(s => s.groupId === group.id);
+// members (optional): this group's Map<studentId, role> from buildGroupMembership — when
+// given, membership comes from enrollments; omitted, the legacy students.groupId match is
+// kept for callers not yet on enrollment membership.
+export function getGroupStats(group, students, payments, attendanceStats = {}, treasuryTxn = [], members) {
+  const isMember = members
+    ? (s) => members.has(s.id)
+    : (s) => s.groupId === group.id;
+  const groupStudents = students.filter(s => isMember(s) && s.status === 'active');
+  const allStudents   = students.filter(isMember);
   const month = new Date().getMonth() + 1;
   const year  = new Date().getFullYear();
   // BUG-06: كانت تفلتر بالشهر فقط دون السنة — دفعة من نفس رقم الشهر في سنة سابقة كانت

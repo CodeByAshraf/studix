@@ -15,10 +15,10 @@ vi.mock('../../services/api', async () => {
     ...actual,
     pgDeleteGroup: vi.fn(), pgCreateGroup: vi.fn(), pgUpdateGroup: vi.fn(),
     pgGetPayments: vi.fn(), pgGetPaymentAggregates: vi.fn(), pgGetCommunications: vi.fn(),
-    pgGetAttendanceAggregate: vi.fn(), pgGetHomeworks: vi.fn(),
+    pgGetAttendanceAggregate: vi.fn(), pgGetHomeworks: vi.fn(), pgGetGroupEnrollments: vi.fn(),
   };
 });
-import { pgDeleteGroup, pgCreateGroup, pgUpdateGroup, pgGetPayments, pgGetPaymentAggregates, pgGetCommunications, pgGetAttendanceAggregate, pgGetHomeworks } from '../../services/api';
+import { pgDeleteGroup, pgCreateGroup, pgUpdateGroup, pgGetPayments, pgGetPaymentAggregates, pgGetCommunications, pgGetAttendanceAggregate, pgGetHomeworks, pgGetGroupEnrollments } from '../../services/api';
 
 const GROUP_ID = 'g1';
 
@@ -53,6 +53,8 @@ describe('GroupsPage — delete guard', () => {
     // C4 Attendance migration Phase 2: attendanceCount guard + GroupCard's per-group %
     // now call pgGetAttendanceAggregate instead of reading the store's attendance array.
     pgGetAttendanceAggregate.mockResolvedValue([]);
+    // Group Membership unification: members come from active enrollments — none by default.
+    pgGetGroupEnrollments.mockResolvedValue([]);
     // Phase 2.1: the homework guard moved server-side (DELETE /api/groups/:id); the page must
     // not call pgGetHomeworks at all — left mocked (unresolved) only to assert that.
   });
@@ -107,6 +109,26 @@ describe('GroupsPage — delete guard', () => {
     expect(useAppStore.getState().groups).toHaveLength(1);
   });
 
+  // Group Membership unification: the student-count guard reads active enrollments, so an
+  // Additional-Group member (students.groupId points at another group) still blocks deletion.
+  it('blocks deletion when the group has an active Additional enrollment, even though no student has it as groupId', async () => {
+    useAppStore.setState({
+      groups: [{ id: GROUP_ID, name: 'Test Group', subject: 'رياضيات', grade: 'الأول', time: '09:00', days: [], max: 20, color: '#000' }],
+      students: [{ id: 's1', name: 'طالب', groupId: 'other-group', status: 'active' }],
+      exams: [], payments: [], admissions: [], communications: [], homeworks: [],
+    });
+    pgGetGroupEnrollments.mockImplementation(({ groupId } = {}) => Promise.resolve(
+      [{ id: 'e1', studentId: 's1', groupId: GROUP_ID, role: 'additional', status: 'active' }]
+        .filter((e) => !groupId || e.groupId === groupId)));
+
+    renderPage();
+    await switchToListViewAndDelete();
+
+    expect(pgGetGroupEnrollments).toHaveBeenCalledWith({ groupId: GROUP_ID });
+    expect(pgDeleteGroup).not.toHaveBeenCalled();
+    expect(await screen.findByText(/بها 1 طالب/)).toBeInTheDocument();
+  });
+
   it('allows deletion to proceed to the server when there is no student, attendance, or exam history', async () => {
     useAppStore.setState({
       groups: [{ id: GROUP_ID, name: 'Test Group', subject: 'رياضيات', grade: 'الأول', time: '09:00', days: [], max: 20, color: '#000' }],
@@ -146,7 +168,7 @@ describe('GroupsPage — delete guard', () => {
     pgGetCommunications.mockResolvedValue([{ id: 'c1', groupId: GROUP_ID }]);
     renderPage();
     await switchToListViewAndDelete();
-    expect(pgGetCommunications).toHaveBeenCalledWith({ groupId: GROUP_ID });
+    await waitFor(() => expect(pgGetCommunications).toHaveBeenCalledWith({ groupId: GROUP_ID }));
     expect(pgDeleteGroup).not.toHaveBeenCalled();
     expect(await screen.findByText(/سجل تواصل مرتبط/)).toBeInTheDocument();
   });
@@ -217,6 +239,7 @@ describe('GroupsPage — teacher normalization after save (installer release reg
     vi.clearAllMocks();
     pgGetPayments.mockResolvedValue([]);
     pgGetPaymentAggregates.mockResolvedValue([]);
+    pgGetGroupEnrollments.mockResolvedValue([]);
   });
 
   async function openEditAndSaveUnchanged() {
