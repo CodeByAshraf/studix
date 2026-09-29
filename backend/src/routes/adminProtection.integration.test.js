@@ -281,4 +281,67 @@ describe('administrator protection + reserved admin role (security review, real 
     expect((await request(port, 'POST', '/api/roles', { user: admin2, body: { id: 'admin', label: 'x' } })).status).toBe(401);
     expect((await request(port, 'GET', '/api/users', {})).status).toBe(401);
   });
+
+  // ═══ Profile edits never demote an administrator ═══
+  it.each([[''], [null]])('another admin editing the owner\'s profile with roleId %j keeps is_admin (no role change, no forced re-login)', async (emptyRoleId) => {
+    await seedOwner();
+    await seedOwner('admin2');
+    const before = await user('owner');
+
+    const res = await request(port, 'PUT', '/api/users/owner', {
+      user: await claims('admin2'),
+      body: { name: 'المالك الجديد', email: 'owner@example.com', active: true, roleId: emptyRoleId },
+    });
+    expect(res.status).toBe(200);
+
+    const after = await user('owner');
+    expect(after.is_admin).toBe(true);
+    expect(after.role_id).toBeNull();
+    expect(after.name).toBe('المالك الجديد');
+    expect(after.auth_version).toBe(before.auth_version); // not treated as an auth-affecting change
+  });
+
+  it('an empty roleId never demotes an admin who has the admin role either', async () => {
+    await seedOwner();
+    await seedRole('admin', []);
+    await client.users.create({ data: { id: 'roleAdmin', name: 'r', is_admin: true, active: true, role_id: 'admin' } });
+    const res = await request(port, 'PUT', '/api/users/roleAdmin', { user: await claims('owner'), body: { name: 'r2', roleId: '' } });
+    expect(res.status).toBe(200);
+    const after = await user('roleAdmin');
+    expect(after.is_admin).toBe(true);
+    expect(after.role_id).toBe('admin');
+  });
+
+  it('intentional demotion (an explicit non-admin roleId) still works, and still obeys the last-active-admin guard', async () => {
+    await seedOwner();
+    await seedOwner('admin2');
+    await seedRole('staff', ['users']);
+
+    // two active admins: demoting one to a normal role is allowed
+    const demote = await request(port, 'PUT', '/api/users/admin2', { user: await claims('owner'), body: { roleId: 'staff' } });
+    expect(demote.status).toBe(200);
+    const admin2 = await user('admin2');
+    expect(admin2.is_admin).toBe(false);
+    expect(admin2.role_id).toBe('staff');
+
+    // the owner is now the last active admin: demoting them is refused
+    const last = await request(port, 'PUT', '/api/users/owner', { user: await claims('admin2'), body: { roleId: 'staff' } });
+    expect(last.status).toBe(409);
+    expect((await user('owner')).is_admin).toBe(true);
+  });
+
+  it('non-admin users: role assignment, and clearing the role with an empty roleId, work exactly as before', async () => {
+    await seedOwner();
+    await seedRole('cashier', ['payments']);
+    await seedUser('clerk');
+    const owner = await claims('owner');
+
+    expect((await request(port, 'PUT', '/api/users/clerk', { user: owner, body: { roleId: 'cashier' } })).status).toBe(200);
+    expect((await user('clerk')).role_id).toBe('cashier');
+    expect((await request(port, 'PUT', '/api/users/clerk', { user: owner, body: { name: 'clerk2', roleId: '' } })).status).toBe(200);
+    const clerk = await user('clerk');
+    expect(clerk.role_id).toBeNull();
+    expect(clerk.is_admin).toBe(false);
+    expect(clerk.name).toBe('clerk2');
+  });
 });

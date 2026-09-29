@@ -122,10 +122,18 @@ router.post('/', asyncHandler(async (req, res) => {
 
 router.put('/:id', asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const { name, roleId, active, email, password, permissions } = req.body || {};
+  const { name, roleId: requestedRoleId, active, email, password, permissions } = req.body || {};
 
   const existing = await prisma.users.findUnique({ where: { id } });
   if (!existing) return res.status(404).json({ ok: false, error: 'المستخدم غير موجود.' });
+
+  // An empty/null roleId on an administrator's account means "no role change": a profile edit
+  // must never silently clear is_admin (the setup-created owner has role_id NULL, so the form
+  // has no role to resend). Demoting an administrator takes an explicit non-admin roleId, and
+  // still obeys the last-active-administrator guard below.
+  const roleId = existing.is_admin && (requestedRoleId === '' || requestedRoleId === null)
+    ? undefined
+    : requestedRoleId;
 
   // Assigning the reserved admin role sets is_admin — only an active real administrator may.
   if (roleId === RESERVED_ADMIN_ROLE && existing.role_id !== RESERVED_ADMIN_ROLE

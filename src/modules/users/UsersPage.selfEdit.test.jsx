@@ -110,3 +110,25 @@ describe('Users page — no self-deactivation toggle', () => {
     expect(document.querySelector('input[name="active"]')).not.toBeNull();
   });
 });
+
+// Profile edit of ANOTHER administrator who has no role (like the setup-created owner): no role
+// must be chosen, so the edit can never demote them; the server treats the empty roleId as
+// "no role change" for an administrator.
+describe('Users page — editing another administrator without a role', () => {
+  const ADMIN2 = { id: 'admin2', name: 'مدير ثانٍ', roleId: null, isAdmin: true, active: true, email: '' };
+
+  it('saves a name change without requiring a role, and requests no admin role change', async () => {
+    pgGetUsers.mockResolvedValue([OWNER, OTHER, ADMIN2]);
+    pgUpdateUser.mockImplementation(async (id, data) => ({ ...ADMIN2, ...data }));
+    await openEditFor(ADMIN2);
+    setField('name', 'مدير ثانٍ معدَّل');
+    fireEvent.click(screen.getByRole('button', { name: /حفظ التعديلات/ }));
+
+    await waitFor(() => expect(pgUpdateUser).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText('⚠ اختر الدور')).toBeNull();
+    const [id, payload] = pgUpdateUser.mock.calls[0];
+    expect(id).toBe('admin2');
+    expect(payload.name).toBe('مدير ثانٍ معدَّل');
+    expect(payload.roleId || null).toBeNull(); // empty — never a non-admin role that would demote
+  });
+});

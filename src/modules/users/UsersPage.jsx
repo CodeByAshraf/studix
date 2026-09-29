@@ -112,6 +112,10 @@ function UserForm({ initial, editId, onSave, onClose, loading, roles, teachers, 
     // تعديل الحساب الخاص لا يُرسِل الدور إطلاقاً (انظر saveUser) — فلا يُشترَط اختياره هنا؛ مدير
     // التثبيت الأول بلا role_id أصلاً (صلاحيات شخصية صريحة)، ولا أدوار في قاعدة جديدة.
     if (isEditingSelf) delete errs.roleId;
+    // An administrator with no role (the setup-created owner) can have their profile edited
+    // without choosing a role — choosing one would demote them. The empty roleId is sent and
+    // the server treats it as "no role change" for an administrator.
+    if (editId && initial?.isAdmin && !form.roleId) delete errs.roleId;
     if (Object.keys(errs).length) { setErrors(errs); return; }
     onSave(form);
   };

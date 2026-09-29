@@ -341,7 +341,10 @@ describe('users.js — real PostgreSQL integration (auth_version/authCache contr
       await requireRole('admin')(reqBefore, resBefore, () => {});
       expect(resBefore.statusCode).toBeNull();
 
-      const result = await invoke(usersRouter, { method: 'PUT', url: `/${admin.id}`, body: { roleId: null } });
+      // An intentional demotion assigns an explicit non-admin role — an empty/null roleId on an
+      // administrator is a no-op since "preserve administrator status on profile edits".
+      await seedRole('staff', ['dashboard']);
+      const result = await invoke(usersRouter, { method: 'PUT', url: `/${admin.id}`, body: { roleId: 'staff' } });
       expect(result.statusCode).toBe(200);
 
       const { req: reqAfter, res: resAfter } = mockReqRes(staleClaims);
