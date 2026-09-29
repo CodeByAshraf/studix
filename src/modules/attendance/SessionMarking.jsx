@@ -8,8 +8,9 @@ import Button        from '../../components/ui/Button';
 import StatusToggle, { StatusQuickBtn } from './components/StatusToggle';
 import AttendanceStats from './components/AttendanceStats';
 import { STATUS_META } from '../../services/attendanceService';
-import { pgSaveAttendanceSession, pgGetEligibleStudentsForSession, pgGetAttendance, pgGetGroupEnrollments } from '../../services/api';
+import { pgSaveAttendanceSession, pgGetEligibleStudentsForSession, pgGetAttendance } from '../../services/api';
 import { useAsyncData } from '../../hooks/useAsyncData';
+import { useGroupOptions } from '../../hooks/useGroupOptions';
 import { useAvatarStyle } from '../students/components/StudentAvatar';
 import { formatDate } from '../../utils/helpers';
 
@@ -88,8 +89,16 @@ export default function SessionMarking({ onDone }) {
   const [saving,       setSaving]       = useState(false);
   const [search,       setSearch]       = useState('');
 
+  // M2 (Group Options): the session group picker comes from GET /api/groups/options (with
+  // activeCount), so an attendance-only user — who cannot read the groups collection — can
+  // still choose a group. The selected group's labels prefer the full store record (unchanged
+  // display, e.g. color, for users who have it) and fall back to the option.
+  const { groupOptions } = useGroupOptions();
+
   // ── Load group students ───────────────────────────────────
-  const group = useMemo(() => groups.find(g => g.id === selectedGroup), [groups, selectedGroup]);
+  const group = useMemo(
+    () => groups.find(g => g.id === selectedGroup) ?? groupOptions.find(g => g.id === selectedGroup),
+    [groups, groupOptions, selectedGroup]);
 
   // Group Closure (Attendance Integration) — the roster is now enrollment/date/day based
   // (GET /api/attendance-sessions/:groupId/:date/roster → attendanceEligibility.js), not a
@@ -105,19 +114,6 @@ export default function SessionMarking({ onDone }) {
   useEffect(() => {
     if (rosterError) toast.error(rosterError.message || 'فشل تحميل قائمة الطلاب المؤهَّلين لهذه الحصة');
   }, [rosterError]);
-
-  // Group dropdown counts (Fix 2): active members per group from ONE GET /api/enrollments
-  // (Primary + Additional — the same enrollment source as the roster), not students.groupId.
-  // Membership only; the exact per-date roster still comes from the eligibility endpoint above.
-  const { data: allEnrollments = [] } = useAsyncData(() => pgGetGroupEnrollments(), [], []);
-  const activeCountByGroup = useMemo(() => {
-    const activeIds = new Set(students.filter(s => s.status === 'active').map(s => s.id));
-    const counts = new Map();
-    allEnrollments.forEach((e) => {
-      if (activeIds.has(e.studentId)) counts.set(e.groupId, (counts.get(e.groupId) || 0) + 1);
-    });
-    return counts;
-  }, [allEnrollments, students]);
 
   const groupStudents = useMemo(() => {
     const eligibleSet = new Set(eligibleIds);
@@ -256,10 +252,11 @@ export default function SessionMarking({ onDone }) {
               </label>
               <select value={selectedGroup} onChange={e => setSelectedGroup(e.target.value)} style={{ ...INP_STYLE, width:'100%', cursor:'pointer' }} {...INP_EVENTS}>
                 <option value="">اختر المجموعة...</option>
-                {groups.map(g => {
-                  // عدد الأعضاء النشطين (رئيسية + إضافية) من التسجيلات — العدد المؤهَّل لتاريخ/يوم
-                  // محدَّد يظهر في معاينة "عدد الطلاب" أدناه فور اختيار المجموعة والتاريخ.
-                  const count = activeCountByGroup.get(g.id) || 0;
+                {groupOptions.map(g => {
+                  // عدد الأعضاء النشطين (رئيسية + إضافية) من التسجيلات — يحسبه الخادم الآن (activeCount،
+                  // M2 Group Options: نفس التعريف السابق بالضبط). العدد المؤهَّل لتاريخ/يوم محدَّد
+                  // يظهر في معاينة "عدد الطلاب" أدناه فور اختيار المجموعة والتاريخ.
+                  const count = g.activeCount || 0;
                   return <option key={g.id} value={g.id}>{g.name} ({count} طالب)</option>;
                 })}
               </select>

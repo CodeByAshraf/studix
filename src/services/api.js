@@ -296,6 +296,18 @@ function normalizeCashboxResponse(data) {
   };
 }
 
+// pgGetGroupOptions: GET /api/groups/options — { id, name, grade, max, price, activeCount }
+// only, readable with any of groups/admissions/attendance (M2 Group Options). The source for
+// the Admissions and Attendance group pickers, which must not depend on the Groups-only
+// groups collection.
+export async function pgGetGroupOptions() {
+  const res = await fetch(`${PG_API_BASE}/api/groups/options`, { credentials: 'include' });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG GET /groups/options → ${res.status}`);
+  if (!Array.isArray(json?.data)) throw new Error('PG GET /groups/options → استجابة غير صالحة (data ليست مصفوفة)');
+  return json.data;
+}
+
 // pgGetCashboxOptions: GET /api/cashboxes/options — { id, name, active } only, readable with
 // any of payments/admissions/materials/treasury (M2/F1). The source for the payment-flow
 // cashbox pickers, which must not depend on the Treasury-only cashboxes collection.

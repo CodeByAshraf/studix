@@ -17,9 +17,9 @@ import { ToastProvider } from '../../components/Toast';
 
 vi.mock('../../services/api', async () => {
   const actual = await vi.importActual('../../services/api');
-  return { ...actual, pgGetEligibleStudentsForSession: vi.fn(), pgGetAttendance: vi.fn() };
+  return { ...actual, pgGetEligibleStudentsForSession: vi.fn(), pgGetAttendance: vi.fn(), pgGetGroupOptions: vi.fn() };
 });
-import { pgGetEligibleStudentsForSession, pgGetAttendance } from '../../services/api';
+import { pgGetEligibleStudentsForSession, pgGetAttendance, pgGetGroupOptions } from '../../services/api';
 
 const GROUP_A = 'gA';
 const GROUP_B = 'gB';
@@ -40,7 +40,9 @@ function renderPage() {
 
 function seedStore() {
   useAppStore.setState({
-    groups: [{ id: GROUP_A, name: 'Group A' }, { id: GROUP_B, name: 'Group B' }],
+    // M2 (Group Options): groups are served by GET /api/groups/options; the Groups-only
+    // collection stays empty (an attendance-only user never loads it).
+    groups: [],
     students: [
       { id: S1, name: 'Student One', code: 'C1', groupId: GROUP_A, status: 'active' },
       { id: S2, name: 'Student Two', code: 'C2', groupId: null, status: 'active' }, // no Primary Group at all
@@ -59,12 +61,17 @@ describe('SessionMarking — eligibility-based roster (Group Closure)', () => {
     // store's global attendance array — default to "no existing session" so these
     // eligibility-focused tests are unaffected.
     pgGetAttendance.mockResolvedValue([]);
+    pgGetGroupOptions.mockResolvedValue([
+      { id: GROUP_A, name: 'Group A', grade: null, max: 20, price: 0, activeCount: 1 },
+      { id: GROUP_B, name: 'Group B', grade: null, max: 20, price: 0, activeCount: 1 },
+    ]);
   });
 
   it('Case C: fetches the roster with the selected group + date, and renders only the returned eligible students', async () => {
     pgGetEligibleStudentsForSession.mockResolvedValue([S1]);
     renderPage();
 
+    await waitFor(() => expect(document.querySelector(`option[value="${GROUP_A}"]`)).not.toBeNull()); // options load async (M2)
     fireEvent.change(screen.getByRole('combobox'), { target: { value: GROUP_A } });
 
     await waitFor(() => expect(pgGetEligibleStudentsForSession).toHaveBeenCalledWith(GROUP_A, TODAY));
@@ -78,6 +85,7 @@ describe('SessionMarking — eligibility-based roster (Group Closure)', () => {
     pgGetEligibleStudentsForSession.mockResolvedValue([S2]); // S2 has groupId: null but IS eligible for GROUP_B
     renderPage();
 
+    await waitFor(() => expect(document.querySelector(`option[value="${GROUP_B}"]`)).not.toBeNull()); // options load async (M2)
     fireEvent.change(screen.getByRole('combobox'), { target: { value: GROUP_B } });
     await waitFor(() => expect(pgGetEligibleStudentsForSession).toHaveBeenCalledWith(GROUP_B, TODAY));
     fireEvent.click(await screen.findByRole('button', { name: /بدء تسجيل الحضور/ }));
@@ -89,6 +97,7 @@ describe('SessionMarking — eligibility-based roster (Group Closure)', () => {
     pgGetEligibleStudentsForSession.mockResolvedValue([]);
     renderPage();
 
+    await waitFor(() => expect(document.querySelector(`option[value="${GROUP_A}"]`)).not.toBeNull()); // options load async (M2)
     fireEvent.change(screen.getByRole('combobox'), { target: { value: GROUP_A } });
     await waitFor(() => expect(pgGetEligibleStudentsForSession).toHaveBeenCalled());
     fireEvent.click(await screen.findByRole('button', { name: /بدء تسجيل الحضور/ }));
@@ -99,6 +108,7 @@ describe('SessionMarking — eligibility-based roster (Group Closure)', () => {
   it('re-fetches the roster (day-of-week sensitivity) when the session date changes', async () => {
     pgGetEligibleStudentsForSession.mockResolvedValueOnce([S1]);
     renderPage();
+    await waitFor(() => expect(document.querySelector(`option[value="${GROUP_A}"]`)).not.toBeNull()); // options load async (M2)
     fireEvent.change(screen.getByRole('combobox'), { target: { value: GROUP_A } });
     await waitFor(() => expect(pgGetEligibleStudentsForSession).toHaveBeenCalledWith(GROUP_A, TODAY));
 
@@ -114,6 +124,7 @@ describe('SessionMarking — eligibility-based roster (Group Closure)', () => {
     pgGetEligibleStudentsForSession.mockImplementation(() => new Promise((resolve) => { resolveRoster = resolve; }));
     renderPage();
 
+    await waitFor(() => expect(document.querySelector(`option[value="${GROUP_A}"]`)).not.toBeNull()); // options load async (M2)
     fireEvent.change(screen.getByRole('combobox'), { target: { value: GROUP_A } });
     expect(screen.getByRole('button', { name: /بدء تسجيل الحضور/ })).toBeDisabled();
 
@@ -125,6 +136,7 @@ describe('SessionMarking — eligibility-based roster (Group Closure)', () => {
     pgGetEligibleStudentsForSession.mockRejectedValue(new Error('PG GET /attendance-sessions/gA/2026-.../roster → 500'));
     renderPage();
 
+    await waitFor(() => expect(document.querySelector(`option[value="${GROUP_A}"]`)).not.toBeNull()); // options load async (M2)
     fireEvent.change(screen.getByRole('combobox'), { target: { value: GROUP_A } });
 
     // toast.error(err.message || fallback) — the mocked error's own message wins, matching

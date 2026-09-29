@@ -58,6 +58,7 @@ import treasuryTxnRouter from './routes/treasuryTxn.js';
 import waReportLogRouter from './routes/waReportLog.js';
 import cashboxBalanceRouter from './routes/cashboxBalance.js';
 import cashboxOptionsRouter, { CASHBOX_OPTION_PERMISSIONS } from './routes/cashboxOptions.js';
+import groupOptionsRouter, { GROUP_OPTION_PERMISSIONS } from './routes/groupOptions.js';
 import paymentsRouter from './routes/payments.js';
 import admissionPaymentsRouter from './routes/admissionPayments.js';
 import admissionCancellationRouter from './routes/admissionCancellation.js';
@@ -219,6 +220,13 @@ app.use('/api/exam-grades', requireAuth, requirePermission('exams'), examGradesR
 // نفس تقنية /api/exams أعلاه: يُعترَض هنا فقط DELETE /api/homeworks/:id، بقية الأفعال
 // تمرّ للـ CRUD العام دون تغيير.
 app.use('/api/homeworks', requireAuth, requirePermission('homework'), homeworkDeleteRouter);
+
+// ── M2 (Group Options): GET /api/groups/options — id/name/grade/max/price/activeCount only,
+// for the Admissions and Attendance group pickers. Mounted BEFORE every other /api/groups
+// mount: the group-delete guard below applies requirePermission('groups') to all
+// /api/groups/* requests, which would otherwise reject admissions/attendance users here.
+// Any non-GET request falls through to those mounts, unchanged. ──
+app.use('/api/groups/options', requireAuth, requireAnyPermission(...GROUP_OPTION_PERMISSIONS), groupOptionsRouter);
 
 // ── Phase 2.1 (Homework behavioral cleanup): حارس الواجبات لحذف مجموعة، على الخادم ──
 // يُعترَض هنا فقط DELETE /api/groups/:id — يرفض (409) لو كان لصفّ المجموعة واجبات، وإلا

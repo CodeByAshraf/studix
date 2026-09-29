@@ -70,6 +70,8 @@ beforeEach(() => {
     const method = opts.method || 'GET';
     const body = opts.body ? JSON.parse(opts.body) : {};
     if (u.includes('/api/admissionPayments') && method === 'GET') return Promise.resolve(okJson(getAdmissionPaymentsResponse));
+    // M2 (Group Options) — the page-mount group options fetch; unused by these payment flows.
+    if (u.endsWith('/api/groups/options') && method === 'GET') return Promise.resolve(okJson([]));
     if (u.endsWith('/api/cashboxes/options') && method === 'GET') {
       return Promise.resolve(okJson(serverCashboxes.map(({ id, name, active }) => ({ id, name, active }))));
     }
@@ -158,9 +160,9 @@ describe('AdmissionsPage — admission payment creation (Phase 3B-14D)', () => {
     expect(useAppStore.getState().treasuryTxn[0].refType).toBe('admissionPayment');
     expect(useAppStore.getState().admissionSystemLog).toHaveLength(1);
     expect(useAppStore.getState().admissionSystemLog[0].type).toBe('paymentReceived');
-    // 3 network calls only: the page-mount fetches of admission payments (Phase 4) and cashbox
-    // options (M2/F1), plus the payment creation itself
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    // 4 network calls only: the page-mount fetches of admission payments (Phase 4), cashbox
+    // options (M2/F1) and group options (M2 Group Options), plus the payment creation itself
+    expect(fetchMock).toHaveBeenCalledTimes(4);
     expect(cashboxOptionsCalls()).toHaveLength(1);
   });
 
@@ -307,9 +309,9 @@ describe('AdmissionsPage — cancel-with-refund (Phase 3B-14D, ONE atomic transa
     expect(useAppStore.getState().admissionSystemLog).toHaveLength(2);
     // الدفعة الأصلية لا تتغيّر أبداً (immutable)
     expect(useAppStore.getState().admissionPayments).toEqual([EXISTING_PAYMENT]);
-    // 3 network calls only: the page-mount fetches of admission payments (Phase 4) and cashbox
-    // options (M2/F1), plus the cancellation itself
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    // 4 network calls only: the page-mount fetches of admission payments (Phase 4), cashbox
+    // options (M2/F1) and group options (M2 Group Options), plus the cancellation itself
+    expect(fetchMock).toHaveBeenCalledTimes(4);
     expect(cashboxOptionsCalls()).toHaveLength(1);
   });
 

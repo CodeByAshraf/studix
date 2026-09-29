@@ -188,6 +188,22 @@ describe('server wiring', () => {
     expect([...CASHBOX_OPTION_PERMISSIONS].sort()).toEqual(['admissions', 'materials', 'payments', 'treasury']);
   });
 
+  it('M2 Group Options: /api/groups/options is mounted, with its any-of guard, BEFORE every other /api/groups mount', () => {
+    const optionsMount = "app.use('/api/groups/options', requireAuth, requireAnyPermission(...GROUP_OPTION_PERMISSIONS), groupOptionsRouter);";
+    const optionsAt = server.indexOf(optionsMount);
+    expect(optionsAt).toBeGreaterThan(-1);
+    const groupMounts = [...server.matchAll(/app\.use\('\/api\/groups'/g)];
+    expect(groupMounts.length).toBeGreaterThan(0); // the group-delete guard (requirePermission('groups'))
+    for (const m of groupMounts) expect(m.index).toBeGreaterThan(optionsAt);
+    // the generic CRUD loop (which also serves /api/groups) comes after it too
+    expect(server.indexOf('for (const [apiPath, modelName] of Object.entries(COLLECTION_MODELS))')).toBeGreaterThan(optionsAt);
+  });
+
+  it('M2 Group Options: the options guard allows exactly groups/admissions/attendance', async () => {
+    const { GROUP_OPTION_PERMISSIONS } = await import('./groupOptions.js');
+    expect([...GROUP_OPTION_PERMISSIONS].sort()).toEqual(['admissions', 'attendance', 'groups']);
+  });
+
   it('payments/admissionPayments stay read-only on the generic router', () => {
     expect(server).toMatch(/const READ_ONLY_COLLECTIONS = new Set\(\['payments', 'admissionPayments'\]\);/);
   });

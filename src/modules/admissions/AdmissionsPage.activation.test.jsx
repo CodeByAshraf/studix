@@ -6,7 +6,7 @@
 // we verify the real, unmocked request pgActivateAdmission builds — same technique used
 // throughout this migration series.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import AdmissionsPage from './AdmissionsPage';
 import { useAppStore } from '../../store/app.store';
@@ -14,6 +14,7 @@ import { AuthProvider } from '../../store/auth.context';
 import { ToastProvider } from '../../components/Toast';
 
 let fetchMock;
+let serverGroups = [];     // GET /api/groups/options — page-mount fetch (M2 Group Options)
 let putActivateResponder;  // PUT /api/admissions/:id/activate
 let postParentResponder;   // POST /api/parents — must never be called by activation (M2/F4: parent linked server-side)
 let getParentsResponder;   // GET /api/parents — likewise never called by activation (M2/F4)
@@ -55,8 +56,21 @@ beforeEach(() => {
     // AdmissionsPage.jsx's single page-mount fetch of admissionPayments (Phase 4) — no
     // payments needed for these activation tests, so an empty array is sufficient.
     if (u.includes('/api/admissionPayments') && method === 'GET') return Promise.resolve(okJson([]));
+    // Confirm-reservation writes (M2 Group Options confirm test): echo the admission update,
+    // accept the "confirmed" system-log entry.
+    if (/\/api\/admissions\/[^/]+$/.test(u) && method === 'PUT') {
+      const body = opts.body ? JSON.parse(opts.body) : {};
+      return Promise.resolve(okJson({ ...ADMISSION, stage: body.stage, groupId: body.groupId ?? null, group: body.group ?? null }));
+    }
+    if (u.endsWith('/api/admissionSystemLog') && method === 'POST') {
+      return Promise.resolve(okJson({ id: 'sl-confirm-1', admissionId: 'adm_1', activityType: 'confirmed', byUser: 'u1', details: '', timestamp: '2026-01-10T00:00:00.000Z' }));
+    }
     // M2/F1 — the page-mount cashbox options fetch (deposit picker); unused by activation.
     if (u.endsWith('/api/cashboxes/options') && method === 'GET') return Promise.resolve(okJson([]));
+    // M2 (Group Options) — the page-mount group options fetch (confirm picker + activation lookup).
+    if (u.endsWith('/api/groups/options') && method === 'GET') {
+      return Promise.resolve(okJson(serverGroups.map(({ id, name, grade = null, max = null, price = 0 }) => ({ id, name, grade, max, price, activeCount: 0 }))));
+    }
     if (u.includes('/api/admissions/') && u.endsWith('/activate') && method === 'PUT') {
       return Promise.resolve(putActivateResponder(opts.body ? JSON.parse(opts.body) : {}));
     }
@@ -92,19 +106,28 @@ const ADMISSION = {
   lastModifiedAt: '2026-01-01T00:00:00.000Z', lastModifiedBy: 'admin',
 };
 
-function seedStore(extra = {}) {
+// M2 (Group Options): `groups` are the SERVER's groups, served by GET /api/groups/options; the
+// store's Groups collection stays empty (an admissions-only user never loads it), so every
+// activation here also proves the lookup no longer depends on the Groups permission.
+function seedStore({ groups = [GROUP], ...extra } = {}) {
+  serverGroups = groups;
   useAppStore.setState({
     admissions: [ADMISSION], admissionFollowups: [], admissionSystemLog: [], admissionPayments: [],
-    groups: [GROUP], students: [], invMaterials: [], treasuryTxn: [], cashboxes: [],
+    groups: [], students: [], invMaterials: [], treasuryTxn: [], cashboxes: [],
     ...extra,
   });
 }
+
+const groupOptionsCalls = () => fetchMock.mock.calls.filter(([u, o]) => String(u).endsWith('/api/groups/options') && (o?.method || 'GET') === 'GET');
 
 function activateCalls() {
   return fetchMock.mock.calls.filter(([url, opts]) => String(url).endsWith('/activate') && opts?.method === 'PUT');
 }
 
 async function clickActivate() {
+  // the group options (page-mount fetch) must have settled, as for a real user
+  await waitFor(() => expect(groupOptionsCalls()).toHaveLength(1));
+  await act(() => new Promise((resolve) => { setTimeout(resolve, 0); }));
   fireEvent.click(screen.getByText('📋 الحجز')); // switch to the "reserved" tab
   fireEvent.click(await screen.findByText('🎓 حضر أول حصة (تفعيل)'));
 }
@@ -151,9 +174,10 @@ describe('AdmissionsPage — attendFirstLesson activation (Phase 3B-13B Stage ii
     expect(useAppStore.getState().admissions[0].linkedStudentId).toBe(SAVED_STUDENT.id);
     expect(useAppStore.getState().admissionSystemLog).toEqual(NORMALIZED_SYSTEM_LOG_ENTRIES);
 
-    // 3 نداءات شبكة فقط: جلبا تحميل الصفحة (دفعات القبول Phase 4 + خيارات الخزن M2/F1)، ثم
-    // التفعيل الذرّي (يربط ولي الأمر داخله، M2/F4) — لا 4 نداءات منفصلة كما في Stage (i)
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    // 4 نداءات شبكة فقط: جلبات تحميل الصفحة الثلاثة (دفعات القبول Phase 4 + خيارات الخزن M2/F1 +
+    // خيارات المجموعات M2 Group Options)، ثم التفعيل الذرّي (يربط ولي الأمر داخله، M2/F4)
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(groupOptionsCalls()).toHaveLength(1);
     expect(activateCalls()).toHaveLength(1);
   });
 
@@ -215,5 +239,54 @@ describe('AdmissionsPage — attendFirstLesson parentId linking (Product Complet
     expect(sentBody.student.parentId).toBeUndefined();
     expect(fetchMock).not.toHaveBeenCalledWith(expect.stringContaining('/api/parents'), expect.anything());
     await waitFor(() => expect(useAppStore.getState().students).toEqual([SAVED_STUDENT]));
+  });
+});
+
+// M2 (Group Options) — an admissions-only user (no Groups collection) confirms a reservation:
+// the group picker and its capacity come from GET /api/groups/options (server activeCount).
+describe('AdmissionsPage — confirm reservation with group options (M2 Group Options)', () => {
+  it('lists same-grade groups from the options with server capacity, disables a full group, and confirms into the chosen one', async () => {
+    seedStore({
+      admissions: [{ ...ADMISSION, stage: 'reserved', confirmedGroupId: null, group: null }],
+      groups: [
+        { id: 'g1', name: 'مجموعة أ', grade: 'الصف الأول الثانوي', max: 10 },
+        { id: 'g-full', name: 'مجموعة ممتلئة', grade: 'الصف الأول الثانوي', max: 2 },
+        { id: 'g-other', name: 'مجموعة صف آخر', grade: 'الصف الثاني الثانوي', max: 10 },
+      ],
+    });
+    // server-side capacity: g1 has 3 active members, g-full is at its max
+    const base = fetchMock.getMockImplementation();
+    fetchMock.mockImplementation((url, opts = {}) => {
+      if (String(url).endsWith('/api/groups/options')) {
+        return Promise.resolve(okJson([
+          { id: 'g1', name: 'مجموعة أ', grade: 'الصف الأول الثانوي', max: 10, price: 300, activeCount: 3 },
+          { id: 'g-full', name: 'مجموعة ممتلئة', grade: 'الصف الأول الثانوي', max: 2, price: 300, activeCount: 2 },
+          { id: 'g-other', name: 'مجموعة صف آخر', grade: 'الصف الثاني الثانوي', max: 10, price: 300, activeCount: 0 },
+        ]));
+      }
+      return base(url, opts);
+    });
+    expect(useAppStore.getState().groups).toEqual([]);
+
+    renderPage();
+    await waitFor(() => expect(groupOptionsCalls()).toHaveLength(1));
+    await act(() => new Promise((resolve) => { setTimeout(resolve, 0); }));
+    fireEvent.click(screen.getByText('📋 الحجز'));
+    fireEvent.click(await screen.findByText('تأكيد الحجز'));
+
+    const g1 = await screen.findByText('مجموعة أ');
+    expect(screen.getByText('3/10')).toBeInTheDocument();          // capacity from activeCount
+    expect(screen.getByText('ممتلئة')).toBeInTheDocument();        // g-full is full…
+    expect(screen.getByText('مجموعة ممتلئة').closest('button')).toBeDisabled();
+    expect(screen.queryByText('مجموعة صف آخر')).toBeNull();        // other grade not offered
+
+    fireEvent.click(g1.closest('button'));
+    fireEvent.click(screen.getAllByRole('button').find((b) => /تأكيد/.test(b.textContent) && b.textContent !== 'تأكيد الحجز'));
+
+    await waitFor(() => expect(useAppStore.getState().admissions[0].stage).toBe('confirmed'));
+    const put = fetchMock.mock.calls.find(([u, o]) => /\/api\/admissions\/adm_1$/.test(String(u)) && o?.method === 'PUT');
+    const sent = JSON.parse(put[1].body);
+    expect(sent.groupId).toBe('g1');
+    expect(fetchMock).not.toHaveBeenCalledWith(expect.stringMatching(/\/api\/groups(\?|$)/), expect.anything());
   });
 });

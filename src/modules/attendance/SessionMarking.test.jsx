@@ -18,9 +18,9 @@ import { ToastProvider } from '../../components/Toast';
 
 vi.mock('../../services/api', async () => {
   const actual = await vi.importActual('../../services/api');
-  return { ...actual, pgSaveAttendanceSession: vi.fn(), pgGetEligibleStudentsForSession: vi.fn(), pgGetAttendance: vi.fn() };
+  return { ...actual, pgSaveAttendanceSession: vi.fn(), pgGetEligibleStudentsForSession: vi.fn(), pgGetAttendance: vi.fn(), pgGetGroupOptions: vi.fn() };
 });
-import { pgSaveAttendanceSession, pgGetEligibleStudentsForSession, pgGetAttendance } from '../../services/api';
+import { pgSaveAttendanceSession, pgGetEligibleStudentsForSession, pgGetAttendance, pgGetGroupOptions } from '../../services/api';
 
 const GROUP_ID = 'g1';
 const S1 = 's1';
@@ -39,13 +39,16 @@ function renderPage() {
 
 function seedStore() {
   useAppStore.setState({
-    groups: [{ id: GROUP_ID, name: 'Test Group' }],
+    // M2 (Group Options): the picker is served by GET /api/groups/options; the Groups-only
+    // collection stays empty (an attendance-only user never loads it).
+    groups: [],
     students: [
       { id: S1, name: 'Student One', code: 'C1', groupId: GROUP_ID, status: 'active' },
       { id: S2, name: 'Student Two', code: 'C2', groupId: GROUP_ID, status: 'active' },
     ],
     attendance: [],
   });
+  pgGetGroupOptions.mockResolvedValue([{ id: GROUP_ID, name: 'Test Group', grade: null, max: 20, price: 0, activeCount: 2 }]);
   pgGetEligibleStudentsForSession.mockResolvedValue([S1, S2]);
   // C4 Attendance migration Phase 2: existingSession now comes from
   // GET /api/attendance?groupId=&date= instead of filtering the store's global attendance
@@ -53,7 +56,13 @@ function seedStore() {
   pgGetAttendance.mockResolvedValue([]);
 }
 
+// The picker fills asynchronously once GET /api/groups/options resolves (M2 Group Options).
+async function waitForGroupOption(id) {
+  await waitFor(() => expect(document.querySelector(`option[value="${id}"]`)).not.toBeNull());
+}
+
 async function selectGroupAndWaitForRoster() {
+  await waitForGroupOption(GROUP_ID);
   const select = screen.getByRole('combobox');
   fireEvent.change(select, { target: { value: GROUP_ID } });
   await waitFor(() => expect(screen.getByRole('button', { name: /بدء تسجيل الحضور/ })).not.toBeDisabled());
@@ -64,6 +73,33 @@ async function startSessionAndSave() {
   fireEvent.click(screen.getByRole('button', { name: /بدء تسجيل الحضور/ }));
   fireEvent.click(await screen.findByRole('button', { name: /حفظ الجلسة/ }));
 }
+
+describe('SessionMarking — group picker from GET /api/groups/options (M2 Group Options)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    seedStore(); // Groups collection empty — an attendance-only user cannot read it
+  });
+
+  it('an attendance-only user can choose a group: options fill the picker with the server activeCount, and the session starts', async () => {
+    pgGetGroupOptions.mockResolvedValue([
+      { id: GROUP_ID, name: 'Test Group', grade: null, max: 20, price: 0, activeCount: 2 },
+      { id: 'g2', name: 'Other Group', grade: null, max: 10, price: 0, activeCount: 7 },
+    ]);
+    expect(useAppStore.getState().groups).toEqual([]);
+    renderPage();
+
+    await waitForGroupOption('g2');
+    expect(screen.getByRole('option', { name: 'Test Group (2 طالب)' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Other Group (7 طالب)' })).toBeInTheDocument();
+    expect(pgGetGroupOptions).toHaveBeenCalledTimes(1);
+
+    await selectGroupAndWaitForRoster();
+    fireEvent.click(screen.getByRole('button', { name: /بدء تسجيل الحضور/ }));
+    // the selected group's name (from the option) labels the marking step
+    expect(await screen.findAllByText(/Test Group/)).not.toHaveLength(0);
+    expect(pgGetEligibleStudentsForSession).toHaveBeenCalledWith(GROUP_ID, TODAY);
+  });
+});
 
 describe('SessionMarking — server-truth write path', () => {
   beforeEach(() => {
@@ -174,6 +210,7 @@ describe('SessionMarking — existing-session detection (C4 Attendance migration
     ]);
     renderPage();
 
+    await waitForGroupOption(GROUP_ID);
     fireEvent.change(screen.getByRole('combobox'), { target: { value: GROUP_ID } });
     expect(await screen.findByText(/توجد بيانات محفوظة لهذه الجلسة/)).toBeInTheDocument();
 
@@ -193,6 +230,7 @@ describe('SessionMarking — existing-session detection (C4 Attendance migration
     pgGetAttendance.mockResolvedValue([]);
     renderPage();
 
+    await waitForGroupOption(GROUP_ID);
     fireEvent.change(screen.getByRole('combobox'), { target: { value: GROUP_ID } });
     await waitFor(() => expect(screen.getByRole('button', { name: /بدء تسجيل الحضور/ })).not.toBeDisabled());
 
@@ -204,6 +242,7 @@ describe('SessionMarking — existing-session detection (C4 Attendance migration
     pgGetAttendance.mockImplementation(() => new Promise((resolve) => { resolveExisting = resolve; }));
     renderPage();
 
+    await waitForGroupOption(GROUP_ID);
     fireEvent.change(screen.getByRole('combobox'), { target: { value: GROUP_ID } });
     await waitFor(() => expect(pgGetEligibleStudentsForSession).toHaveBeenCalled());
     expect(screen.getByRole('button', { name: /بدء تسجيل الحضور/ })).toBeDisabled();

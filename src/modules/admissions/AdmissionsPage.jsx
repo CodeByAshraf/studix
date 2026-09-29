@@ -25,6 +25,7 @@ import {
 } from '../../services/api';
 import { useAsyncData } from '../../hooks/useAsyncData';
 import { useCashboxOptions } from '../../hooks/useCashboxOptions';
+import { useGroupOptions } from '../../hooks/useGroupOptions';
 import { getAdmissionTreasuryTotals } from '../../services/treasuryService';
 import { openAdmissionReport } from './buildAdmissionReport';
 import { uuid } from '../../utils/helpers';
@@ -111,7 +112,9 @@ export default function AdmissionsPage() {
   const [filterGrade, setFilterGrade] = useState('');
   const [filterGroup, setFilterGroup] = useState('');
   // بيانات حقيقية: المجموعات والطلاب (لإضافة الطالب فعلياً عند تأكيد الحجز)
-  const realGroups   = useAppStore((s) => s.groups);
+  // M2 (Group Options): groups come from GET /api/groups/options (with activeCount) — the
+  // confirm picker and the activation-time lookup no longer need the Groups-only collection.
+  const { groupOptions: realGroups } = useGroupOptions();
   const realStudents = useAppStore((s) => s.students);
   const addStudent   = useAppStore((s) => s.addStudent);
   // للربط بالمدفوعات الحقيقية والخزنة والمذكرات
@@ -466,7 +469,6 @@ export default function AdmissionsPage() {
         <ConfirmGroupModal
           record={confirmFor}
           groups={realGroups}
-          students={realStudents}
           onClose={() => setConfirmFor(null)}
           onConfirm={(groupId) => doConfirmWithGroup(confirmFor, groupId)}
         />
@@ -1135,12 +1137,14 @@ function EmptyState({ text }) {
 // ═══════════════════════════════════════════════════════════════════════════
 // مودال اختيار المجموعة عند تأكيد الحجز
 // ═══════════════════════════════════════════════════════════════════════════
-function ConfirmGroupModal({ record, groups, students, onClose, onConfirm }) {
+function ConfirmGroupModal({ record, groups, onClose, onConfirm }) {
   const [groupId, setGroupId] = useState('');
   // مجموعات نفس السنة الدراسية للطالب
   const gradeGroups = (groups || []).filter(g => g.grade === record.grade);
   // عدد طلاب كل مجموعة (من الطلاب الحقيقيين النشطين)
-  const countInGroup = (gId) => (students || []).filter(s => s.groupId === gId && s.status === 'active').length;
+  // M2 (Group Options): computed by the server — active enrollments of active students, the
+  // same membership definition as GroupsPage's capacity (no students collection needed).
+  const countInGroup = (gId) => (groups || []).find(g => g.id === gId)?.activeCount ?? 0;
 
   return (
     <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
