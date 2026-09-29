@@ -10,9 +10,19 @@ import { prisma } from '../prisma.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { invalidateRole } from '../lib/authCache.js';
 import { snakeToCamel } from '../lib/caseMapper.js';
+import { RESERVED_ADMIN_ROLE, isActiveAdminRequester } from './users.js';
 
 const router = Router();
 const ID_PATTERN = /^[a-z_]+$/;
+
+// Security review finding 2: the role id 'admin' is reserved — assigning it sets is_admin
+// (users.js) — so creating, editing or deleting it requires an active real administrator,
+// never just the 'users' permission. Every other role is managed exactly as before.
+async function rejectReservedRoleUnlessAdmin(req, res, roleId) {
+  if (roleId !== RESERVED_ADMIN_ROLE || await isActiveAdminRequester(req)) return false;
+  res.status(403).json({ ok: false, error: 'إدارة دور مدير النظام متاحة لمدير النظام فقط.' });
+  return true;
+}
 
 router.get('/', asyncHandler(async (req, res) => {
   const roles = await prisma.roles.findMany({ orderBy: { id: 'asc' } });
@@ -25,6 +35,8 @@ router.post('/', asyncHandler(async (req, res) => {
     return res.status(400).json({ ok: false, error: 'معرّف الدور: أحرف إنجليزية صغيرة وشرطات سفلية فقط.' });
   }
   if (!label?.trim()) return res.status(400).json({ ok: false, error: 'اسم الدور مطلوب.' });
+
+  if (await rejectReservedRoleUnlessAdmin(req, res, id.trim())) return;
 
   const existing = await prisma.roles.findUnique({ where: { id: id.trim() } });
   if (existing) return res.status(409).json({ ok: false, error: 'معرّف الدور مستخدم بالفعل.' });
@@ -46,6 +58,7 @@ router.post('/', asyncHandler(async (req, res) => {
 router.put('/:id', asyncHandler(async (req, res) => {
   const { id } = req.params;
   const { label, color, description, permissions } = req.body || {};
+  if (await rejectReservedRoleUnlessAdmin(req, res, id)) return;
 
   const existing = await prisma.roles.findUnique({ where: { id } });
   if (!existing) return res.status(404).json({ ok: false, error: 'الدور غير موجود.' });
@@ -70,6 +83,7 @@ router.put('/:id', asyncHandler(async (req, res) => {
 
 router.delete('/:id', asyncHandler(async (req, res) => {
   const { id } = req.params;
+  if (await rejectReservedRoleUnlessAdmin(req, res, id)) return;
   const existing = await prisma.roles.findUnique({ where: { id } });
   if (!existing) return res.status(404).json({ ok: false, error: 'الدور غير موجود.' });
   if (existing.is_system) {

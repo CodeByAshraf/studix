@@ -129,12 +129,16 @@ function UserForm({ initial, editId, onSave, onClose, loading, roles, teachers, 
         </div>
       </F>
       <F label="البريد الإلكتروني"><I name="email" value={form.email} onChange={ch} type="email" placeholder="example@mail.com"/></F>
+      {/* Security review finding 1: no "account active" toggle on your own account — the
+          server also refuses an administrator deactivating themselves. */}
+      {!isEditingSelf && (
       <div style={{ gridColumn:'1/-1', display:'flex', alignItems:'center', gap:10 }}>
         <label style={{ display:'flex', alignItems:'center', gap:8, cursor:'pointer', fontSize:'0.85rem', fontWeight:600 }}>
           <input type="checkbox" name="active" checked={form.active!==false} onChange={ch} style={{ width:16, height:16, cursor:'pointer' }}/>
           الحساب نشط
         </label>
       </div>
+      )}
       <div style={{ gridColumn:'1/-1', display:'flex', justifyContent:'flex-end', gap:10, paddingTop:12, borderTop:'1px solid var(--border)' }}>
         <Button variant="secondary" onClick={onClose}>إلغاء</Button>
         <Button variant="primary" loading={loading} onClick={handleSave}>💾 {editId ? 'حفظ التعديلات' : 'إنشاء الحساب'}</Button>

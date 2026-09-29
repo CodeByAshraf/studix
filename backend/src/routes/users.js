@@ -12,10 +12,45 @@ import { Router } from 'express';
 import { prisma } from '../prisma.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { hashPbkdf2 } from '../lib/passwordVerify.js';
-import { invalidateUser } from '../lib/authCache.js';
+import { invalidateUser, getAuthState } from '../lib/authCache.js';
 import { snakeToCamel } from '../lib/caseMapper.js';
 
 const router = Router();
+
+// ── Administrator protection (pre-installer security review, findings 1 + 2) ──
+// The real administrator is users.is_admin = true AND active = true (db/firstAdmin.js: the
+// setup-created owner has role_id = null). The old guards here counted role_id === 'admin'
+// and so never protected the owner: deactivating the last is_admin reopened /api/setup
+// (isSetupOpen) to anyone at the machine.
+//
+// RESERVED_ADMIN_ROLE: assigning this role id sets is_admin (below), so only a live, active
+// is_admin requester may assign it or manage the role itself (roles.js) — the 'users'
+// permission alone must not be a path to is_admin.
+export const RESERVED_ADMIN_ROLE = 'admin';
+
+// Whether the requester is an active real administrator, from the live auth state (the same
+// source requireRole/requirePermission use), never from token claims.
+export async function isActiveAdminRequester(req) {
+  if (!req.user?.id) return false;
+  const state = await getAuthState(req.user.id);
+  return state?.active === true && state?.isAdmin === true;
+}
+
+// Serializes every change that could remove an active administrator, so two concurrent
+// requests cannot each see "another admin remains" and together leave none.
+const ADMIN_SET_LOCK_KEY = 7_316_200_000_000_001n;
+
+// Runs `write(tx)` only if, afterwards, at least one OTHER active is_admin user remains;
+// the count and the write share one transaction under ADMIN_SET_LOCK_KEY. Returns null when
+// the change would leave the system without an active administrator.
+async function withAnotherActiveAdmin(id, write) {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${ADMIN_SET_LOCK_KEY})`;
+    const others = await tx.users.count({ where: { is_admin: true, active: true, NOT: { id } } });
+    if (others === 0) return null;
+    return write(tx);
+  });
+}
 
 // نفس تطابق crud.js بالضبط: نتجاهَل Date/Decimal عمداً (لهما toJSON خاص بهما —
 // تفكيكهما بـ Object.entries يُنتج {} فارغاً بدل القيمة الفعلية).
@@ -59,6 +94,9 @@ router.post('/', asyncHandler(async (req, res) => {
   if (!password || password.length < 6) {
     return res.status(400).json({ ok: false, error: 'كلمة المرور مطلوبة (6 أحرف على الأقل).' });
   }
+  if (roleId === RESERVED_ADMIN_ROLE && !(await isActiveAdminRequester(req))) {
+    return res.status(403).json({ ok: false, error: 'تعيين دور مدير النظام متاح لمدير النظام فقط.' });
+  }
   if (roleId) {
     const role = await prisma.roles.findUnique({ where: { id: roleId } });
     if (!role) return res.status(400).json({ ok: false, error: 'الدور المحدَّد غير موجود.' });
@@ -89,6 +127,12 @@ router.put('/:id', asyncHandler(async (req, res) => {
   const existing = await prisma.users.findUnique({ where: { id } });
   if (!existing) return res.status(404).json({ ok: false, error: 'المستخدم غير موجود.' });
 
+  // Assigning the reserved admin role sets is_admin — only an active real administrator may.
+  if (roleId === RESERVED_ADMIN_ROLE && existing.role_id !== RESERVED_ADMIN_ROLE
+      && !(await isActiveAdminRequester(req))) {
+    return res.status(403).json({ ok: false, error: 'تعيين دور مدير النظام متاح لمدير النظام فقط.' });
+  }
+
   if (roleId) {
     const role = await prisma.roles.findUnique({ where: { id: roleId } });
     if (!role) return res.status(400).json({ ok: false, error: 'الدور المحدَّد غير موجود.' });
@@ -99,18 +143,13 @@ router.put('/:id', asyncHandler(async (req, res) => {
     (permissions !== undefined) ||
     (active !== undefined && active !== existing.active);
 
-  // حارس أمان أدنى: لا يجوز أن تُنتج هذه العملية صفر مستخدمين نشطين بدور admin.
-  if (authAffecting) {
-    const willStayAdmin = (roleId !== undefined ? roleId : existing.role_id) === 'admin'
-      && (active !== undefined ? active : existing.active);
-    if (!willStayAdmin && existing.role_id === 'admin' && existing.active) {
-      const otherActiveAdmins = await prisma.users.count({
-        where: { role_id: 'admin', active: true, NOT: { id } },
-      });
-      if (otherActiveAdmins === 0) {
-        return res.status(409).json({ ok: false, error: 'لا يمكن ترك النظام بلا مدير نشط واحد على الأقل.' });
-      }
-    }
+  // An active administrator can never deactivate their own account (it would lock them out
+  // and, as the last admin, reopen /api/setup).
+  const isActiveAdmin = existing.is_admin && existing.active;
+  const willBeActive = active !== undefined ? !!active : existing.active;
+  const willBeAdmin = roleId !== undefined ? roleId === RESERVED_ADMIN_ROLE : existing.is_admin;
+  if (isActiveAdmin && req.user?.id === id && !willBeActive) {
+    return res.status(409).json({ ok: false, error: 'لا يمكنك تعطيل حسابك وأنت مدير النظام.' });
   }
 
   const data = {};
@@ -127,7 +166,16 @@ router.put('/:id', asyncHandler(async (req, res) => {
   }
   if (authAffecting) data.auth_version = { increment: 1 };
 
-  const updated = await prisma.users.update({ where: { id }, data, select: PUBLIC_FIELDS });
+  // حارس أمان أدنى: لا يجوز أن تُنتج هذه العملية صفر مديرين نشطين (is_admin AND active).
+  // Removing an active admin (deactivation or losing the admin role) only proceeds if another
+  // active admin remains — checked and written atomically (withAnotherActiveAdmin).
+  const removesActiveAdmin = isActiveAdmin && !(willBeAdmin && willBeActive);
+  const updated = removesActiveAdmin
+    ? await withAnotherActiveAdmin(id, (tx) => tx.users.update({ where: { id }, data, select: PUBLIC_FIELDS }))
+    : await prisma.users.update({ where: { id }, data, select: PUBLIC_FIELDS });
+  if (!updated) {
+    return res.status(409).json({ ok: false, error: 'لا يمكن ترك النظام بلا مدير نشط واحد على الأقل.' });
+  }
   if (authAffecting) invalidateUser(id); // بعد نجاح الالتزام مباشرة — لا كتابة كاش قبل تأكيد قاعدة البيانات
   res.json({ ok: true, user: toClient(updated) });
 }));
@@ -140,17 +188,19 @@ router.delete('/:id', asyncHandler(async (req, res) => {
   const existing = await prisma.users.findUnique({ where: { id } });
   if (!existing) return res.status(404).json({ ok: false, error: 'المستخدم غير موجود.' });
 
-  if (existing.role_id === 'admin' && existing.active) {
-    const otherActiveAdmins = await prisma.users.count({ where: { role_id: 'admin', active: true, NOT: { id } } });
-    if (otherActiveAdmins === 0) {
-      return res.status(409).json({ ok: false, error: 'لا يمكن حذف آخر مدير نشط في النظام.' });
-    }
-  }
-
   // Postgres يرفض الحذف عبر FK (NoAction) لو لهذا المستخدم سجلات مرتبطة (activity_logs،
   // admissions.created_by/last_modified_by، treasury_txn، inventory_txn) — نفس نمط الحماية
   // الموجود لكل جدول آخر في هذا المخطط، يظهر عبر معالج الأخطاء الحالي دون أي تغيير هنا.
-  await prisma.users.delete({ where: { id } });
+  // The last active administrator (is_admin AND active — not role_id) can never be deleted;
+  // the check and the delete are atomic (withAnotherActiveAdmin).
+  if (existing.is_admin && existing.active) {
+    const deleted = await withAnotherActiveAdmin(id, (tx) => tx.users.delete({ where: { id } }));
+    if (!deleted) {
+      return res.status(409).json({ ok: false, error: 'لا يمكن حذف آخر مدير نشط في النظام.' });
+    }
+  } else {
+    await prisma.users.delete({ where: { id } });
+  }
   invalidateUser(id);
   res.json({ ok: true });
 }));

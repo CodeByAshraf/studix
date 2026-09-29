@@ -94,3 +94,19 @@ describe('Users page — editing another user keeps the role requirement', () =>
     await waitFor(() => expect(pgUpdateUser).toHaveBeenCalledWith('u-other', expect.objectContaining({ roleId: 'cashier' })));
   });
 });
+
+// Security review finding 1 — the account-active toggle is never offered on one's own account
+// (the server also refuses an administrator deactivating themselves); other users keep it.
+describe('Users page — no self-deactivation toggle', () => {
+  it('editing one\'s own account shows no "الحساب نشط" toggle', async () => {
+    await openEditFor(OWNER);
+    expect(screen.queryByText('الحساب نشط')).toBeNull();
+    expect(document.querySelector('input[name="active"]')).toBeNull();
+  });
+
+  it('editing another user still shows the toggle', async () => {
+    await openEditFor(OTHER);
+    expect(screen.getByText('الحساب نشط')).toBeInTheDocument();
+    expect(document.querySelector('input[name="active"]')).not.toBeNull();
+  });
+});
