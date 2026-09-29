@@ -64,6 +64,25 @@ export const ALL_PERMISSION_PAGES = [
   'activity-log', 'settings', 'users',
 ];
 
+// M1 — the default cashbox every payment path (payments.js, admissionPayments.js,
+// materialDistribution.js) needs as a real, active row. Mirrors the frontend's
+// INITIAL_CASHBOXES 'cb_main' seed in src/data/initialData.js (duplicated for the same
+// separate-packages reason as ALL_PERMISSION_PAGES above). Created here, inside the first-admin
+// transaction, so a fresh install can take its first payment before TreasuryPage is ever
+// opened. TreasuryPage's own background sync of the same seed then gets a 409, which it
+// already treats as success.
+export const DEFAULT_CASHBOX = {
+  id: 'cb_main',
+  name: 'الخزنة الرئيسية',
+  type: 'main',
+  color: '#0d9488',
+  icon: '🏦',
+  opening_balance: 0,
+  is_default: true,
+  active: true,
+  notes: 'الخزنة الافتراضية — تُسجَّل فيها كل المدفوعات تلقائياً',
+};
+
 function withConnectionLimit(databaseUrl, limit) {
   const u = new URL(databaseUrl);
   u.searchParams.set('connection_limit', String(limit));
@@ -92,7 +111,7 @@ async function createFirstAdminLocked(prisma, { id, name, password }) {
       throw new FirstAdminError('id_taken', 'اسم المستخدم مستخدَم بالفعل.');
     }
 
-    return tx.users.create({
+    const admin = await tx.users.create({
       data: {
         id,
         name,
@@ -104,6 +123,12 @@ async function createFirstAdminLocked(prisma, { id, name, password }) {
       },
       select: { id: true, name: true, is_admin: true, active: true, auth_version: true },
     });
+
+    // INSERT ... ON CONFLICT DO NOTHING: an existing cb_main (e.g. a database that already had
+    // data before its admin was recreated) is never duplicated or overwritten.
+    await tx.cashboxes.createMany({ data: [DEFAULT_CASHBOX], skipDuplicates: true });
+
+    return admin;
   });
 }
 
