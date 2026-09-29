@@ -43,6 +43,8 @@ function baseDeps(overrides = {}) {
     registerPostgresServiceFn: vi.fn((...args) => { record('registerPostgresService')(...args); return { status: 'registered' }; }),
     registerAppServiceFn: vi.fn((...args) => { record('registerAppService')(...args); return { status: 'registered' }; }),
     startServiceFn: vi.fn((...args) => { record('startService')(...args); return { status: 'started' }; }),
+    queryServiceStateFn: vi.fn(() => 'STOPPED'),
+    isPortFreeFn: vi.fn(async () => true),
     registerScheduledTaskFn: vi.fn((...args) => { record('registerScheduledTask')(...args); return { status: 'created' }; }),
     registerBackupTaskFn: vi.fn((...args) => { record('registerBackupTask')(...args); return { status: 'created' }; }),
     readRestoreStateFn: vi.fn((...args) => { record('readRestoreState')(...args); return { status: 'idle' }; }),
@@ -554,6 +556,65 @@ describe('runFirstInstall — restore-state guard before starting StudixApp (aud
     expect(typeof capturedOpts.io.registerPostgresServiceFn).toBe('function');
     expect(typeof capturedOpts.io.startPostgresServiceFn).toBe('function');
   });
+});
+
+// M3 — the fixed app port (4000) is checked immediately before StudixApp is started, so an
+// occupied port fails fast with a clear step instead of an opaque wait_for_health timeout.
+describe('runFirstInstall — app port pre-check before starting StudixApp (M3)', () => {
+  it('port free + StudixApp stopped -> checks the resolved port, then starts StudixApp and installs', async () => {
+    const { deps } = baseDeps();
+    const result = await runFirstInstall({ schemaPath: 'schema.sql', port: 4000, deps });
+    expect(deps.queryServiceStateFn).toHaveBeenCalledWith('StudixApp');
+    expect(deps.isPortFreeFn).toHaveBeenCalledWith(4000);
+    expect(deps.startServiceFn).toHaveBeenCalledWith('StudixApp');
+    // the check runs after the restore-state guard and right before the StudixApp start
+    const appStartIndex = deps.startServiceFn.mock.calls.findIndex((c) => c[0] === 'StudixApp');
+    expect(deps.isPortFreeFn.mock.invocationCallOrder[0])
+      .toBeGreaterThan(deps.readRestoreStateFn.mock.invocationCallOrder[0]);
+    expect(deps.isPortFreeFn.mock.invocationCallOrder[0])
+      .toBeLessThan(deps.startServiceFn.mock.invocationCallOrder[appStartIndex]);
+    expect(result).toEqual({ status: 'installed', browserOpened: true });
+  });
+
+  it('port occupied + StudixApp stopped -> throws app_port_in_use and never starts StudixApp', async () => {
+    const { deps } = baseDeps({ isPortFreeFn: vi.fn(async () => false) });
+    const err = await runFirstInstall({ schemaPath: 'schema.sql', port: 4000, deps }).catch((e) => e);
+    expect(err).toBeInstanceOf(FirstInstallError);
+    expect(err.step).toBe('app_port_in_use');
+    expect(err.message).toContain('4000');
+    expect(err.message).not.toMatch(/PORT/);
+    expect(deps.startServiceFn).not.toHaveBeenCalledWith('StudixApp');
+    expect(deps.startServiceFn).toHaveBeenCalledWith('StudixPostgreSQL'); // earlier steps unaffected
+    expect(deps.registerScheduledTaskFn).not.toHaveBeenCalled();
+    expect(deps.waitForHealthFn).not.toHaveBeenCalled();
+    expect(deps.openBrowserFn).not.toHaveBeenCalled();
+  });
+
+  it('port occupied + StudixApp already RUNNING (safe re-run / upgrade) -> skips the port check and installs', async () => {
+    const { deps } = baseDeps({
+      queryServiceStateFn: vi.fn(() => 'RUNNING'),
+      isPortFreeFn: vi.fn(async () => false), // held by our own StudixApp
+    });
+    const result = await runFirstInstall({ schemaPath: 'schema.sql', port: 4000, deps });
+    expect(deps.isPortFreeFn).not.toHaveBeenCalled();
+    expect(deps.startServiceFn).toHaveBeenCalledWith('StudixApp');
+    expect(result).toEqual({ status: 'installed', browserOpened: true });
+  });
+
+  it.each([['switching'], ['rolling_back']])(
+    'restore in progress ("%s") -> the port check is not performed',
+    async (status) => {
+      const { deps } = baseDeps({
+        readRestoreStateFn: vi.fn(() => ({ status })),
+        isPortFreeFn: vi.fn(async () => false),
+      });
+      const result = await runFirstInstall({ schemaPath: 'schema.sql', port: 4000, deps });
+      expect(deps.queryServiceStateFn).not.toHaveBeenCalled();
+      expect(deps.isPortFreeFn).not.toHaveBeenCalled();
+      expect(deps.startServiceFn).not.toHaveBeenCalledWith('StudixApp');
+      expect(result.status).toBe('installed');
+    },
+  );
 });
 
 describe('runFirstInstall — browser-open failure is non-fatal (best-effort)', () => {

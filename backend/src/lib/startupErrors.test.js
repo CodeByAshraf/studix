@@ -66,6 +66,23 @@ describe('describeStartupFailure', () => {
     expect(describeStartupFailure(err)).toMatch(/المنفذ/);
   });
 
+  it('EADDRINUSE message names the fixed port 4000 and never tells the operator to change PORT', () => {
+    const err = new Error('listen EADDRINUSE: address already in use 127.0.0.1:4000');
+    err.code = 'EADDRINUSE';
+    err.port = 4000;
+    const message = describeStartupFailure(err);
+    expect(message).toContain('4000');
+    expect(message).not.toMatch(/PORT/);
+    expect(message).not.toMatch(/غيّر/);
+  });
+
+  it('EADDRINUSE on a non-default port (dev/smoke test) still reports the actual port', () => {
+    const err = new Error('listen EADDRINUSE: address already in use 127.0.0.1:39217');
+    err.code = 'EADDRINUSE';
+    err.port = 39217;
+    expect(describeStartupFailure(err)).toContain('39217');
+  });
+
   it('falls back to the raw message for an unrecognized error shape', () => {
     const err = new Error('something totally unrelated happened');
     expect(describeStartupFailure(err)).toBe('something totally unrelated happened');

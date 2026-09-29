@@ -57,7 +57,7 @@ import { execFileSync } from 'child_process';
 import { PrismaClient } from '@prisma/client';
 import {
   provisionPostgres, stopPostgres, resolvePgHome, resolvePgDataDir, locatePgBinaries,
-  generatePostgresPassword,
+  generatePostgresPassword, isPortFree,
 } from '../db/postgresProvisioning.js';
 import { bootstrapDatabase, ensureAppRole } from '../db/bootstrapDatabase.js';
 import { runMigrations } from '../db/migrationRunner.js';
@@ -67,9 +67,9 @@ import { resolveProductionConfigPath } from '../lib/config.js';
 import {
   ensureProvisioningAdminConfig, readProvisioningAdminUrl, resolveProvisioningAdminConfigPath,
 } from '../lib/provisioningAdminConfig.js';
-import { validateDatabaseUrl } from '../lib/startupErrors.js';
+import { validateDatabaseUrl, describePortInUse } from '../lib/startupErrors.js';
 import {
-  registerPostgresService, registerAppService, startService,
+  registerPostgresService, registerAppService, startService, queryServiceState,
   resolveInstallRoot, isPostgresServiceRegisteredFor,
   STUDIX_POSTGRES_SERVICE_NAME, STUDIX_APP_SERVICE_NAME,
 } from '../lib/windowsService.js';
@@ -180,6 +180,8 @@ async function runFirstInstallSteps({
     registerPostgresServiceFn = registerPostgresService,
     registerAppServiceFn = registerAppService,
     startServiceFn = startService,
+    queryServiceStateFn = queryServiceState,
+    isPortFreeFn = isPortFree,
     registerScheduledTaskFn = ensureStartupTask,
     registerBackupTaskFn = ensureBackupTask,
     readRestoreStateFn = readRestoreState,
@@ -426,6 +428,25 @@ async function runFirstInstallSteps({
       `جاهزية PostgreSQL الفعلية، إكمال عملية الاسترداد هذه، ثم بدء StudixApp فقط بعد اكتمالها بأمان.`
     );
   } else {
+    // 11c. M3 — fail fast when the fixed app port is held by another program. Without this,
+    // StudixApp would only crash-loop on EADDRINUSE and the install would surface as an opaque
+    // wait_for_health timeout (or, worse, pass it if the other program happens to answer
+    // /health). Skipped when StudixApp itself is already RUNNING — then the port holder is our
+    // own service (a safe re-run, or an upgrade whose best-effort pre-copy stop didn't take),
+    // and startServiceFn below is a no-op for it anyway. Placed immediately before the start
+    // to keep the check-to-bind window as short as possible.
+    let appPortFree = true;
+    try {
+      if (queryServiceStateFn(STUDIX_APP_SERVICE_NAME) !== 'RUNNING') {
+        appPortFree = await isPortFreeFn(Number(port));
+      }
+    } catch (err) {
+      throw new FirstInstallError('start_app_service', err);
+    }
+    if (!appPortFree) {
+      throw new FirstInstallError('app_port_in_use', new Error(describePortInUse(port)));
+    }
+
     try {
       startServiceFn(STUDIX_APP_SERVICE_NAME);
     } catch (err) {
