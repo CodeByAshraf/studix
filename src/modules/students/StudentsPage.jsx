@@ -8,7 +8,7 @@ import Button              from '../../components/ui/Button';
 import { useToast }        from '../../components/Toast';
 import { useErrorHandler } from '../../hooks/useErrorHandler';
 import { createStudent, updateStudent, filterStudents } from '../../services/studentService';
-import { pgCreateStudent, pgUpdateStudent, pgDeleteStudent, pgCreateParent, pgGetCollection, pgGetPayments, pgGetCommunications, pgGetAttendance, pgGetGrades, pgGetHwSubmissions } from '../../services/api';
+import { pgCreateStudent, pgUpdateStudent, pgDeleteStudent, pgCreateParent, pgGetCollection, pgGetCommunications, pgGetAttendance } from '../../services/api';
 import { useAsyncData } from '../../hooks/useAsyncData';
 import { normalizeParentPhone } from '../communication/parentService';
 import { paginate, formatDate } from '../../utils/helpers';
@@ -148,22 +148,9 @@ export default function StudentsPage() {
       closeModal();
       return;
     }
-    // C4 Grades/hwSubmissions Frontend Migration (Batch A, feature 004): بدل مصفوفة grades
-    // الكاملة من الـ store، يُجلَب عدد درجات هذا الطالب تحديداً فقط عبر GET /api/grades?studentId=
-    // (نفس نمط pgGetCommunications/pgGetPayments أدناه بالضبط).
-    let gradesCount;
-    try {
-      gradesCount = (await pgGetGrades({ studentId: s.id })).length;
-    } catch (e) {
-      toast.error(e.message || 'فشل التحقّق من درجات الطالب');
-      closeModal();
-      return;
-    }
-    if (gradesCount > 0) {
-      toast.error(`لا يمكن حذف ${s.name} — له ${gradesCount} درجة مسجّلة. أوقفه بدلاً من حذفه (الحالة: موقوف).`);
-      closeModal();
-      return;
-    }
+    // M2/F3: grades, homework submissions and payments are checked by the server inside
+    // DELETE /api/students/:id (studentDelete.js, 'students' permission only) — reading them
+    // here needed 'exams'/'homework'/'payments', and a 403 blocked every delete.
     // MEDIUM-A Finding 3: باقي جداول students.id (NO ACTION) الستة غير المفحوصة محلياً —
     // نفس نمط attendance/grades أعلاه بالضبط. الخادم يمنع الحذف في كل الحالات دائماً
     // (لا خطر على تكامل البيانات)؛ هذا فقط يستبدل رسالة P2003 العامة المُربكة برسالة
@@ -176,7 +163,7 @@ export default function StudentsPage() {
     }
     // Pre-Installer Audit C4: بدل مصفوفة communications الكاملة من الـ store (لم تعد
     // تُحمَّل إقلاعياً — انظر db.middleware.js)، يُجلَب عدد سجلات تواصل هذا الطالب تحديداً
-    // فقط عبر GET /api/communications?studentId= (نفس نمط pgGetPayments أدناه بالضبط).
+    // فقط عبر GET /api/communications?studentId=.
     let communicationsCount;
     try {
       communicationsCount = (await pgGetCommunications({ studentId: s.id })).length;
@@ -190,42 +177,9 @@ export default function StudentsPage() {
       closeModal();
       return;
     }
-    // C4 Grades/hwSubmissions Frontend Migration (Batch A, feature 004): نفس مبدأ فحص grades
-    // أعلاه — عدد تسليمات هذا الطالب فقط عبر GET /api/hwSubmissions?studentId=.
-    let hwSubmissionsCount;
-    try {
-      hwSubmissionsCount = (await pgGetHwSubmissions({ studentId: s.id })).length;
-    } catch (e) {
-      toast.error(e.message || 'فشل التحقّق من تسليمات واجبات الطالب');
-      closeModal();
-      return;
-    }
-    if (hwSubmissionsCount > 0) {
-      toast.error(`لا يمكن حذف ${s.name} — له ${hwSubmissionsCount} تسليم واجب. أوقفه بدلاً من حذفه (الحالة: موقوف).`);
-      closeModal();
-      return;
-    }
     const inventoryTxnCount = inventoryTxn.filter(t => t.studentId === s.id).length;
     if (inventoryTxnCount > 0) {
       toast.error(`لا يمكن حذف ${s.name} — له ${inventoryTxnCount} حركة مخزون. أوقفه بدلاً من حذفه (الحالة: موقوف).`);
-      closeModal();
-      return;
-    }
-    // Scalability Architecture Phase 4 Cutover 1: بدل مصفوفة payments الكاملة من الـ
-    // store، يُجلَب عدد مدفوعات هذا الطالب تحديداً فقط عبر GET /api/payments?studentId=
-    // (نفس نطاق .filter(p=>p.studentId===s.id) السابق بالضبط، مُتحقَّق تكافؤه في تدقيق
-    // Phase 4 Step 3). فشل الجلب نفسه يُعامَل كفشل التحقّق — لا نسمح بمتابعة الحذف بلا
-    // التأكّد فعلاً من عدم وجود مدفوعات مرتبطة (نفس مبدأ "فشل واضح لا افتراض صامت").
-    let paymentsCount;
-    try {
-      paymentsCount = (await pgGetPayments({ studentId: s.id })).length;
-    } catch (e) {
-      toast.error(e.message || 'فشل التحقّق من مدفوعات الطالب');
-      closeModal();
-      return;
-    }
-    if (paymentsCount > 0) {
-      toast.error(`لا يمكن حذف ${s.name} — له ${paymentsCount} دفعة مسجّلة. أوقفه بدلاً من حذفه (الحالة: موقوف).`);
       closeModal();
       return;
     }
@@ -242,7 +196,7 @@ export default function StudentsPage() {
         .catch((e) => toast.error(e.message || 'تعذّر تسجيل الحدث في سجل النشاط'));
       toast.info(`تم حذف ${s.name}`);
       closeModal();
-    }, { errorMsg: 'فشل حذف الطالب' });
+    }, { errorMsg: (err) => (err?.code === 'STUDENT_HAS_RELATED_RECORDS' ? err.message : 'فشل حذف الطالب') });
   }, [modal.student, attendanceByStudent, admissions, inventoryTxn, waReportLog, setStudents, run, toast, addLog, currentUser, closeModal]);
 
   const selStyle = { background:'var(--surface2)', border:'1px solid var(--border)', borderRadius:9, padding:'8px 12px', color:'var(--text)', fontFamily:'Cairo,sans-serif', fontSize:'0.82rem', outline:'none', cursor:'pointer', direction:'rtl' };

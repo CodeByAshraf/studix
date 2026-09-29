@@ -127,7 +127,13 @@ export async function pgDeleteStudent(id) {
     credentials: 'include',
   });
   const json = await res.json().catch(() => null);
-  if (!res.ok) throw new Error(json?.error || `PG DELETE /students/${id} → ${res.status}`);
+  if (!res.ok) {
+    // M2/F3: the server's related-record 409 carries a code (STUDENT_HAS_RELATED_RECORDS),
+    // same shape as pgDeleteGroup, so the page can show the server's own message.
+    const err = new Error(json?.error || `PG DELETE /students/${id} → ${res.status}`);
+    if (json?.code) err.code = json.code;
+    throw err;
+  }
   return true;
 }
 

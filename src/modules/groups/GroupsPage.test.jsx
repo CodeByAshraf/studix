@@ -59,37 +59,52 @@ describe('GroupsPage — delete guard', () => {
     // not call pgGetHomeworks at all — left mocked (unresolved) only to assert that.
   });
 
-  // C4 Attendance migration Phase 2: the attendance delete-guard now calls
-  // pgGetAttendanceAggregate({groupBy:'group', groupId}) fresh at delete-time instead of
-  // filtering the store's global attendance array.
-  it('blocks deletion when the group has attendance history, calling pgGetAttendanceAggregate with the correct params', async () => {
-    useAppStore.setState({
-      groups: [{ id: GROUP_ID, name: 'Test Group', subject: 'رياضيات', grade: 'الأول', time: '09:00', days: [], max: 20, color: '#000' }],
-      students: [], exams: [], payments: [], admissions: [], communications: [], homeworks: [],
-    });
-    pgGetAttendanceAggregate.mockImplementation((params) =>
-      params.groupId === GROUP_ID ? Promise.resolve([{ key: GROUP_ID, total: 3, present: 2, absent: 1, late: 0 }]) : Promise.resolve([]));
+  // M2/F3 — members (active enrollments), attendance, communications and payments are checked
+  // by the SERVER inside DELETE /api/groups/:id ('groups' permission only). The page no longer
+  // makes those per-group reads, so a groups-only user (for whom they are 403) can delete, and
+  // the server's 409 (GROUP_HAS_RELATED_RECORDS) message is shown as-is.
+  const EMPTY_GROUP_STATE = {
+    groups: [{ id: GROUP_ID, name: 'Test Group', subject: 'رياضيات', grade: 'الأول', time: '09:00', days: [], max: 20, color: '#000' }],
+    students: [], exams: [], payments: [], admissions: [], communications: [], homeworks: [],
+  };
+
+  it('M2/F3: a groups-only user can delete — no per-group enrollment/attendance/communication/payment read is made (they would be 403)', async () => {
+    useAppStore.setState(EMPTY_GROUP_STATE);
+    const forbidden = () => Promise.reject(new Error('لا تملك صلاحية الوصول لهذا الإجراء.'));
+    // Only the per-group (delete-time) variants are forbidden; the page's own card-level
+    // reads (no groupId) keep resolving so the page renders as usual.
+    pgGetGroupEnrollments.mockImplementation((params) => (params?.groupId ? forbidden() : Promise.resolve([])));
+    pgGetAttendanceAggregate.mockImplementation((params) => (params?.groupId ? forbidden() : Promise.resolve([])));
+    pgGetPayments.mockImplementation((params) => (params?.groupId ? forbidden() : Promise.resolve([])));
+    pgGetCommunications.mockImplementation(forbidden);
+    pgDeleteGroup.mockResolvedValue(true);
 
     renderPage();
     await switchToListViewAndDelete();
 
-    expect(pgGetAttendanceAggregate).toHaveBeenCalledWith(expect.objectContaining({ groupBy: 'group', groupId: GROUP_ID }));
-    expect(pgDeleteGroup).not.toHaveBeenCalled();
-    expect(await screen.findByText(/سجل حضور تاريخي/)).toBeInTheDocument();
+    await waitFor(() => expect(pgDeleteGroup).toHaveBeenCalledWith(GROUP_ID));
+    await waitFor(() => expect(useAppStore.getState().groups).toHaveLength(0));
+    expect(pgGetGroupEnrollments).not.toHaveBeenCalledWith({ groupId: GROUP_ID });
+    expect(pgGetAttendanceAggregate).not.toHaveBeenCalledWith(expect.objectContaining({ groupId: GROUP_ID }));
+    expect(pgGetPayments).not.toHaveBeenCalledWith(expect.objectContaining({ groupId: GROUP_ID }));
+    expect(pgGetCommunications).not.toHaveBeenCalled();
   });
 
-  it('surfaces a clear error and does not proceed if the attendance aggregate check itself fails', async () => {
-    useAppStore.setState({
-      groups: [{ id: GROUP_ID, name: 'Test Group', subject: 'رياضيات', grade: 'الأول', time: '09:00', days: [], max: 20, color: '#000' }],
-      students: [], exams: [], payments: [], admissions: [], communications: [], homeworks: [],
-    });
-    pgGetAttendanceAggregate.mockRejectedValue(new Error('PG GET /attendance/aggregate → 500'));
+  it.each([
+    ['members (incl. an Additional enrollment)', 'لا يمكن حذف المجموعة — بها 1 طالب. انقل الطلاب أولاً.'],
+    ['attendance history', 'لا يمكن حذف المجموعة — لها 3 سجل حضور تاريخي.'],
+    ['communication history', 'لا يمكن حذف المجموعة — لها 1 سجل تواصل مرتبط.'],
+    ['payment history', 'لا يمكن حذف المجموعة — لها 1 دفعة مسجَّلة.'],
+  ])('M2/F3: %s — the server\'s 409 message is shown and the group stays', async (_label, message) => {
+    useAppStore.setState(EMPTY_GROUP_STATE);
+    pgDeleteGroup.mockRejectedValue(Object.assign(new Error(message), { code: 'GROUP_HAS_RELATED_RECORDS' }));
 
     renderPage();
     await switchToListViewAndDelete();
 
-    expect(pgDeleteGroup).not.toHaveBeenCalled();
-    expect(await screen.findByText(/PG GET \/attendance\/aggregate/)).toBeInTheDocument();
+    await waitFor(() => expect(pgDeleteGroup).toHaveBeenCalledWith(GROUP_ID));
+    expect(await screen.findByText(message)).toBeInTheDocument();
+    expect(useAppStore.getState().groups).toHaveLength(1);
   });
 
   it('blocks deletion when the group has exam history, even with zero current students', async () => {
@@ -107,26 +122,6 @@ describe('GroupsPage — delete guard', () => {
     expect(pgDeleteGroup).not.toHaveBeenCalled();
     expect(await screen.findByText(/امتحان/)).toBeInTheDocument();
     expect(useAppStore.getState().groups).toHaveLength(1);
-  });
-
-  // Group Membership unification: the student-count guard reads active enrollments, so an
-  // Additional-Group member (students.groupId points at another group) still blocks deletion.
-  it('blocks deletion when the group has an active Additional enrollment, even though no student has it as groupId', async () => {
-    useAppStore.setState({
-      groups: [{ id: GROUP_ID, name: 'Test Group', subject: 'رياضيات', grade: 'الأول', time: '09:00', days: [], max: 20, color: '#000' }],
-      students: [{ id: 's1', name: 'طالب', groupId: 'other-group', status: 'active' }],
-      exams: [], payments: [], admissions: [], communications: [], homeworks: [],
-    });
-    pgGetGroupEnrollments.mockImplementation(({ groupId } = {}) => Promise.resolve(
-      [{ id: 'e1', studentId: 's1', groupId: GROUP_ID, role: 'additional', status: 'active' }]
-        .filter((e) => !groupId || e.groupId === groupId)));
-
-    renderPage();
-    await switchToListViewAndDelete();
-
-    expect(pgGetGroupEnrollments).toHaveBeenCalledWith({ groupId: GROUP_ID });
-    expect(pgDeleteGroup).not.toHaveBeenCalled();
-    expect(await screen.findByText(/بها 1 طالب/)).toBeInTheDocument();
   });
 
   it('allows deletion to proceed to the server when there is no student, attendance, or exam history', async () => {
@@ -163,16 +158,6 @@ describe('GroupsPage — delete guard', () => {
     expect(await screen.findByText(/سجل قبول مرتبط/)).toBeInTheDocument();
   });
 
-  it('blocks deletion when the group has communication history', async () => {
-    useAppStore.setState({ ...BASE_GROUP_STATE, admissions: [], homeworks: [], payments: [] });
-    pgGetCommunications.mockResolvedValue([{ id: 'c1', groupId: GROUP_ID }]);
-    renderPage();
-    await switchToListViewAndDelete();
-    await waitFor(() => expect(pgGetCommunications).toHaveBeenCalledWith({ groupId: GROUP_ID }));
-    expect(pgDeleteGroup).not.toHaveBeenCalled();
-    expect(await screen.findByText(/سجل تواصل مرتبط/)).toBeInTheDocument();
-  });
-
   // C3 regression fix: the homework guard matches by the group's grade (Homework 2.0 records
   // are grade-targeted, groupId=null). Phase 2.1: that guard now runs on the server inside
   // DELETE /api/groups/:id ('groups' permission — see backend/src/routes/groupDelete.js and
@@ -203,15 +188,6 @@ describe('GroupsPage — delete guard', () => {
     await switchToListViewAndDelete();
     await waitFor(() => expect(pgDeleteGroup).toHaveBeenCalledWith(GROUP_ID));
     expect(pgGetHomeworks).not.toHaveBeenCalled();
-  });
-
-  it('blocks deletion when the group has payment history', async () => {
-    useAppStore.setState({ ...BASE_GROUP_STATE, admissions: [], communications: [], homeworks: [], payments: [] });
-    pgGetPayments.mockResolvedValue([{ id: 'p1', groupId: GROUP_ID }]);
-    renderPage();
-    await switchToListViewAndDelete();
-    expect(pgDeleteGroup).not.toHaveBeenCalled();
-    expect(await screen.findByText(/دفعة مسجَّلة/)).toBeInTheDocument();
   });
 });
 

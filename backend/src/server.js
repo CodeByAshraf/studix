@@ -42,6 +42,7 @@ import examGradesRouter from './routes/examGrades.js';
 import gradesRouter from './routes/grades.js';
 import homeworkDeleteRouter from './routes/homeworkDelete.js';
 import groupDeleteRouter from './routes/groupDelete.js';
+import studentDeleteRouter from './routes/studentDelete.js';
 import hwSubmissionsRouter from './routes/hwSubmissions.js';
 import hwSubmissionsScopedGetRouter from './routes/hwSubmissionsScopedGet.js';
 import homeworksScopedGetRouter from './routes/homeworksScopedGet.js';
@@ -224,6 +225,11 @@ app.use('/api/homeworks', requireAuth, requirePermission('homework'), homeworkDe
 // next() للـ CRUD العام كما هو. نفس صلاحية 'groups' التي تحرس الحذف العام نفسه — لا يتطلّب
 // صلاحية 'homework' (انظر groupDelete.js).
 app.use('/api/groups', requireAuth, requirePermission('groups'), groupDeleteRouter);
+
+// M2/F3 — same guard for DELETE /api/students/:id: the related-record checks run on the server
+// under the 'students' permission that already guards the delete (409 when anything is linked,
+// otherwise next() to the generic CRUD delete, unchanged). See studentDelete.js.
+app.use('/api/students', requireAuth, requirePermission('students'), studentDeleteRouter);
 
 // ── Phase 3B-6: استبدال حالات تسليم واجب كامل بمعاملة ذرّية واحدة ──
 // مسار منفصل عن /api/hwSubmissions العام لنفس سبب /api/exam-grades.

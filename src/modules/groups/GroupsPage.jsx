@@ -8,7 +8,7 @@ import Button               from '../../components/ui/Button';
 import { useToast }         from '../../components/Toast';
 import { useErrorHandler }  from '../../hooks/useErrorHandler';
 import { createGroup, updateGroup, getGroupStats, formatDays, GROUP_COLORS, buildGroupMembership } from '../../services/groupService';
-import { pgCreateGroup, pgUpdateGroup, pgDeleteGroup, pgGetPayments, pgGetPaymentAggregates, pgGetCommunications, pgGetAttendanceAggregate, pgGetGroupEnrollments } from '../../services/api';
+import { pgCreateGroup, pgUpdateGroup, pgDeleteGroup, pgGetPayments, pgGetPaymentAggregates, pgGetAttendanceAggregate, pgGetGroupEnrollments } from '../../services/api';
 import { normalizeCollectionForMerge } from '../../store/db.middleware';
 import { zeroFillGroupAggregate } from '../../services/paymentService';
 import { useAsyncData } from '../../hooks/useAsyncData';
@@ -204,41 +204,13 @@ export default function GroupsPage() {
   // (طلاب سابقون نُقلوا/حُذفوا)، فحذفها سيُرفَض من الخادم رغم أن فحص studentCount مرّ.
   const handleDelete = useCallback(async () => {
     const g = modal.group;
-    // Group Membership unification: members = active enrollments (fresh at delete time, same
-    // reasoning as the attendance/payments checks below), Primary and Additional both. Any
-    // student still referencing this group through students.group_id is added too — not as
-    // "membership", but because that FK (NO ACTION) makes the server reject the delete anyway.
-    let memberIds;
-    try {
-      memberIds = new Set((await pgGetGroupEnrollments({ groupId: g.id })).map((e) => e.studentId));
-    } catch (e) {
-      toast.error(e.message || 'فشل التحقّق من طلاب المجموعة');
-      closeModal();
-      return;
-    }
-    students.forEach((s) => { if (s.groupId === g.id) memberIds.add(s.id); });
-    const studentCount = memberIds.size;
+    // M2/F3: members (active enrollments + students.group_id), attendance, communications and
+    // payments are checked by the server inside DELETE /api/groups/:id (groupDelete.js,
+    // 'groups' permission only) — reading them here needed 'students'/'attendance'/'payments',
+    // and a 403 blocked every delete. Only the checks below that need no extra read remain.
+    const studentCount = students.filter((s) => s.groupId === g.id).length;
     if (studentCount > 0) {
       toast.error(`لا يمكن حذف المجموعة — بها ${studentCount} طالب. انقل الطلاب أولاً.`);
-      closeModal();
-      return;
-    }
-    // C4 Attendance migration Phase 2: بدل مصفوفة attendance الكاملة من الـ store، يُجلَب
-    // إجمالي سجلات هذه المجموعة تحديداً فقط عبر GET /api/attendance/aggregate?groupBy=
-    // group&groupId= (نفس نمط pgGetCommunications/pgGetPayments أدناه بالضبط — نداء طازج
-    // عند الحذف، لا إعادة استخدام لـ attendanceStatsByGroup المعروضة على البطاقات، لضمان
-    // فحص حقيقي وقت الحذف نفسه).
-    let attendanceCount;
-    try {
-      const rows = await pgGetAttendanceAggregate({ groupBy: 'group', groupId: g.id });
-      attendanceCount = rows[0]?.total ?? 0;
-    } catch (e) {
-      toast.error(e.message || 'فشل التحقّق من سجلات حضور المجموعة');
-      closeModal();
-      return;
-    }
-    if (attendanceCount > 0) {
-      toast.error(`لا يمكن حذف المجموعة — لها ${attendanceCount} سجل حضور تاريخي.`);
       closeModal();
       return;
     }
@@ -260,42 +232,11 @@ export default function GroupsPage() {
       closeModal();
       return;
     }
-    // Pre-Installer Audit C4: بدل مصفوفة communications الكاملة من الـ store (لم تعد
-    // تُحمَّل إقلاعياً — انظر db.middleware.js)، يُجلَب عدد سجلات تواصل هذه المجموعة
-    // تحديداً فقط عبر GET /api/communications?groupId= (نفس نمط pgGetPayments أدناه بالضبط).
-    let communicationsCount;
-    try {
-      communicationsCount = (await pgGetCommunications({ groupId: g.id })).length;
-    } catch (e) {
-      toast.error(e.message || 'فشل التحقّق من سجلات تواصل المجموعة');
-      closeModal();
-      return;
-    }
-    if (communicationsCount > 0) {
-      toast.error(`لا يمكن حذف المجموعة — لها ${communicationsCount} سجل تواصل مرتبط.`);
-      closeModal();
-      return;
-    }
     // Homework guard (C3: matched by the group's grade — Homework 2.0 targets grade, not
     // group): Phase 2.1 moved it to the server, inside DELETE /api/groups/:id itself
     // (backend/src/routes/groupDelete.js, 'groups' permission) — reading homework here needed
-    // the unrelated 'homework' permission. Its 409 (code GROUP_HAS_HOMEWORK) is shown below.
-    // Scalability Architecture Phase 4 Cutover 1: بدل مصفوفة payments الكاملة، عدد
-    // مدفوعات هذه المجموعة تحديداً يُجلَب عبر GET /api/payments?groupId= (نفس نطاق
-    // .filter(p=>p.groupId===g.id) السابق بالضبط).
-    let paymentsCount;
-    try {
-      paymentsCount = (await pgGetPayments({ groupId: g.id })).length;
-    } catch (e) {
-      toast.error(e.message || 'فشل التحقّق من مدفوعات المجموعة');
-      closeModal();
-      return;
-    }
-    if (paymentsCount > 0) {
-      toast.error(`لا يمكن حذف المجموعة — لها ${paymentsCount} دفعة مسجَّلة.`);
-      closeModal();
-      return;
-    }
+    // the unrelated 'homework' permission. Its 409 (code GROUP_HAS_HOMEWORK) is shown below,
+    // as is every M2/F3 related-record 409 (code GROUP_HAS_RELATED_RECORDS).
     await run(async () => {
       await pgDeleteGroup(g.id);
       setGroups(prev => prev.filter(x => x.id !== g.id));
@@ -303,7 +244,7 @@ export default function GroupsPage() {
         .catch((e) => toast.error(e.message || 'تعذّر تسجيل الحدث في سجل النشاط'));
       toast.info(`تم حذف "${g.name}"`);
       closeModal();
-    }, { errorMsg: (err) => (err?.code === 'GROUP_HAS_HOMEWORK' ? err.message : 'فشل حذف المجموعة') });
+    }, { errorMsg: (err) => (err?.code === 'GROUP_HAS_HOMEWORK' || err?.code === 'GROUP_HAS_RELATED_RECORDS' ? err.message : 'فشل حذف المجموعة') });
   }, [modal.group, students, exams, admissions, setGroups, run, toast, addLog, currentUser, closeModal]);
 
   const selStyle = { background:'var(--surface2)', border:'1px solid var(--border)', borderRadius:9, padding:'7px 11px', color:'var(--text)', fontFamily:'Cairo,sans-serif', fontSize:'0.82rem', outline:'none', cursor:'pointer', direction:'rtl' };

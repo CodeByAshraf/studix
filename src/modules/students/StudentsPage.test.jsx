@@ -64,68 +64,64 @@ describe('StudentsPage — delete guard', () => {
     pgGetHwSubmissions.mockResolvedValue([]);
   });
 
-  it('blocks deletion when the student has grade history, never calling pgDeleteStudent', async () => {
-    useAppStore.setState({
-      groups: [{ id: GROUP_ID, name: 'Test Group' }],
-      students: [{ id: S1, name: 'Student One', code: 'C1', groupId: GROUP_ID, status: 'active', phone: '0100' }],
-      attendance: [], admissions: [], communications: [], inventoryTxn: [], payments: [], waReportLog: [],
-    });
-    pgGetGrades.mockResolvedValue([{ id: 'gr1', examId: 'e1', studentId: S1, score: 90, absent: false }]);
+  // M2/F3 — grades, homework submissions and payments are checked by the SERVER inside
+  // DELETE /api/students/:id ('students' permission only). The page never reads them, so a
+  // students-only user (for whom those reads are 403) can delete, and a server 409 is shown.
+  const EMPTY_STATE = {
+    groups: [{ id: GROUP_ID, name: 'Test Group' }],
+    students: [{ id: S1, name: 'Student One', code: 'C1', groupId: GROUP_ID, status: 'active', phone: '0100' }],
+    attendance: [], admissions: [], communications: [], inventoryTxn: [], payments: [], waReportLog: [],
+  };
+  function serverConflict(message) {
+    const err = new Error(message);
+    err.code = 'STUDENT_HAS_RELATED_RECORDS';
+    return err;
+  }
+
+  it('M2/F3: a students-only user can delete — grades/hwSubmissions/payments are never read (those reads would be 403)', async () => {
+    useAppStore.setState(EMPTY_STATE);
+    const forbidden = new Error('لا تملك صلاحية الوصول لهذا الإجراء.');
+    pgGetGrades.mockRejectedValue(forbidden);
+    pgGetHwSubmissions.mockRejectedValue(forbidden);
+    pgGetPayments.mockRejectedValue(forbidden);
+    pgDeleteStudent.mockResolvedValue(true);
 
     renderPage();
     await openConfirmAndClick();
 
-    expect(pgGetGrades).toHaveBeenCalledWith({ studentId: S1 });
-    expect(pgDeleteStudent).not.toHaveBeenCalled();
-    expect(await screen.findByText(/درجة مسجّلة/)).toBeInTheDocument();
-    // الطالب لا يزال في الحالة المحلية
+    await waitFor(() => expect(pgDeleteStudent).toHaveBeenCalledWith(S1));
+    await waitFor(() => expect(useAppStore.getState().students).toHaveLength(0));
+    expect(pgGetGrades).not.toHaveBeenCalled();
+    expect(pgGetHwSubmissions).not.toHaveBeenCalled();
+    expect(pgGetPayments).not.toHaveBeenCalledWith({ studentId: S1 });
+  });
+
+  it.each([
+    ['grade history', 'لا يمكن حذف Student One — له 1 درجة مسجّلة. أوقفه بدلاً من حذفه (الحالة: موقوف).'],
+    ['homework submission history', 'لا يمكن حذف Student One — له 1 تسليم واجب. أوقفه بدلاً من حذفه (الحالة: موقوف).'],
+    ['payment history', 'لا يمكن حذف Student One — له 1 دفعة مسجّلة. أوقفه بدلاً من حذفه (الحالة: موقوف).'],
+  ])('M2/F3: %s — the server\'s 409 message is shown and the student stays', async (_label, message) => {
+    useAppStore.setState(EMPTY_STATE);
+    pgDeleteStudent.mockRejectedValue(serverConflict(message));
+
+    renderPage();
+    await openConfirmAndClick();
+
+    await waitFor(() => expect(pgDeleteStudent).toHaveBeenCalledWith(S1));
+    expect(await screen.findByText(message)).toBeInTheDocument();
     expect(useAppStore.getState().students).toHaveLength(1);
   });
 
-  it('surfaces a clear error and does not proceed if the grades check itself fails', async () => {
-    useAppStore.setState({
-      groups: [{ id: GROUP_ID, name: 'Test Group' }],
-      students: [{ id: S1, name: 'Student One', code: 'C1', groupId: GROUP_ID, status: 'active', phone: '0100' }],
-      attendance: [], admissions: [], communications: [], inventoryTxn: [], payments: [], waReportLog: [],
-    });
-    pgGetGrades.mockRejectedValue(new Error('PG GET /grades → 500'));
+  it('M2/F3: any other delete failure still shows the generic message, not the raw error', async () => {
+    useAppStore.setState(EMPTY_STATE);
+    pgDeleteStudent.mockRejectedValue(new Error('PG DELETE /students/s1 → 500'));
 
     renderPage();
     await openConfirmAndClick();
 
-    expect(pgDeleteStudent).not.toHaveBeenCalled();
-    expect(await screen.findByText(/PG GET \/grades/)).toBeInTheDocument();
-  });
-
-  it('blocks deletion when the student has homework submission history via pgGetHwSubmissions', async () => {
-    useAppStore.setState({
-      groups: [{ id: GROUP_ID, name: 'Test Group' }],
-      students: [{ id: S1, name: 'Student One', code: 'C1', groupId: GROUP_ID, status: 'active', phone: '0100' }],
-      attendance: [], admissions: [], communications: [], inventoryTxn: [], payments: [], waReportLog: [],
-    });
-    pgGetHwSubmissions.mockResolvedValue([{ id: 'h1', studentId: S1 }]);
-
-    renderPage();
-    await openConfirmAndClick();
-
-    expect(await screen.findByText(/تسليم واجب/)).toBeInTheDocument();
-    expect(pgGetHwSubmissions).toHaveBeenCalledWith({ studentId: S1 });
-    expect(pgDeleteStudent).not.toHaveBeenCalled();
-  });
-
-  it('surfaces a clear error and does not proceed if the hwSubmissions check itself fails', async () => {
-    useAppStore.setState({
-      groups: [{ id: GROUP_ID, name: 'Test Group' }],
-      students: [{ id: S1, name: 'Student One', code: 'C1', groupId: GROUP_ID, status: 'active', phone: '0100' }],
-      attendance: [], admissions: [], communications: [], inventoryTxn: [], payments: [], waReportLog: [],
-    });
-    pgGetHwSubmissions.mockRejectedValue(new Error('PG GET /hwSubmissions → 500'));
-
-    renderPage();
-    await openConfirmAndClick();
-
-    expect(pgDeleteStudent).not.toHaveBeenCalled();
-    expect(await screen.findByText(/PG GET \/hwSubmissions/)).toBeInTheDocument();
+    expect(await screen.findByText('فشل حذف الطالب')).toBeInTheDocument();
+    expect(screen.queryByText(/PG DELETE/)).toBeNull();
+    expect(useAppStore.getState().students).toHaveLength(1);
   });
 
   it('allows deletion to proceed to the server when there is no attendance, grade, or homework-submission history', async () => {
@@ -186,15 +182,6 @@ describe('StudentsPage — delete guard', () => {
     await openConfirmAndClick();
     expect(pgDeleteStudent).not.toHaveBeenCalled();
     expect(await screen.findByText(/حركة مخزون/)).toBeInTheDocument();
-  });
-
-  it('blocks deletion when the student has payment history', async () => {
-    useAppStore.setState({ ...BASE_STATE, admissions: [], communications: [], hwSubmissions: [], inventoryTxn: [], payments: [], waReportLog: [] });
-    pgGetPayments.mockResolvedValue([{ id: 'p1', studentId: S1 }]);
-    renderPage();
-    await openConfirmAndClick();
-    expect(pgDeleteStudent).not.toHaveBeenCalled();
-    expect(await screen.findByText(/دفعة مسجّلة/)).toBeInTheDocument();
   });
 
   it('blocks deletion when the student has WhatsApp report log history', async () => {
