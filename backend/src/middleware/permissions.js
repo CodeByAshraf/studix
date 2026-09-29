@@ -54,6 +54,21 @@ export function requirePermission(pageId) {
   });
 }
 
+// requireAnyPermission(...pageIds) — same checks and responses as requirePermission, but
+// passes when the user holds at least one of the listed page permissions. For narrow,
+// read-only lookups several features legitimately need (e.g. cashbox options, M2/F1).
+export function requireAnyPermission(...pageIds) {
+  return asyncHandler(async function anyPermissionGuard(req, res, next) {
+    const effective = await resolveSessionPermissions(req, res);
+    if (!effective) return;
+    if (!pageIds.some((pageId) => effective.includes(pageId))) {
+      return res.status(403).json({ ok: false, error: 'لا تملك صلاحية الوصول لهذا الإجراء.' });
+    }
+
+    next();
+  });
+}
+
 // requireActiveSession — every check requirePermission makes (logged in, still active,
 // auth versions unchanged since login, role resolvable), minus the page check. For actions
 // any logged-in user may take for themselves, e.g. writing their own audit entry (M2/F2).

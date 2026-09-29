@@ -24,6 +24,7 @@ import {
   pgCreateAdmissionPayment, pgCancelAdmissionWithRefund, pgGetAdmissionPayments,
 } from '../../services/api';
 import { useAsyncData } from '../../hooks/useAsyncData';
+import { useCashboxOptions } from '../../hooks/useCashboxOptions';
 import { normalizeParentPhone } from '../communication/parentService';
 import { getAdmissionTreasuryTotals } from '../../services/treasuryService';
 import { openAdmissionReport } from './buildAdmissionReport';
@@ -139,7 +140,8 @@ export default function AdmissionsPage() {
   // للربط بالمدفوعات الحقيقية والخزنة والمذكرات
   const setTreasuryTxn = useAppStore((s) => s.setTreasuryTxn);
   const treasuryTxn    = useAppStore((s) => s.treasuryTxn);
-  const cashboxes      = useAppStore((s) => s.cashboxes);
+  // M2/F1: deposit cashbox picker from GET /api/cashboxes/options (no Treasury access needed).
+  const { activeCashboxes: cashboxes } = useCashboxOptions();
   const realMaterials  = useAppStore((s) => s.invMaterials);
   const centerProfile  = useAppStore((s) => s.centerProfile);
   // سجل القبول الجاري تأكيد حجزه (يفتح مودال اختيار المجموعة)

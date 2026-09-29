@@ -290,6 +290,17 @@ function normalizeCashboxResponse(data) {
   };
 }
 
+// pgGetCashboxOptions: GET /api/cashboxes/options — { id, name, active } only, readable with
+// any of payments/admissions/materials/treasury (M2/F1). The source for the payment-flow
+// cashbox pickers, which must not depend on the Treasury-only cashboxes collection.
+export async function pgGetCashboxOptions() {
+  const res = await fetch(`${PG_API_BASE}/api/cashboxes/options`, { credentials: 'include' });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG GET /cashboxes/options → ${res.status}`);
+  if (!Array.isArray(json?.data)) throw new Error('PG GET /cashboxes/options → استجابة غير صالحة (data ليست مصفوفة)');
+  return json.data;
+}
+
 // pgCreateCashbox: POST /api/cashboxes
 export async function pgCreateCashbox(data) {
   const res = await fetch(`${PG_API_BASE}/api/cashboxes`, {

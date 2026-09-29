@@ -56,6 +56,7 @@ import studentCreateRouter from './routes/studentCreate.js';
 import treasuryTxnRouter from './routes/treasuryTxn.js';
 import waReportLogRouter from './routes/waReportLog.js';
 import cashboxBalanceRouter from './routes/cashboxBalance.js';
+import cashboxOptionsRouter, { CASHBOX_OPTION_PERMISSIONS } from './routes/cashboxOptions.js';
 import paymentsRouter from './routes/payments.js';
 import admissionPaymentsRouter from './routes/admissionPayments.js';
 import admissionCancellationRouter from './routes/admissionCancellation.js';
@@ -71,7 +72,7 @@ import { COLLECTION_MODELS } from './routes/collections.js';
 import { CRUD_POLICIES } from './routes/crudPolicies.js';
 import { notFound, errorHandler } from './middleware/errorHandler.js';
 import { requireAuth, requireRole } from './middleware/auth.js';
-import { requirePermission } from './middleware/permissions.js';
+import { requirePermission, requireAnyPermission } from './middleware/permissions.js';
 import { requireActivation } from './middleware/activation.js';
 import { prisma, checkDbConnection } from './prisma.js';
 import { checkMigrationsUpToDate } from './db/migrationRunner.js';
@@ -299,6 +300,12 @@ app.use('/api/admissions', requireAuth, requirePermission('admissions'), admissi
 // لا يزال مفعَّلاً هناك لـ GET/PUT). نفس حراسة students الحالية (requireAuth +
 // requirePermission('students')).
 app.use('/api/students', requireAuth, requirePermission('students'), studentCreateRouter);
+
+// ── M2/F1: GET /api/cashboxes/options — id/name/active only, for the payment-flow cashbox
+// pickers (payments, admission deposits, material payments). Mounted BEFORE the 'treasury'-
+// guarded /api/cashboxes mounts below so this one path is reachable without Treasury access;
+// any non-GET request here falls through to those mounts, unchanged. ──
+app.use('/api/cashboxes/options', requireAuth, requireAnyPermission(...CASHBOX_OPTION_PERMISSIONS), cashboxOptionsRouter);
 
 // ── Phase 3B-14A: منع DELETE عن cashboxes فقط، بلا التأثير على أي فعل آخر ──
 // قرار تفتيش/قرار Phase 3B-14A الصريح: لا واجهة مستخدم فعلية تحذف خزنة اليوم

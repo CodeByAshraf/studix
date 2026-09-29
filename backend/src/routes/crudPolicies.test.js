@@ -172,6 +172,22 @@ describe('server wiring', () => {
     expect(server).toMatch(/app\.use\('\/api\/activityLogs', requireAuth, activityLogsGuard, activityLogsRouter\);/);
   });
 
+  it('M2/F1: /api/cashboxes/options is mounted, with its any-of guard, BEFORE every treasury-guarded /api/cashboxes mount', () => {
+    const optionsMount = "app.use('/api/cashboxes/options', requireAuth, requireAnyPermission(...CASHBOX_OPTION_PERMISSIONS), cashboxOptionsRouter);";
+    const optionsAt = server.indexOf(optionsMount);
+    expect(optionsAt).toBeGreaterThan(-1);
+    const treasuryMounts = [...server.matchAll(/app\.use\('\/api\/cashboxes', requireAuth, requirePermission\('treasury'\)/g)];
+    expect(treasuryMounts.length).toBe(2);
+    for (const m of treasuryMounts) expect(m.index).toBeGreaterThan(optionsAt);
+    // the generic CRUD loop (which also serves /api/cashboxes) comes after it too
+    expect(server.indexOf('for (const [apiPath, modelName] of Object.entries(COLLECTION_MODELS))')).toBeGreaterThan(optionsAt);
+  });
+
+  it('M2/F1: the options guard allows exactly payments/admissions/materials/treasury', async () => {
+    const { CASHBOX_OPTION_PERMISSIONS } = await import('./cashboxOptions.js');
+    expect([...CASHBOX_OPTION_PERMISSIONS].sort()).toEqual(['admissions', 'materials', 'payments', 'treasury']);
+  });
+
   it('payments/admissionPayments stay read-only on the generic router', () => {
     expect(server).toMatch(/const READ_ONLY_COLLECTIONS = new Set\(\['payments', 'admissionPayments'\]\);/);
   });

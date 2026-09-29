@@ -55,6 +55,8 @@ beforeEach(() => {
     // AdmissionsPage.jsx's single page-mount fetch of admissionPayments (Phase 4) — no
     // payments needed for these activation tests, so an empty array is sufficient.
     if (u.includes('/api/admissionPayments') && method === 'GET') return Promise.resolve(okJson([]));
+    // M2/F1 — the page-mount cashbox options fetch (deposit picker); unused by activation.
+    if (u.endsWith('/api/cashboxes/options') && method === 'GET') return Promise.resolve(okJson([]));
     if (u.includes('/api/admissions/') && u.endsWith('/activate') && method === 'PUT') {
       return Promise.resolve(putActivateResponder(opts.body ? JSON.parse(opts.body) : {}));
     }
@@ -154,9 +156,10 @@ describe('AdmissionsPage — attendFirstLesson activation (Phase 3B-13B Stage ii
     expect(useAppStore.getState().admissions[0].linkedStudentId).toBe(SAVED_STUDENT.id);
     expect(useAppStore.getState().admissionSystemLog).toEqual(NORMALIZED_SYSTEM_LOG_ENTRIES);
 
-    // 3 نداءات شبكة فقط: الجلب المفرد لدفعات القبول عند تحميل الصفحة (Phase 4)، ربط ولي
-    // الأمر (Issue 3)، ثم التفعيل الذرّي — لا 4 نداءات منفصلة كما في Stage (i)
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    // 4 نداءات شبكة فقط: جلبا تحميل الصفحة (دفعات القبول Phase 4 + خيارات الخزن M2/F1)، ربط
+    // ولي الأمر (Issue 3)، ثم التفعيل الذرّي — التفعيل نفسه نداء واحد، لا 4 نداءات كما في Stage (i)
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(activateCalls()).toHaveLength(1);
   });
 
   it('activation failure: leaves students, admissions, and admissionSystemLog completely untouched, and shows the real server error', async () => {

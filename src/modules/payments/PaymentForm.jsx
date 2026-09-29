@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useAppStore } from '../../store/app.store';
 import useForm     from '../../hooks/useForm';
 import { useAsyncData } from '../../hooks/useAsyncData';
+import { useCashboxOptions } from '../../hooks/useCashboxOptions';
 import { pgGetPayments } from '../../services/api';
 import { validatePayment, PAYMENT_METHODS, PAYMENT_TYPES, MONTHS_AR, getStudentFee, getNetRevenue } from '../../services/paymentService';
 import Button      from '../../components/ui/Button';
@@ -63,7 +64,6 @@ export default function PaymentForm({ onSubmit, onCancel, loading, prefilledStud
   const groups               = useAppStore((s) => s.groups);
   const students             = useAppStore((s) => s.students);
   const materials            = useAppStore((s) => s.invMaterials);
-  const cashboxes            = useAppStore((s) => s.cashboxes);
   const treasuryTxn          = useAppStore((s) => s.treasuryTxn);
   const toast                = useToast();
   const [confirmMaterial, setConfirmMaterial] = useState(false);
@@ -72,7 +72,8 @@ export default function PaymentForm({ onSubmit, onCancel, loading, prefilledStud
   // Phase 3B-14C (قرار 3 صريح): لا خزنة افتراضية ضمنية بأي شكل — الحقل يبدأ فارغاً
   // دائماً، حتى لو كانت هناك خزنة نشطة واحدة فقط؛ المستخدم يجب أن يختارها صراحةً بنفسه،
   // والتحقّق (paymentSchema.cashboxId) يمنع الإرسال بلا اختيار فعلي.
-  const activeCashboxes = useMemo(() => cashboxes.filter(cb => cb.active), [cashboxes]);
+  // M2/F1: from GET /api/cashboxes/options (payments may record without Treasury access).
+  const { activeCashboxes, loading: cashboxesLoading, error: cashboxesError } = useCashboxOptions();
   // نفس الفلتر المُستخدَم سابقاً في خيارات <select> الطالب — يبقى في هذا المكوّن (لا داخل
   // StudentSearchSelect العام) لأن أي مستهلك مستقبلي آخر قد يحتاج طلاباً غير نشطين أيضاً.
   const activeStudents = useMemo(() => students.filter(s => s.status === 'active'), [students]);
@@ -164,9 +165,11 @@ export default function PaymentForm({ onSubmit, onCancel, loading, prefilledStud
       })()}
 
       {/* لا خزنة نشطة إطلاقاً — فشل واضح، لا افتراض صامت (قرار Phase 3B-14C الصريح) */}
-      {activeCashboxes.length === 0 && (
+      {!cashboxesLoading && activeCashboxes.length === 0 && (
         <div style={{ padding:'11px 14px', marginBottom:14, background:'rgba(239,68,68,.1)', border:'1px solid rgba(239,68,68,.3)', borderRadius:9, fontSize:'0.82rem', color:'#dc2626', display:'flex', alignItems:'center', gap:8 }}>
-          ❌ لا توجد خزنة نشطة لتسجيل الدفعة. أنشئ خزنة من صفحة الخزنة أولاً.
+          {cashboxesError
+            ? `❌ تعذّر تحميل قائمة الخزن: ${cashboxesError.message}`
+            : '❌ لا توجد خزنة نشطة لتسجيل الدفعة. أنشئ خزنة من صفحة الخزنة أولاً.'}
         </div>
       )}
 

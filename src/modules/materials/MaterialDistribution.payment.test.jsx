@@ -15,9 +15,9 @@ import { ToastProvider } from '../../components/Toast';
 
 vi.mock('../../services/api', async () => {
   const actual = await vi.importActual('../../services/api');
-  return { ...actual, pgSaveMaterialDistribution: vi.fn(), pgGetCollection: vi.fn(), pgConfirmMaterialPayment: vi.fn() };
+  return { ...actual, pgSaveMaterialDistribution: vi.fn(), pgGetCollection: vi.fn(), pgConfirmMaterialPayment: vi.fn(), pgGetCashboxOptions: vi.fn() };
 });
-import { pgSaveMaterialDistribution, pgGetCollection, pgConfirmMaterialPayment } from '../../services/api';
+import { pgSaveMaterialDistribution, pgGetCollection, pgConfirmMaterialPayment, pgGetCashboxOptions } from '../../services/api';
 
 const MATERIAL = { id: '7', name: 'مذكرة الرياضيات', subject: 'رياضيات', teacher: '', grade: 'الصف الأول الثانوي', price: 200 };
 
@@ -36,7 +36,9 @@ function seedStore(extra = {}) {
     inventoryTxn: [],
     payments: [],
     treasuryTxn: [],
-    cashboxes: [{ id: 'cb1', name: 'الخزنة الرئيسية', active: true }],
+    // M2/F1: the Treasury cashboxes collection is never loaded for a materials user — the
+    // picker comes from GET /api/cashboxes/options (pgGetCashboxOptions, mocked below).
+    cashboxes: [],
     ...extra,
   });
 }
@@ -72,6 +74,7 @@ describe('MaterialDistribution — booklet payment confirmation dialog', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     pgGetCollection.mockResolvedValue([]);
+    pgGetCashboxOptions.mockResolvedValue([{ id: 'cb1', name: 'الخزنة الرئيسية', active: true }, { id: 'cb-off', name: 'خزنة موقوفة', active: false }]);
     seedStore();
   });
 
@@ -89,6 +92,10 @@ describe('MaterialDistribution — booklet payment confirmation dialog', () => {
     const confirmBtn = screen.getByText('💰 تأكيد الدفع');
     expect(confirmBtn).toBeDisabled(); // لا خزنة مختارة بعد
 
+    await waitFor(() => expect(document.querySelector('option[value="cb1"]')).not.toBeNull()); // options load async (M2/F1)
+    // M2/F1: the picker comes from pgGetCashboxOptions (no Treasury data), active cashboxes only
+    expect(pgGetCashboxOptions).toHaveBeenCalled();
+    expect(document.querySelector('option[value="cb-off"]')).toBeNull();
     fireEvent.change(screen.getByRole('combobox'), { target: { value: 'cb1' } });
     await waitFor(() => expect(confirmBtn).not.toBeDisabled());
     fireEvent.click(confirmBtn);
@@ -116,6 +123,7 @@ describe('MaterialDistribution — booklet payment confirmation dialog', () => {
     expect(amountInput).not.toBeDisabled();
 
     fireEvent.change(amountInput, { target: { value: '100' } });
+    await waitFor(() => expect(document.querySelector('option[value="cb1"]')).not.toBeNull()); // options load async (M2/F1)
     fireEvent.change(screen.getByRole('combobox'), { target: { value: 'cb1' } });
     fireEvent.click(screen.getByText('💰 تأكيد الدفع'));
 
@@ -148,6 +156,7 @@ describe('MaterialDistribution — booklet payment confirmation dialog', () => {
     renderPage();
     fireEvent.click(screen.getByText('مدفوع'));
     await screen.findByText('تأكيد دفع مذكرة');
+    await waitFor(() => expect(document.querySelector('option[value="cb1"]')).not.toBeNull()); // options load async (M2/F1)
     fireEvent.change(screen.getByRole('combobox'), { target: { value: 'cb1' } });
 
     const confirmBtn = screen.getByText('💰 تأكيد الدفع');
@@ -170,6 +179,7 @@ describe('MaterialDistribution — booklet payment confirmation dialog', () => {
     renderPage();
     fireEvent.click(screen.getByText('مدفوع'));
     await screen.findByText('تأكيد دفع مذكرة');
+    await waitFor(() => expect(document.querySelector('option[value="cb1"]')).not.toBeNull()); // options load async (M2/F1)
     fireEvent.change(screen.getByRole('combobox'), { target: { value: 'cb1' } });
     fireEvent.click(screen.getByText('💰 تأكيد الدفع'));
 
@@ -191,6 +201,7 @@ describe('MaterialDistribution — booklet payment confirmation dialog', () => {
     renderPage();
     fireEvent.click(screen.getByText('مدفوع'));
     await screen.findByText('تأكيد دفع مذكرة');
+    await waitFor(() => expect(document.querySelector('option[value="cb1"]')).not.toBeNull()); // options load async (M2/F1)
     fireEvent.change(screen.getByRole('combobox'), { target: { value: 'cb1' } });
     fireEvent.click(screen.getByText('💰 تأكيد الدفع'));
     await screen.findByText(/انقطاع مؤقت/);
@@ -215,6 +226,7 @@ describe('MaterialDistribution — treasury/payment local state sync (Financial 
   beforeEach(() => {
     vi.clearAllMocks();
     pgGetCollection.mockResolvedValue([]);
+    pgGetCashboxOptions.mockResolvedValue([{ id: 'cb1', name: 'الخزنة الرئيسية', active: true }, { id: 'cb-off', name: 'خزنة موقوفة', active: false }]);
     seedStore();
   });
 
@@ -225,6 +237,7 @@ describe('MaterialDistribution — treasury/payment local state sync (Financial 
     renderPage();
     fireEvent.click(screen.getByText('مدفوع'));
     await screen.findByText('تأكيد دفع مذكرة');
+    await waitFor(() => expect(document.querySelector('option[value="cb1"]')).not.toBeNull()); // options load async (M2/F1)
     fireEvent.change(screen.getByRole('combobox'), { target: { value: 'cb1' } });
     fireEvent.click(screen.getByText('💰 تأكيد الدفع'));
 
@@ -241,6 +254,7 @@ describe('MaterialDistribution — treasury/payment local state sync (Financial 
     renderPage();
     fireEvent.click(screen.getByText('مدفوع'));
     await screen.findByText('تأكيد دفع مذكرة');
+    await waitFor(() => expect(document.querySelector('option[value="cb1"]')).not.toBeNull()); // options load async (M2/F1)
     fireEvent.change(screen.getByRole('combobox'), { target: { value: 'cb1' } });
     fireEvent.click(screen.getByText('💰 تأكيد الدفع'));
 
@@ -259,6 +273,7 @@ describe('MaterialDistribution — treasury/payment local state sync (Financial 
     renderPage();
     fireEvent.click(screen.getByText('مدفوع'));
     await screen.findByText('تأكيد دفع مذكرة');
+    await waitFor(() => expect(document.querySelector('option[value="cb1"]')).not.toBeNull()); // options load async (M2/F1)
     fireEvent.change(screen.getByRole('combobox'), { target: { value: 'cb1' } });
     fireEvent.click(screen.getByText('💰 تأكيد الدفع'));
 

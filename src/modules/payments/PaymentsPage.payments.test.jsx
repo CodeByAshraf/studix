@@ -15,6 +15,7 @@ import { ToastProvider } from '../../components/Toast';
 let fetchMock;
 let postPaymentResponder;   // POST /api/payments
 let refundResponder;        // POST /api/payments/:id/refund
+let serverCashboxes = [];   // GET /api/cashboxes/options (M2/F1) — served as { id, name, active }
 
 function okJson(data, status = 200) {
   return { ok: true, status, json: async () => ({ ok: true, data }) };
@@ -58,6 +59,9 @@ beforeEach(() => {
     const u = String(url);
     const method = opts.method || 'GET';
     const body = opts.body ? JSON.parse(opts.body) : {};
+    if (u.endsWith('/api/cashboxes/options') && method === 'GET') {
+      return Promise.resolve(okJson(serverCashboxes.map(({ id, name, active }) => ({ id, name, active }))));
+    }
     if (u.endsWith('/api/payments') && method === 'POST') return Promise.resolve(postPaymentResponder(body));
     if (u.includes('/api/payments/') && u.endsWith('/refund') && method === 'POST') {
       const id = decodeURIComponent(u.split('/api/payments/')[1].replace('/refund', ''));
@@ -154,9 +158,13 @@ function renderPage() {
     </AuthProvider>
   );
 }
-function seedStore(extra = {}) {
+// M2/F1: `cashboxes` are the SERVER's cashboxes, served by GET /api/cashboxes/options. The
+// store's Treasury cashboxes collection stays empty — a payments-only user never loads it —
+// so every flow here also proves the picker no longer depends on Treasury data.
+function seedStore({ cashboxes = [CB1], ...extra } = {}) {
+  serverCashboxes = cashboxes;
   useAppStore.setState({
-    cashboxes: [CB1], groups: [GROUP1], students: [STUDENT1],
+    cashboxes: [], groups: [GROUP1], students: [STUDENT1],
     payments: [], treasuryTxn: [], ...extra,
   });
 }
@@ -181,6 +189,8 @@ async function fillAddForm({ cashboxId = 'cb1', amount = '300' } = {}) {
   // placeholder المبلغ ديناميكي (رسوم الطالب/المجموعة) — GROUP1.price=300 هنا
   fireEvent.change(screen.getByPlaceholderText('300'), { target: { value: amount } });
   if (cashboxId) {
+    // M2/F1: cashbox options now arrive asynchronously from GET /api/cashboxes/options.
+    await waitFor(() => expect(document.querySelector(`select[name="cashboxId"] option[value="${cashboxId}"]`)).not.toBeNull());
     fireEvent.change(screen.getAllByRole('combobox').find(sel => sel.name === 'cashboxId'), { target: { value: cashboxId } });
   }
   // Phase 4 Cutover 1: زر التسجيل معطَّل حتى يكتمل جلب سجل مدفوعات الطالب (GET
@@ -314,6 +324,18 @@ describe('PaymentsPage — payments write flows (Phase 3B-14C)', () => {
     // زر التسجيل معطّل بلا خزنة نشطة — لا محاولة إرسال ممكنة إطلاقاً
     expect(screen.getByText('💰 تسجيل الدفعة').closest('button')).toBeDisabled();
     expect(postPaymentCalls()).toHaveLength(0);
+  });
+
+  it('M2/F1: the cashbox picker comes from GET /api/cashboxes/options (no Treasury data needed) and lists only active cashboxes', async () => {
+    seedStore({ cashboxes: [CB1, { ...CB1, id: 'cb-off', name: 'خزنة موقوفة', active: false }] });
+    expect(useAppStore.getState().cashboxes).toEqual([]); // the Treasury collection is never loaded
+    renderPage();
+    fireEvent.click(screen.getByText('+ تسجيل دفعة'));
+
+    await waitFor(() => expect(document.querySelector('select[name="cashboxId"] option[value="cb1"]')).not.toBeNull());
+    expect(document.querySelector('select[name="cashboxId"] option[value="cb-off"]')).toBeNull();
+    expect(callsTo((u, o) => u.endsWith('/api/cashboxes/options') && (o?.method || 'GET') === 'GET')).toHaveLength(1);
+    expect(callsTo((u) => /\/api\/cashboxes(\?|$)/.test(u))).toHaveLength(0); // never the Treasury collection
   });
 
   it('full refund (replaces old delete-payment): single POST to /:id/refund with a reason, no cashboxId sent (server always uses the original payment\'s own cashbox), adopts only the new refund treasuryTxn, original payment object stays byte-for-byte unchanged (immutability)', async () => {

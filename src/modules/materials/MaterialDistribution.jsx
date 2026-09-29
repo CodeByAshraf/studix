@@ -2,6 +2,7 @@
 import { useState, useMemo, useCallback } from 'react';
 import { useAppStore } from '../../store/app.store';
 import { useToast } from '../../components/Toast';
+import { useCashboxOptions } from '../../hooks/useCashboxOptions';
 import Button       from '../../components/ui/Button';
 import { PAY_STATUS, deriveMatDist } from '../../services/materialService';
 import { pgSaveMaterialDistribution, pgGetCollection, pgConfirmMaterialPayment } from '../../services/api';
@@ -154,7 +155,8 @@ export default function MaterialDistribution({ material, onClose }) {
   const setPayments          = useAppStore((s) => s.setPayments);
   const setTreasuryTxn       = useAppStore((s) => s.setTreasuryTxn);
   const students             = useAppStore((s) => s.students);
-  const cashboxes            = useAppStore((s) => s.cashboxes);
+  // M2/F1: payment cashbox picker from GET /api/cashboxes/options (no Treasury access needed).
+  const { activeCashboxes: cashboxes } = useCashboxOptions();
   // matDist مُشتَق من inventoryTxn — لا حالة مستقلة بعد الآن.
   const matDist = useMemo(() => deriveMatDist(inventoryTxn), [inventoryTxn]);
   const toast = useToast();

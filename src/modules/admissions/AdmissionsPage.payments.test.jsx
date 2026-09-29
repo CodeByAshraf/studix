@@ -16,6 +16,7 @@ let fetchMock;
 let postPaymentResponder;   // POST /api/admissionPayments
 let cancelRefundResponder;  // PUT /api/admissions/:id/cancel-with-refund
 let getAdmissionPaymentsResponse; // GET /api/admissionPayments — page-mount fetch (Phase 4)
+let serverCashboxes = [];   // GET /api/cashboxes/options — page-mount fetch (M2/F1), as { id, name, active }
 
 function okJson(data, status = 200) {
   return { ok: true, status, json: async () => ({ ok: true, data }) };
@@ -69,6 +70,9 @@ beforeEach(() => {
     const method = opts.method || 'GET';
     const body = opts.body ? JSON.parse(opts.body) : {};
     if (u.includes('/api/admissionPayments') && method === 'GET') return Promise.resolve(okJson(getAdmissionPaymentsResponse));
+    if (u.endsWith('/api/cashboxes/options') && method === 'GET') {
+      return Promise.resolve(okJson(serverCashboxes.map(({ id, name, active }) => ({ id, name, active }))));
+    }
     if (u.endsWith('/api/admissionPayments') && method === 'POST') return Promise.resolve(postPaymentResponder(body));
     if (u.includes('/api/admissions/') && u.endsWith('/cancel-with-refund') && method === 'PUT') {
       return Promise.resolve(cancelRefundResponder(body));
@@ -88,18 +92,26 @@ function renderPage() {
     </AuthProvider>
   );
 }
-function seedStore(extra = {}) {
+// M2/F1: `cashboxes` are the SERVER's cashboxes, served by GET /api/cashboxes/options; the
+// store's Treasury cashboxes collection stays empty (an admissions-only user never loads it).
+function seedStore({ cashboxes = [CB1], ...extra } = {}) {
   // GET /api/admissionPayments (page-mount fetch) يجب أن يعيد نفس المجموعة المزروعة هنا —
   // AdmissionsPage.jsx يستبدل admissionPayments في الـ store بنتيجة هذا الجلب فور نجاحه.
   if (extra.admissionPayments) getAdmissionPaymentsResponse = extra.admissionPayments;
+  serverCashboxes = cashboxes;
   useAppStore.setState({
     admissions: [ADMISSION], admissionFollowups: [], admissionSystemLog: [], admissionPayments: [],
-    groups: [GROUP], students: [], invMaterials: [], treasuryTxn: [], cashboxes: [CB1],
+    groups: [GROUP], students: [], invMaterials: [], treasuryTxn: [], cashboxes: [],
     ...extra,
   });
 }
 function callsTo(matcher) {
   return fetchMock.mock.calls.filter(([url, opts]) => matcher(String(url), opts));
+}
+const cashboxOptionsCalls = () => callsTo((u, o) => u.endsWith('/api/cashboxes/options') && (o?.method || 'GET') === 'GET');
+// The picker fills asynchronously once GET /api/cashboxes/options resolves.
+async function waitForCashboxOption(id) {
+  await waitFor(() => expect(document.querySelector(`option[value="${id}"]`)).not.toBeNull());
 }
 const postPaymentCalls = () => callsTo((u, o) => u.endsWith('/api/admissionPayments') && o?.method === 'POST');
 const cancelRefundCalls = () => callsTo((u, o) => u.includes('/api/admissions/') && u.endsWith('/cancel-with-refund') && o?.method === 'PUT');
@@ -117,6 +129,7 @@ describe('AdmissionsPage — admission payment creation (Phase 3B-14D)', () => {
     seedStore();
     renderPage();
     openPaymentModal();
+    await waitForCashboxOption('cb1');
     const selects = screen.getAllByRole('combobox');
     fireEvent.change(selects[selects.length - 1], { target: { value: 'cb1' } }); // cashbox select (last one)
     fireEvent.change(screen.getByPlaceholderText('200'), { target: { value: '200' } });
@@ -145,8 +158,10 @@ describe('AdmissionsPage — admission payment creation (Phase 3B-14D)', () => {
     expect(useAppStore.getState().treasuryTxn[0].refType).toBe('admissionPayment');
     expect(useAppStore.getState().admissionSystemLog).toHaveLength(1);
     expect(useAppStore.getState().admissionSystemLog[0].type).toBe('paymentReceived');
-    // نداءا شبكة فقط: الجلب المفرد لدفعات القبول عند تحميل الصفحة (Phase 4) + إنشاء الدفعة
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // 3 network calls only: the page-mount fetches of admission payments (Phase 4) and cashbox
+    // options (M2/F1), plus the payment creation itself
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(cashboxOptionsCalls()).toHaveLength(1);
   });
 
   it('creation failure: leaves admissionPayments and treasuryTxn completely untouched', async () => {
@@ -155,6 +170,7 @@ describe('AdmissionsPage — admission payment creation (Phase 3B-14D)', () => {
     seedStore();
     renderPage();
     openPaymentModal();
+    await waitForCashboxOption('cb1');
     const selects = screen.getAllByRole('combobox');
     fireEvent.change(selects[selects.length - 1], { target: { value: 'cb1' } });
     fireEvent.change(screen.getByPlaceholderText('200'), { target: { value: '200' } });
@@ -178,6 +194,7 @@ describe('AdmissionsPage — admission payment creation (Phase 3B-14D)', () => {
     seedStore();
     renderPage();
     openPaymentModal();
+    await waitForCashboxOption('cb1');
     const selects = screen.getAllByRole('combobox');
     fireEvent.change(selects[selects.length - 1], { target: { value: 'cb1' } });
     fireEvent.change(screen.getByPlaceholderText('200'), { target: { value: '200' } });
@@ -197,7 +214,11 @@ describe('AdmissionsPage — admission payment creation (Phase 3B-14D)', () => {
     renderPage();
     openPaymentModal();
 
+    // after the options have actually loaded: the inactive cashbox is not offered at all
+    await waitFor(() => expect(cashboxOptionsCalls()).toHaveLength(1));
+    await waitFor(() => expect(document.querySelector('option[value="cb1"]')).toBeNull());
     expect(screen.getByText('حفظ الدفعة').closest('button')).toBeDisabled();
+    fireEvent.click(screen.getByText('حفظ الدفعة'));
     expect(postPaymentCalls()).toHaveLength(0);
   });
 
@@ -214,6 +235,7 @@ describe('AdmissionsPage — admission payment creation (Phase 3B-14D)', () => {
     seedStore();
     renderPage();
     openPaymentModal();
+    await waitForCashboxOption('cb1');
     const selects = screen.getAllByRole('combobox');
     fireEvent.change(selects[selects.length - 1], { target: { value: 'cb1' } });
     fireEvent.change(screen.getByPlaceholderText('200'), { target: { value: '200' } });
@@ -285,8 +307,10 @@ describe('AdmissionsPage — cancel-with-refund (Phase 3B-14D, ONE atomic transa
     expect(useAppStore.getState().admissionSystemLog).toHaveLength(2);
     // الدفعة الأصلية لا تتغيّر أبداً (immutable)
     expect(useAppStore.getState().admissionPayments).toEqual([EXISTING_PAYMENT]);
-    // نداءا شبكة فقط: الجلب المفرد لدفعات القبول عند تحميل الصفحة (Phase 4) + إلغاء الحجز
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // 3 network calls only: the page-mount fetches of admission payments (Phase 4) and cashbox
+    // options (M2/F1), plus the cancellation itself
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(cashboxOptionsCalls()).toHaveLength(1);
   });
 
   it('cancel-with-refund failure (e.g. already cancelled): leaves admission, payments, and treasuryTxn completely untouched', async () => {
