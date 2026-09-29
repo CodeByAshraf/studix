@@ -283,6 +283,15 @@ const router = Router();
 // attendanceEligibility.js, reused as-is). This is the roster SessionMarking.jsx and the
 // print-report flow build their student list from, replacing a plain students.groupId
 // filter with no date/day awareness.
+//
+// M2 (Attendance roster) — each entry is now { id, name, code }: exactly what the marking UI
+// displays, so an 'attendance'-only user (who cannot read the students collection) gets a
+// usable roster. Nothing else about the student is returned (no phone, parent, status,
+// group or financial data). The eligible set is unchanged (same attendanceEligibility.js
+// call). ?active=true additionally keeps only students whose own status is 'active' — the
+// filter SessionMarking always applied client-side, now done here because an
+// attendance-only user has no status to filter by; without it (the print report), every
+// eligible student is returned, exactly as before.
 router.get('/:groupId/:date/roster', asyncHandler(async (req, res) => {
   const { groupId, date } = req.params;
   if (!DATE_RE.test(date)) throw badRequest('date يجب أن يكون بصيغة YYYY-MM-DD.');
@@ -290,7 +299,12 @@ router.get('/:groupId/:date/roster', asyncHandler(async (req, res) => {
   if (!group) throw badRequest('المجموعة غير موجودة.');
 
   const studentIds = await getEligibleStudentIdsForGroupDate(groupId, date);
-  res.json({ ok: true, data: studentIds });
+  const activeOnly = req.query?.active === 'true';
+  const roster = await prisma.students.findMany({
+    where: { id: { in: studentIds }, ...(activeOnly ? { status: 'active' } : {}) },
+    select: { id: true, name: true, code: true },
+  });
+  res.json({ ok: true, data: roster });
 }));
 
 // PUT /api/attendance-sessions/:groupId/:date — استبدال الجلسة بالكامل (idempotent)

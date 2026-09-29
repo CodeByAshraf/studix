@@ -3,7 +3,7 @@
 // نجاح الخادم، وتُطابق استجابة الخادم بالضبط عند النجاح، وتبقى دون تغيير عند الفشل.
 //
 // Group Closure (Attendance Integration) — the roster is now fetched from
-// pgGetEligibleStudentsForSession(groupId, date) (GET .../roster, attendanceEligibility.js
+// pgGetSessionRoster(groupId, date) (GET .../roster, attendanceEligibility.js
 // on the server) instead of a plain local students.groupId filter. Mocked here to resolve
 // [S1, S2] for GROUP_ID/TODAY, same as the old synchronous filter used to produce — every
 // test below still exercises exactly the same server-truth write path this file was
@@ -18,9 +18,9 @@ import { ToastProvider } from '../../components/Toast';
 
 vi.mock('../../services/api', async () => {
   const actual = await vi.importActual('../../services/api');
-  return { ...actual, pgSaveAttendanceSession: vi.fn(), pgGetEligibleStudentsForSession: vi.fn(), pgGetAttendance: vi.fn(), pgGetGroupOptions: vi.fn() };
+  return { ...actual, pgSaveAttendanceSession: vi.fn(), pgGetSessionRoster: vi.fn(), pgGetAttendance: vi.fn(), pgGetGroupOptions: vi.fn() };
 });
-import { pgSaveAttendanceSession, pgGetEligibleStudentsForSession, pgGetAttendance, pgGetGroupOptions } from '../../services/api';
+import { pgSaveAttendanceSession, pgGetSessionRoster, pgGetAttendance, pgGetGroupOptions } from '../../services/api';
 
 const GROUP_ID = 'g1';
 const S1 = 's1';
@@ -49,7 +49,7 @@ function seedStore() {
     attendance: [],
   });
   pgGetGroupOptions.mockResolvedValue([{ id: GROUP_ID, name: 'Test Group', grade: null, max: 20, price: 0, activeCount: 2 }]);
-  pgGetEligibleStudentsForSession.mockResolvedValue([S1, S2]);
+  pgGetSessionRoster.mockResolvedValue([{ id: S1, name: 'Student One', code: 'C1' }, { id: S2, name: 'Student Two', code: 'C2' }]);
   // C4 Attendance migration Phase 2: existingSession now comes from
   // GET /api/attendance?groupId=&date= instead of filtering the store's global attendance
   // array — default to "no existing session" so these write-path tests are unaffected.
@@ -97,7 +97,35 @@ describe('SessionMarking — group picker from GET /api/groups/options (M2 Group
     fireEvent.click(screen.getByRole('button', { name: /بدء تسجيل الحضور/ }));
     // the selected group's name (from the option) labels the marking step
     expect(await screen.findAllByText(/Test Group/)).not.toHaveLength(0);
-    expect(pgGetEligibleStudentsForSession).toHaveBeenCalledWith(GROUP_ID, TODAY);
+    expect(pgGetSessionRoster).toHaveBeenCalledWith(GROUP_ID, TODAY);
+  });
+
+  // M2 (Attendance roster): a truly attendance-only user — neither the Groups nor the
+  // Students collection is readable — sees the roster and marks/saves the session.
+  it('an attendance-only user (no Groups/Students collections) sees the roster from the server and marks/saves it', async () => {
+    useAppStore.setState({ groups: [], students: [] });
+    pgSaveAttendanceSession.mockImplementation((groupId, date, sessionTime, records) => Promise.resolve({
+      groupId, date, sessionTime,
+      records: records.map((r, i) => ({ id: `srv-${i}`, studentId: r.studentId, groupId, date, status: r.status })),
+    }));
+    renderPage();
+
+    await selectGroupAndWaitForRoster();
+    expect(screen.getByText('2', { selector: 'span' })).toBeInTheDocument(); // roster size in the setup preview
+    fireEvent.click(screen.getByRole('button', { name: /بدء تسجيل الحضور/ }));
+
+    // both students are listed by name and code, straight from the roster entries
+    expect(await screen.findByText('Student One')).toBeInTheDocument();
+    expect(screen.getByText('C1')).toBeInTheDocument();
+    expect(screen.getByText('Student Two')).toBeInTheDocument();
+    expect(screen.getByText('C2')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /حفظ الجلسة/ }));
+    await waitFor(() => expect(pgSaveAttendanceSession).toHaveBeenCalledTimes(1));
+    const [, , , records] = pgSaveAttendanceSession.mock.calls[0];
+    expect(records.map((r) => r.studentId).sort()).toEqual([S1, S2]);
+    expect(records.every((r) => r.status === 'present')).toBe(true); // default mark
+    await waitFor(() => expect(useAppStore.getState().attendance.map((r) => r.studentId).sort()).toEqual([S1, S2]));
   });
 });
 
@@ -244,7 +272,7 @@ describe('SessionMarking — existing-session detection (C4 Attendance migration
 
     await waitForGroupOption(GROUP_ID);
     fireEvent.change(screen.getByRole('combobox'), { target: { value: GROUP_ID } });
-    await waitFor(() => expect(pgGetEligibleStudentsForSession).toHaveBeenCalled());
+    await waitFor(() => expect(pgGetSessionRoster).toHaveBeenCalled());
     expect(screen.getByRole('button', { name: /بدء تسجيل الحضور/ })).toBeDisabled();
 
     resolveExisting([]);

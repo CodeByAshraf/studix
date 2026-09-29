@@ -576,7 +576,21 @@ export async function pgGetEligibleStudentsForSession(groupId, date) {
   });
   const json = await res.json().catch(() => null);
   if (!res.ok) throw new Error(json?.error || `PG GET /attendance-sessions/${groupId}/${date}/roster → ${res.status}`);
-  return json.data; // string[] of eligible studentId
+  // M2: the roster entries are now { id, name, code }; this helper keeps returning the ids
+  // only (string[] of eligible studentId), unchanged for its caller (the print report).
+  return json.data.map((s) => s.id);
+}
+
+// pgGetSessionRoster: same roster endpoint with ?active=true — the students to mark in a
+// session as { id, name, code } only (M2 attendance roster): SessionMarking builds its list
+// from this directly, so marking needs no 'students' permission / students collection.
+export async function pgGetSessionRoster(groupId, date) {
+  const res = await fetch(`${PG_API_BASE}/api/attendance-sessions/${encodeURIComponent(groupId)}/${encodeURIComponent(date)}/roster?active=true`, {
+    credentials: 'include',
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG GET /attendance-sessions/${groupId}/${date}/roster → ${res.status}`);
+  return json.data;
 }
 
 // pgSaveAttendanceSession: PUT /api/attendance-sessions/:groupId/:date

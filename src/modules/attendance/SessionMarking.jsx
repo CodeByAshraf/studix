@@ -8,7 +8,7 @@ import Button        from '../../components/ui/Button';
 import StatusToggle, { StatusQuickBtn } from './components/StatusToggle';
 import AttendanceStats from './components/AttendanceStats';
 import { STATUS_META } from '../../services/attendanceService';
-import { pgSaveAttendanceSession, pgGetEligibleStudentsForSession, pgGetAttendance } from '../../services/api';
+import { pgSaveAttendanceSession, pgGetSessionRoster, pgGetAttendance } from '../../services/api';
 import { useAsyncData } from '../../hooks/useAsyncData';
 import { useGroupOptions } from '../../hooks/useGroupOptions';
 import { useAvatarStyle } from '../students/components/StudentAvatar';
@@ -76,7 +76,6 @@ export default function SessionMarking({ onDone }) {
   const addLog               = useAppStore((s) => s.addLog);
   const groups               = useAppStore((s) => s.groups);
   const setAttendance        = useAppStore((s) => s.setAttendance);
-  const students             = useAppStore((s) => s.students);
   const { currentUser } = useAuth();
   const toast = useToast();
 
@@ -104,21 +103,18 @@ export default function SessionMarking({ onDone }) {
   // (GET /api/attendance-sessions/:groupId/:date/roster → attendanceEligibility.js), not a
   // plain students.groupId match. Re-fetched whenever the group or date changes — this is
   // exactly what "eligible for THIS group on THIS date" means (Primary and Additional
-  // enrollments both included, per the backend rule). Eligible ids are joined against the
-  // local students store for display fields; a student's own active/inactive business
-  // status (unrelated to enrollment) is still applied here, same as before.
-  const { data: eligibleIds = [], loading: rosterLoading, error: rosterError } = useAsyncData(
-    () => (selectedGroup ? pgGetEligibleStudentsForSession(selectedGroup, sessionDate) : Promise.resolve([])),
+  // enrollments both included, per the backend rule).
+  // M2 (Attendance roster): the roster arrives as { id, name, code } entries, already limited
+  // to active students (the same active/inactive rule this page always applied, now on the
+  // server via ?active=true), and is used as-is — no join against the students collection,
+  // which an attendance-only user cannot read.
+  const { data: groupStudents = [], loading: rosterLoading, error: rosterError } = useAsyncData(
+    () => (selectedGroup ? pgGetSessionRoster(selectedGroup, sessionDate) : Promise.resolve([])),
     [selectedGroup, sessionDate], []);
 
   useEffect(() => {
     if (rosterError) toast.error(rosterError.message || 'فشل تحميل قائمة الطلاب المؤهَّلين لهذه الحصة');
   }, [rosterError]);
-
-  const groupStudents = useMemo(() => {
-    const eligibleSet = new Set(eligibleIds);
-    return students.filter(s => eligibleSet.has(s.id) && s.status === 'active');
-  }, [students, eligibleIds]);
 
   const filteredStudents = useMemo(() => {
     const q = search.toLowerCase();

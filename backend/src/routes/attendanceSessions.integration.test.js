@@ -75,7 +75,7 @@ describe('routes/attendanceSessions.js — eligibility integration (real Postgre
   const TUESDAY = '2026-01-06';
 
   // ── GET /:groupId/:date/roster ─────────────────────────────────────────────────────
-  it('GET roster returns the eligible student ids for that group/date (Primary + Additional both included)', async () => {
+  it('GET roster returns the eligible students for that group/date (Primary + Additional both included) — entries are { id, name, code } (M2)', async () => {
     const groupId = await seedGroup({ days: ['sat'] });
     const primaryStudent = await seedStudent();
     const additionalStudent = await seedStudent();
@@ -86,9 +86,9 @@ describe('routes/attendanceSessions.js — eligibility integration (real Postgre
     const result = await callRoute(attendanceSessionsRouter, { method: 'GET', url: `/${groupId}/${SATURDAY}/roster` });
 
     expect(result.body.ok).toBe(true);
-    expect(result.body.data).toContain(primaryStudent);
-    expect(result.body.data).toContain(additionalStudent);
-    expect(result.body.data).not.toContain(ineligibleStudent);
+    expect(result.body.data.map((s) => s.id)).toContain(primaryStudent);
+    expect(result.body.data.map((s) => s.id)).toContain(additionalStudent);
+    expect(result.body.data.map((s) => s.id)).not.toContain(ineligibleStudent);
   });
 
   it('GET roster excludes a student whose attend_days does not include that date\'s day', async () => {
@@ -103,8 +103,8 @@ describe('routes/attendanceSessions.js — eligibility integration (real Postgre
     const saturdayResult = await callRoute(attendanceSessionsRouter, { method: 'GET', url: `/${groupId}/${SATURDAY}/roster` });
     const tuesdayResult = await callRoute(attendanceSessionsRouter, { method: 'GET', url: `/${groupId}/${TUESDAY}/roster` });
 
-    expect(saturdayResult.body.data).toContain(studentId);
-    expect(tuesdayResult.body.data).not.toContain(studentId);
+    expect(saturdayResult.body.data.map((s) => s.id)).toContain(studentId);
+    expect(tuesdayResult.body.data.map((s) => s.id)).not.toContain(studentId);
   });
 
   // ── saveAttendanceSession — eligibility validation ─────────────────────────────────
