@@ -19,38 +19,15 @@ import { useAuth } from '../../store/auth.context';
 import { createStudent } from '../../services/studentService';
 import { GRADES } from '../../services/groupService';
 import {
-  pgGetCollection, pgActivateAdmission, pgCreateParent,
+  pgGetCollection, pgActivateAdmission,
   pgCreateAdmission, pgUpdateAdmission, pgCreateAdmissionFollowup, pgCreateAdmissionSystemLog,
   pgCreateAdmissionPayment, pgCancelAdmissionWithRefund, pgGetAdmissionPayments,
 } from '../../services/api';
 import { useAsyncData } from '../../hooks/useAsyncData';
 import { useCashboxOptions } from '../../hooks/useCashboxOptions';
-import { normalizeParentPhone } from '../communication/parentService';
 import { getAdmissionTreasuryTotals } from '../../services/treasuryService';
 import { openAdmissionReport } from './buildAdmissionReport';
 import { uuid } from '../../utils/helpers';
-
-// Product Completion Phase 1 — Issue 3: نفس findOrCreateParentId المستخدَم في
-// StudentsPage.jsx بالضبط (مكرَّر عمداً لا util مشترك — نفس نمط normalizeParentPhone
-// نفسه المكرَّر أصلاً بين studentWhatsappService.js وmigration/mapping/normalizePhone.js).
-async function findOrCreateParentId(phone) {
-  const normalized = normalizeParentPhone(phone);
-  if (!normalized) return null;
-  const result = await pgCreateParent(
-    { phone: normalized },
-    {
-      onPhoneConflict: async () => {
-        const fresh = await pgGetCollection('parents');
-        return fresh.find((r) => normalizeParentPhone(r.phone) === normalized)?.id ?? null;
-      },
-    }
-  );
-  if (result.conflict) {
-    if (!result.existingId) throw new Error('تعذّر إيجاد سجل ولي الأمر بعد تعارض الهاتف');
-    return result.existingId;
-  }
-  return result.data.id;
-}
 
 const TABS = [
   { id: 'leads',    label: 'العملاء المحتملون', icon: '📞' },
@@ -263,13 +240,13 @@ export default function AdmissionsPage() {
         notes:       rec.notes || '',
       }, realStudents);
 
-      const parentId = await findOrCreateParentId(validated.parentPhone);
-
+      // M2/F4: the parent is found-or-created by the server from parentPhone, inside the same
+      // activation transaction ('admissions' permission) — no separate POST /api/parents,
+      // which needs 'students' and blocked admissions-only users.
       const { admission: savedAdmission, student: savedStudent, systemLogEntries } = await pgActivateAdmission(rec.id, {
         name: validated.name, phone: validated.phone, parentPhone: validated.parentPhone,
         grade: validated.grade, groupId: validated.groupId, school: validated.school,
         notes: validated.notes, status: validated.status,
-        ...(parentId ? { parentId } : {}),
       });
 
       addStudent(savedStudent);

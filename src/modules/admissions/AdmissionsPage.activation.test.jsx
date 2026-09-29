@@ -15,8 +15,8 @@ import { ToastProvider } from '../../components/Toast';
 
 let fetchMock;
 let putActivateResponder;  // PUT /api/admissions/:id/activate
-let postParentResponder;   // POST /api/parents (Issue 3 — find-or-create step before activation)
-let getParentsResponder;   // GET /api/parents (used only by the 409 conflict retry)
+let postParentResponder;   // POST /api/parents — must never be called by activation (M2/F4: parent linked server-side)
+let getParentsResponder;   // GET /api/parents — likewise never called by activation (M2/F4)
 
 function okJson(data, status = 200) {
   return { ok: true, status, json: async () => ({ ok: true, data }) };
@@ -112,21 +112,12 @@ async function clickActivate() {
 describe('AdmissionsPage — attendFirstLesson activation (Phase 3B-13B Stage ii — atomic endpoint)', () => {
   beforeEach(() => { seedStore(); });
 
-  it('activates via exactly ONE call to the atomic endpoint (plus the Issue 3 parent-link call), with the correct request body, no premature mutation, adopting admission + student + system-log entries together on success', async () => {
+  it('activates via exactly ONE call to the atomic endpoint (the parent is linked server-side, M2/F4), with the correct request body, no premature mutation, adopting admission + student + system-log entries together on success', async () => {
     let resolvePut;
     putActivateResponder = () => new Promise((resolve) => { resolvePut = resolve; });
 
     renderPage();
     await clickActivate();
-
-    // Issue 3: find-or-create-parent happens BEFORE the atomic activation call, using the
-    // admission's own normalized parentPhone ('01198765432' -> '201198765432').
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
-      expect.stringContaining('/api/parents'),
-      expect.objectContaining({ method: 'POST' })
-    ));
-    const [, parentPostOpts] = fetchMock.mock.calls.find(([u, o]) => String(u).endsWith('/api/parents') && o?.method === 'POST');
-    expect(JSON.parse(parentPostOpts.body).phone).toBe('201198765432');
 
     await waitFor(() => expect(activateCalls()).toHaveLength(1));
     const [sentUrl, sentOpts] = activateCalls()[0];
@@ -135,8 +126,12 @@ describe('AdmissionsPage — attendFirstLesson activation (Phase 3B-13B Stage ii
     expect(sentBody.student.name).toBe('أحمد علي');
     expect(sentBody.student.groupId).toBe('g1');
     expect(sentBody.student.grade).toBe('الصف الأول الثانوي');
-    // Issue 3: parentId resolved from the find-or-create step above is threaded through
-    expect(sentBody.student.parentId).toBe('5');
+    // M2/F4: the parent phone goes to the activation endpoint, which finds-or-creates the
+    // parent in its own transaction — no client-resolved parentId, no POST /api/parents
+    // ('students' permission) beforehand.
+    expect(sentBody.student.parentPhone).toBe('01198765432');
+    expect(sentBody.student.parentId).toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalledWith(expect.stringContaining('/api/parents'), expect.anything());
     // لا id/code محليان يُرسَلان — الخادم يولّدهما داخل المعاملة نفسها
     expect(sentBody.student.id).toBeUndefined();
     expect(sentBody.student.code).toBeUndefined();
@@ -156,9 +151,9 @@ describe('AdmissionsPage — attendFirstLesson activation (Phase 3B-13B Stage ii
     expect(useAppStore.getState().admissions[0].linkedStudentId).toBe(SAVED_STUDENT.id);
     expect(useAppStore.getState().admissionSystemLog).toEqual(NORMALIZED_SYSTEM_LOG_ENTRIES);
 
-    // 4 نداءات شبكة فقط: جلبا تحميل الصفحة (دفعات القبول Phase 4 + خيارات الخزن M2/F1)، ربط
-    // ولي الأمر (Issue 3)، ثم التفعيل الذرّي — التفعيل نفسه نداء واحد، لا 4 نداءات كما في Stage (i)
-    expect(fetchMock).toHaveBeenCalledTimes(4);
+    // 3 نداءات شبكة فقط: جلبا تحميل الصفحة (دفعات القبول Phase 4 + خيارات الخزن M2/F1)، ثم
+    // التفعيل الذرّي (يربط ولي الأمر داخله، M2/F4) — لا 4 نداءات منفصلة كما في Stage (i)
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(activateCalls()).toHaveLength(1);
   });
 
@@ -204,16 +199,21 @@ describe('AdmissionsPage — attendFirstLesson parentId linking (Product Complet
     expect(fetchMock).not.toHaveBeenCalledWith(expect.stringContaining('/api/parents'), expect.anything());
   });
 
-  it('re-resolves the existing parent id on a 409 phone conflict instead of failing the activation', async () => {
+  // M2/F4 — replaces the old "409 phone conflict re-resolve" client flow: find-or-create (incl.
+  // an already-existing parent) now happens server-side inside the activation transaction, so
+  // the page never touches /api/parents — which would be 403 for an admissions-only user.
+  it('M2/F4: with a parent phone, activation never calls /api/parents (not even when it would be 403) and sends only parentPhone', async () => {
     seedStore();
-    postParentResponder = () => ({ ok: false, status: 409, json: async () => ({ ok: false, error: 'مكرر', field: ['phone'] }) });
-    getParentsResponder  = () => [{ id: '11', phone: '201198765432' }];
+    postParentResponder = () => ({ ok: false, status: 403, json: async () => ({ ok: false, error: 'لا تملك صلاحية الوصول لهذا الإجراء.' }) });
 
     renderPage();
     await clickActivate();
 
     await waitFor(() => expect(activateCalls()).toHaveLength(1));
     const sentBody = JSON.parse(activateCalls()[0][1].body);
-    expect(sentBody.student.parentId).toBe('11');
+    expect(sentBody.student.parentPhone).toBe('01198765432');
+    expect(sentBody.student.parentId).toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalledWith(expect.stringContaining('/api/parents'), expect.anything());
+    await waitFor(() => expect(useAppStore.getState().students).toEqual([SAVED_STUDENT]));
   });
 });

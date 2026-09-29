@@ -85,6 +85,36 @@ function validateStudentInput(student) {
   };
 }
 
+// M2/F4 — the parents.phone lookup key: Egyptian numbers in international form
+// (201xxxxxxxxx), anything unusable → null (no parent row is created). Same algorithm as the
+// frontend's normalizeParentPhone (src/modules/communication/parentService.js) and
+// migration/mapping/normalizePhone.js — duplicated locally on purpose, this codebase's
+// convention for this helper (no shared util).
+function normalizeParentPhone(phone) {
+  if (!phone) return null;
+  let p = String(phone).replace(/[\s\-()]/g, '');
+  if (p.startsWith('+')) p = p.slice(1);
+  if (p.startsWith('00')) p = p.slice(2);
+  if (/^01[0-9]{9}$/.test(p)) return '20' + p.slice(1);
+  if (/^201[0-9]{9}$/.test(p)) return p;
+  return null;
+}
+
+// M2/F4 — find-or-create the parent INSIDE the activation transaction. The page used to call
+// POST /api/parents first ('students' permission), so an admissions-only user could not
+// activate once a parent phone was entered. Linking the new student to its parent is part of
+// activation itself (like creating the student): it happens here under 'admissions', rolls
+// back with everything else, and exposes no general parent management. The upsert on the
+// UNIQUE phone column is Postgres's atomic INSERT ... ON CONFLICT, so two activations sharing
+// a new phone both resolve to the same row (what the page's 409-retry used to do); an existing
+// parent is never modified.
+async function resolveParentIdTx(tx, parentPhone) {
+  const phone = normalizeParentPhone(parentPhone);
+  if (!phone) return null;
+  const parent = await tx.parents.upsert({ where: { phone }, create: { phone }, update: {}, select: { id: true } });
+  return parent.id;
+}
+
 // يُصدَّر منفصلاً عن الـ router ليكون قابلاً للاختبار مباشرة بلا HTTP/auth.
 export async function activateAdmission({ admissionId, student: studentInput }, { userId = null } = {}) {
   if (typeof admissionId !== 'string' || !admissionId.trim()) throw badRequest('admissionId مطلوب.');
@@ -110,9 +140,13 @@ export async function activateAdmission({ admissionId, student: studentInput }, 
       throw badRequest('سجل القبول مرتبط بطالب لكن في حالة غير متوقّعة — يتطلّب مراجعة يدوية.');
     }
 
+    // M2/F4: an explicit parentId (the previous client-resolved contract) still wins;
+    // otherwise the parent is resolved from parentPhone here, in this same transaction.
+    const parentId = studentData.parent_id ?? await resolveParentIdTx(tx, studentData.parent_phone);
+
     const code = await computeNextStudentCode(tx);
     const student = await tx.students.create({
-      data: { id: crypto.randomUUID(), code, ...studentData },
+      data: { id: crypto.randomUUID(), code, ...studentData, parent_id: parentId },
     });
     // Phase 1 (Multi-Group Enrollment) — confirming an admission's group is a Primary
     // Group assignment for the new student; route it through the enrollment service in
