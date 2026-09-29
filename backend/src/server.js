@@ -59,7 +59,7 @@ import cashboxBalanceRouter from './routes/cashboxBalance.js';
 import paymentsRouter from './routes/payments.js';
 import admissionPaymentsRouter from './routes/admissionPayments.js';
 import admissionCancellationRouter from './routes/admissionCancellation.js';
-import activityLogsRouter from './routes/activityLogs.js';
+import activityLogsRouter, { activityLogsGuard } from './routes/activityLogs.js';
 import usersRouter from './routes/users.js';
 import rolesRouter from './routes/roles.js';
 import supportAccessRouter from './routes/supportAccess.js';
@@ -364,7 +364,10 @@ app.use('/api/admissionPayments', requireAuth, requirePermission('admissions'), 
 // makeCrudRouter العامة تخدمه لهذا المسار سابقاً. POST/PUT/PATCH/DELETE كما كانت بالضبط
 // (المنطق الكامل في backend/src/routes/activityLogs.js، مُصدَّر منفصلاً، قابل للاختبار
 // مباشرة).
-app.use('/api/activityLogs', requireAuth, requirePermission('activity-log'), activityLogsRouter);
+// M2/F2: activityLogsGuard — POST / (writing one's own audit entry) needs only a valid,
+// current session; everything else still requires 'activity-log'. The generic CRUD mount
+// for this path (loop below) uses the same guard, since it performs the actual insert.
+app.use('/api/activityLogs', requireAuth, activityLogsGuard, activityLogsRouter);
 
 // ── Stabilization phase: أول مسارات خلفية حقيقية لـ users/roles ──
 // إدارية بحتة، 'users' هي الصلاحية الوحيدة التي يملكها admin فقط في نموذج الأدوار
@@ -435,7 +438,9 @@ for (const [apiPath, modelName] of Object.entries(COLLECTION_MODELS)) {
     const writable = !READ_ONLY_COLLECTIONS.has(apiPath);
     const preserveClientId = PRESERVE_CLIENT_ID_COLLECTIONS.has(apiPath);
     const pageId = COLLECTION_PERMISSIONS[apiPath];
-    const guards = pageId ? [requireAuth, requirePermission(pageId)] : [requireAuth];
+    const guards = apiPath === 'activityLogs'
+      ? [requireAuth, activityLogsGuard] // M2/F2 — same guard as the dedicated mount above
+      : pageId ? [requireAuth, requirePermission(pageId)] : [requireAuth];
     // P2-1 — domain-rule policy (crudPolicies.js): generic CRUD never bypasses a dedicated API.
     const policy = CRUD_POLICIES[apiPath];
     app.use(`/api/${apiPath}`, ...guards, makeCrudRouter(modelName, { writable, preserveClientId, policy }));

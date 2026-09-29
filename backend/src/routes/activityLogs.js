@@ -24,8 +24,21 @@
 import { Router } from 'express';
 import { prisma } from '../prisma.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
+import { requirePermission, requireActiveSession } from '../middleware/permissions.js';
 import { snakeToCamel } from '../lib/caseMapper.js';
 import { serializeBigInt } from './payments.js';
+
+// M2/F2 — the permission guard for EVERY /api/activityLogs mount (this router and the generic
+// CRUD mount in server.js that performs the actual insert). Writing an audit entry
+// (POST /) needs only a valid, current session: every operational screen calls addLog(),
+// and most operational roles don't hold 'activity-log' — their entries were being rejected
+// with 403 and lost. Reading the log (and every other method/path) stays behind
+// 'activity-log' exactly as before; PUT/PATCH/DELETE remain blocked below regardless.
+const requireActivityLogPermission = requirePermission('activity-log');
+export function activityLogsGuard(req, res, next) {
+  const guard = req.method === 'POST' && req.path === '/' ? requireActiveSession : requireActivityLogPermission;
+  return guard(req, res, next);
+}
 
 function badRequest(message) {
   const err = new Error(message);
@@ -99,9 +112,16 @@ router.get('/', asyncHandler(async (req, res) => {
 // POST / — نفس الاعتراض الحالي بالحرف: يشتقّ userId/userName من الجلسة، ثم يُمرِّر
 // للـ CRUD العام (مُركَّب لاحقاً على نفس المسار عبر الحلقة الديناميكية في server.js)
 // الذي يتولّى الإنشاء الفعلي — لا تغيير في منطق الكتابة نفسه هنا إطلاقاً.
+// Client-supplied actor fields (in either casing) are dropped first: the generic router's
+// camelToSnake lets a later key win, so a client `user_id` placed after `userId` would
+// otherwise override the session-derived author. There is no created_by column; it is
+// dropped too rather than failing the insert.
+const CLIENT_ACTOR_FIELDS = ['userId', 'user_id', 'userName', 'user_name', 'createdBy', 'created_by'];
 router.post('/', asyncHandler(async (req, res, next) => {
   const { userId, userName } = await resolveActivityLogActor(req.user?.id ?? null);
-  req.body = { ...req.body, userId, userName };
+  const body = { ...req.body };
+  for (const field of CLIENT_ACTOR_FIELDS) delete body[field];
+  req.body = { ...body, userId, userName };
   next();
 }));
 

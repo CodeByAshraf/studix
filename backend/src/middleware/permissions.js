@@ -44,33 +44,54 @@ export function requirePermission(pageId) {
   // عام، بلا تسريب تفاصيل Prisma، مع نفس تسجيل logger.error الحالي) — لا يغيّر أي استجابة
   // 401/403 حالية (تلك عبارة عن return عادي هنا، لا استثناء، فلا تمرّ عبر catch أصلاً).
   return asyncHandler(async function permissionGuard(req, res, next) {
-    if (!req.user) {
-      return res.status(401).json({ ok: false, error: 'يجب تسجيل الدخول للوصول لهذا المسار.' });
-    }
-
-    const state = await getAuthState(req.user.id);
-    if (!state || !state.active) {
-      return res.status(401).json({ ok: false, error: 'الجلسة لم تعد صالحة. الرجاء تسجيل الدخول مجدداً.' });
-    }
-
-    // مقارنة الإصدار: أي تغيير على الدور/الصلاحيات/الحالة منذ تسجيل الدخول يُبطل هذه الجلسة فوراً.
-    if (
-      state.userAuthVersion !== req.user.userAuthVersion ||
-      state.roleAuthVersion !== req.user.roleAuthVersion
-    ) {
-      return res.status(401).json({ ok: false, error: 'صلاحياتك تغيّرت. الرجاء تسجيل الدخول مجدداً.' });
-    }
-
-    const effective = resolveEffectivePermissions(state);
-    if (effective === null) {
-      return res.status(403).json({ ok: false, error: 'لا تملك صلاحية الوصول لهذا الإجراء.' });
-    }
+    const effective = await resolveSessionPermissions(req, res);
+    if (!effective) return;
     if (!effective.includes(pageId)) {
       return res.status(403).json({ ok: false, error: 'لا تملك صلاحية الوصول لهذا الإجراء.' });
     }
 
     next();
   });
+}
+
+// requireActiveSession — every check requirePermission makes (logged in, still active,
+// auth versions unchanged since login, role resolvable), minus the page check. For actions
+// any logged-in user may take for themselves, e.g. writing their own audit entry (M2/F2).
+export const requireActiveSession = asyncHandler(async function activeSessionGuard(req, res, next) {
+  const effective = await resolveSessionPermissions(req, res);
+  if (!effective) return;
+  next();
+});
+
+// Shared by both guards above: returns the effective permission array, or sends the
+// 401/403 response itself and returns null.
+async function resolveSessionPermissions(req, res) {
+  if (!req.user) {
+    res.status(401).json({ ok: false, error: 'يجب تسجيل الدخول للوصول لهذا المسار.' });
+    return null;
+  }
+
+  const state = await getAuthState(req.user.id);
+  if (!state || !state.active) {
+    res.status(401).json({ ok: false, error: 'الجلسة لم تعد صالحة. الرجاء تسجيل الدخول مجدداً.' });
+    return null;
+  }
+
+  // مقارنة الإصدار: أي تغيير على الدور/الصلاحيات/الحالة منذ تسجيل الدخول يُبطل هذه الجلسة فوراً.
+  if (
+    state.userAuthVersion !== req.user.userAuthVersion ||
+    state.roleAuthVersion !== req.user.roleAuthVersion
+  ) {
+    res.status(401).json({ ok: false, error: 'صلاحياتك تغيّرت. الرجاء تسجيل الدخول مجدداً.' });
+    return null;
+  }
+
+  const effective = resolveEffectivePermissions(state);
+  if (effective === null) {
+    res.status(403).json({ ok: false, error: 'لا تملك صلاحية الوصول لهذا الإجراء.' });
+    return null;
+  }
+  return effective;
 }
 
 // مُصدَّرة للاختبار المباشر بلا HTTP كامل.

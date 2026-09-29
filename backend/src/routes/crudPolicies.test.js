@@ -162,8 +162,14 @@ describe('server wiring', () => {
   });
 
   it('authorization is unchanged: requireAuth + requirePermission(pageId) still guard every generic route', () => {
-    expect(server).toMatch(/const guards = pageId \? \[requireAuth, requirePermission\(pageId\)\] : \[requireAuth\];/);
+    expect(server).toMatch(/: pageId \? \[requireAuth, requirePermission\(pageId\)\] : \[requireAuth\];/);
     expect(server).toMatch(/app\.use\(`\/api\/\$\{apiPath\}`, \.\.\.guards, makeCrudRouter/);
+  });
+
+  it('M2/F2: activityLogs is the only override, using the same guard as its dedicated mount', () => {
+    expect(server).toMatch(/const guards = apiPath === 'activityLogs'\s*\? \[requireAuth, activityLogsGuard\]/);
+    expect(server.match(/apiPath === '/g)).toHaveLength(1);
+    expect(server).toMatch(/app\.use\('\/api\/activityLogs', requireAuth, activityLogsGuard, activityLogsRouter\);/);
   });
 
   it('payments/admissionPayments stay read-only on the generic router', () => {
