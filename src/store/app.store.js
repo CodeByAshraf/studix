@@ -1,6 +1,6 @@
 // src/store/app.store.js
 import { create }               from 'zustand';
-import { devtools, persist }    from 'zustand/middleware';
+import { devtools, persist, createJSONStorage } from 'zustand/middleware';
 import { createStudentsSlice }  from './slices/students.slice';
 import { createGroupsSlice }    from './slices/groups.slice';
 import { createPaymentsSlice }  from './slices/payments.slice';
@@ -15,8 +15,48 @@ import { createActivitySlice }  from './slices/activity.slice';
 import { createCenterProfileSlice } from './slices/centerProfile.slice';
 import { createAdmissionsSlice } from './slices/admissions.slice';
 import { createReportSettingsSlice } from './slices/reportSettings.slice';
-import { storage }              from '../hooks/useErrorHandler';
 import { pgGetPayments, pgGetGrades, pgGetHomeworks, pgGetHwSubmissions } from '../services/api';
+
+// ── Persistence (localStorage['studix-v1']) ───────────────────
+// P2 Fix A — only genuinely local/client-owned state is persisted. Everything server-owned
+// (students, groups, payments, attendance, treasury, inventory, admissions, logs, …) lives
+// in PostgreSQL and is re-fetched by boot-sync / scoped reads; a browser copy only
+// duplicated it and could exhaust the localStorage quota.
+export const PERSIST_NAME    = 'studix-v1';
+export const PERSIST_VERSION = 1;
+
+// materials: legacy local-only list (no PG table). treasuryMeta: legacy local compat.
+// reportConfig: per-browser report section flags. centerProfile.slogan: no DB column.
+export function pickLocalState(state) {
+  const s = state && typeof state === 'object' ? state : {};
+  const local = {};
+  if (s.reportConfig !== undefined) local.reportConfig = s.reportConfig;
+  if (s.treasuryMeta !== undefined) local.treasuryMeta = s.treasuryMeta;
+  if (s.materials    !== undefined) local.materials    = s.materials;
+  if (s.centerProfile && typeof s.centerProfile === 'object' && s.centerProfile.slogan !== undefined) {
+    local.centerProfile = { slogan: s.centerProfile.slogan };
+  }
+  return local;
+}
+
+// A failed localStorage write (QuotaExceededError, storage disabled, …) must never throw out
+// of set(): the in-memory update has already happened and server writes are independent, so
+// a persistence failure is logged for diagnostics and otherwise ignored.
+const jsonStorage = createJSONStorage(() => localStorage);
+export const safePersistStorage = {
+  getItem: (name) => {
+    try { return jsonStorage ? jsonStorage.getItem(name) : null; }
+    catch (e) { console.warn(`[persist] failed to read "${name}":`, e?.name, e?.message); return null; }
+  },
+  setItem: (name, value) => {
+    try { jsonStorage?.setItem(name, value); }
+    catch (e) { console.error(`[persist] failed to write "${name}" (in-memory state unaffected):`, e?.name, e?.message); }
+  },
+  removeItem: (name) => {
+    try { jsonStorage?.removeItem(name); }
+    catch (e) { console.warn(`[persist] failed to remove "${name}":`, e?.name, e?.message); }
+  },
+};
 
 // ── Store ─────────────────────────────────────────────────────
 export const useAppStore = create()(
@@ -81,65 +121,29 @@ export const useAppStore = create()(
           s.addLog({ action: 'export', module: 'settings', description: 'تصدير البيانات (JSON)' })
             .catch((e) => console.error('[activityLog] فشل تسجيل حدث التصدير:', e.message));
         },
-
-        // ── Auto-backup ───────────────────────────────────────────
-        // قرار مُنتَج صريح (لا يجب تغييره بلا مراجعة): تُستدعى مرة عند كل mount للتطبيق
-        // (DataProvider) — جلب مصفوفة payments الكاملة هنا كان سيُعيد بالضبط مشكلة "تحميل
-        // كل شيء عند كل تسجيل دخول" التي تُزيلها هذه الهجرة أصلاً. payments مُستبعَدة عمداً
-        // من هذه النسخة التلقائية الخفيفة — البيانات الحديثة (مع payments) تبقى عبر "تصدير
-        // البيانات (JSON)" اليدوي أعلاه (exportBackup)، الذي يجلبها طازجة عند الطلب فقط. (P1-1: لا
-        // هذا ولا ذاك نسخة احتياطية قابلة للاستعادة — النسخة الكاملة هي backend/src/db/routineBackup.js.)
-        saveAutoBackup: () => {
-          const s = get();
-          try {
-            storage.set('studix_autobackup', {
-              savedAt: new Date().toISOString(),
-              data: {
-                students:   s.students,
-                groups:     s.groups,
-                attendance: s.attendance,
-                exams:      s.exams,
-                grades:     s.grades,
-              },
-            });
-          } catch {}
-        },
       }),
       // ── persist options ────────────────────────────────────────
       {
-        name: 'studix-v1',
-        partialize: (state) => ({
-          students:        state.students,
-          groups:          state.groups,
-          payments:        state.payments,
-          attendance:      state.attendance,
-          absenceFollowup: state.absenceFollowup,
-          exams:           state.exams,
-          grades:          state.grades,
-          homeworks:       state.homeworks,
-          hwSubmissions:   state.hwSubmissions,
-          materials:       state.materials,
-          invMaterials:      state.invMaterials,
-          inventoryTxn:      state.inventoryTxn,
-          inventorySettings: state.inventorySettings,
-          communications:    state.communications,
-          commTasks:         state.commTasks,
-          parents:           state.parents,
-          waReportLog:       state.waReportLog,
-          cashboxes:       state.cashboxes,
-          treasuryTxn:     state.treasuryTxn,
-          treasuryMeta:    state.treasuryMeta,
-          activityLogs:    state.activityLogs,
-          centerProfile:   state.centerProfile,
-          admissions:      state.admissions,
-          // Phase 3B-13A/3B-14D — admissionFollowups/admissionSystemLog/admissionPayments
-          // تُعاد جلبها من PostgreSQL عند الإقلاع على أي حال (نفس بقية الـ collections
-          // أعلاه)، لكن تُدرَج هنا أيضاً للاتساق (نفس مبدأ admissions/payments/treasuryTxn).
-          admissionFollowups: state.admissionFollowups,
-          admissionSystemLog: state.admissionSystemLog,
-          admissionPayments:  state.admissionPayments,
-          reportConfig:       state.reportConfig,
-        }),
+        name:       PERSIST_NAME,
+        version:    PERSIST_VERSION,
+        storage:    safePersistStorage,
+        partialize: (state) => pickLocalState(state),
+        // v0 (every build before P2 Fix A) persisted a full server-owned snapshot (students,
+        // payments, attendance, treasuryTxn, …) that could outgrow the localStorage quota.
+        // Only the local-only fields survive; persist then rewrites the key with the small
+        // v1 shape, replacing the old large blob in place.
+        migrate:    (persistedState) => pickLocalState(persistedState),
+        // Filtered again here (not only in migrate): a snapshot with a missing/odd version
+        // skips migrate entirely, and server-owned rows must never re-enter the store from
+        // localStorage. centerProfile merges field-wise so only `slogan` comes from storage.
+        merge: (persistedState, currentState) => {
+          const local = pickLocalState(persistedState);
+          return {
+            ...currentState,
+            ...local,
+            centerProfile: { ...currentState.centerProfile, ...local.centerProfile },
+          };
+        },
       }
     ),
     // ── devtools options ─────────────────────────────────────────
@@ -238,5 +242,4 @@ export const useStoreActions = () => useAppStore((s) => ({
   addLog:    s.addLog,
   // backup
   exportBackup:   s.exportBackup,
-  saveAutoBackup: s.saveAutoBackup,
 }));

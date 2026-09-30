@@ -81,7 +81,6 @@ export function useApp() {
     setAttendance: s.setAttendance,
     addLog:        s.addLog,
     exportBackup:  s.exportBackup,
-    saveAutoBackup: s.saveAutoBackup,
     addTreasuryTxn:     s.addTreasuryTxn,
     updateTreasuryTxn:  s.updateTreasuryTxn,
     updateTreasuryMeta: s.updateTreasuryMeta,

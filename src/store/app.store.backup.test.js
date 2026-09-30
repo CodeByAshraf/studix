@@ -6,10 +6,8 @@
 //   - exportBackup (manual, rare — one button in Settings) now fetches the complete current
 //     payments array fresh from GET /api/payments (via pgGetPayments({})) at export time,
 //     preserving the exact same exported JSON content/shape as before.
-//   - saveAutoBackup (automatic, fires on every app mount via DataProvider) intentionally
-//     drops payments from its scope — fetching the full table on every login would
-//     reintroduce exactly the "load everything at boot" cost this whole migration removes.
-//     This is a deliberate product decision, not an oversight.
+//   - saveAutoBackup (automatic browser snapshot) was later removed entirely in P2 Fix A —
+//     see the last describe block below.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { useAppStore } from './app.store';
 import { storage } from '../hooks/useErrorHandler';
@@ -193,43 +191,19 @@ describe('exportBackup — fetches payments fresh, not from the store', () => {
   });
 });
 
-describe('saveAutoBackup — no longer touches payments, never fetches over the network', () => {
-  it('does not call pgGetPayments at all', () => {
-    seedStore();
-
-    useAppStore.getState().saveAutoBackup();
-
-    expect(pgGetPayments).not.toHaveBeenCalled();
+// P2 Fix A — saveAutoBackup (the obsolete localStorage['studix_autobackup'] writer) was
+// removed: nothing read it and it duplicated server-owned data into the browser quota.
+describe('saveAutoBackup — removed (P2 Fix A)', () => {
+  it('the store no longer exposes saveAutoBackup', () => {
+    expect(useAppStore.getState().saveAutoBackup).toBeUndefined();
   });
 
-  it('the saved localStorage snapshot has no "payments" key anywhere', () => {
+  it('exportBackup never writes the obsolete studix_autobackup key', async () => {
     seedStore();
+    pgGetPayments.mockResolvedValue(FRESH_API_PAYMENTS);
 
-    useAppStore.getState().saveAutoBackup();
+    await useAppStore.getState().exportBackup('u1');
 
-    const saved = storage.get('studix_autobackup');
-    expect(saved.data).not.toHaveProperty('payments');
-    expect(JSON.stringify(saved)).not.toContain('stale-p'); // لا أثر لأي بيانات دفعات إطلاقاً
-  });
-
-  it('preserves the exact requested shape: { savedAt, data: { students, groups, attendance, exams, grades } }', () => {
-    seedStore();
-
-    useAppStore.getState().saveAutoBackup();
-
-    const saved = storage.get('studix_autobackup');
-    expect(typeof saved.savedAt).toBe('string');
-    expect(Object.keys(saved.data).sort()).toEqual(['attendance', 'exams', 'grades', 'groups', 'students'].sort());
-    expect(saved.data.students).toEqual(STUDENTS);
-    expect(saved.data.groups).toEqual(GROUPS);
-    expect(saved.data.attendance).toEqual(ATTENDANCE);
-    expect(saved.data.exams).toEqual(EXAMS);
-    expect(saved.data.grades).toEqual(GRADES);
-  });
-
-  it('remains synchronous (returns undefined, not a Promise) — no await needed by DataProvider', () => {
-    seedStore();
-    const result = useAppStore.getState().saveAutoBackup();
-    expect(result).toBeUndefined();
+    expect(storage.get('studix_autobackup')).toBeNull();
   });
 });
