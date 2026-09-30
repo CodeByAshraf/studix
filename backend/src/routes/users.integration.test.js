@@ -344,7 +344,11 @@ describe('users.js — real PostgreSQL integration (auth_version/authCache contr
       // An intentional demotion assigns an explicit non-admin role — an empty/null roleId on an
       // administrator is a no-op since "preserve administrator status on profile edits".
       await seedRole('staff', ['dashboard']);
-      const result = await invoke(usersRouter, { method: 'PUT', url: `/${admin.id}`, body: { roleId: 'staff' } });
+      // Demoted by the other administrator — administrator accounts can only be modified by an
+      // active real administrator (final security audit, HIGH 1).
+      const result = await invoke(usersRouter, {
+        method: 'PUT', url: `/${admin.id}`, user: { id: 'u-admin-other' }, body: { roleId: 'staff' },
+      });
       expect(result.statusCode).toBe(200);
 
       const { req: reqAfter, res: resAfter } = mockReqRes(staleClaims);

@@ -128,17 +128,21 @@ describe('administrator protection + reserved admin role (security review, real 
     expect(await user('owner')).not.toBeNull();
   });
 
-  it('3+4. the last active admin cannot be deactivated or deleted by another user holding users', async () => {
+  it('3+4. the last active admin cannot be deactivated, demoted or deleted by another user holding users', async () => {
     await seedOwner();
     await seedRole('staff', ['users']);
     await seedUser('mgr', { role_id: 'staff' });
 
+    // a non-admin is refused outright (403): administrator accounts are admin-only
     const deact = await request(port, 'PUT', '/api/users/owner', { user: await claims('mgr'), body: { active: false } });
-    expect(deact.status).toBe(409);
+    expect(deact.status).toBe(403);
     const demote = await request(port, 'PUT', '/api/users/owner', { user: await claims('mgr'), body: { roleId: 'staff' } });
-    expect(demote.status).toBe(409);
+    expect(demote.status).toBe(403);
     const del = await request(port, 'DELETE', '/api/users/owner', { user: await claims('mgr') });
-    expect(del.status).toBe(409);
+    expect(del.status).toBe(403);
+    // the owner demoting themselves as the last active admin still hits the last-admin guard
+    const selfDemote = await request(port, 'PUT', '/api/users/owner', { user: await claims('owner'), body: { roleId: 'staff' } });
+    expect(selfDemote.status).toBe(409);
 
     const owner = await user('owner');
     expect(owner.active).toBe(true);
@@ -165,14 +169,16 @@ describe('administrator protection + reserved admin role (security review, real 
   it('5b. two concurrent deactivations of the only two admins never leave zero active admins', async () => {
     await seedOwner('adminA');
     await seedOwner('adminB');
-    await seedRole('staff', ['users']);
-    await seedUser('mgr', { role_id: 'staff' });
-    const mgr = await claims('mgr');
+    // each admin deactivates the other at the same time
     const [a, b] = await Promise.all([
-      request(port, 'PUT', '/api/users/adminA', { user: mgr, body: { active: false } }),
-      request(port, 'PUT', '/api/users/adminB', { user: mgr, body: { active: false } }),
+      request(port, 'PUT', '/api/users/adminA', { user: await claims('adminB'), body: { active: false } }),
+      request(port, 'PUT', '/api/users/adminB', { user: await claims('adminA'), body: { active: false } }),
     ]);
-    expect([a.status, b.status].sort()).toEqual([200, 409]);
+    // the loser is refused either by the last-admin guard (409) or, if its requester was
+    // already deactivated by the winner, by the session check (401) — never both succeed
+    const [first, second] = [a.status, b.status].sort();
+    expect(first).toBe(200);
+    expect([401, 409]).toContain(second);
     expect(await client.users.count({ where: { is_admin: true, active: true } })).toBe(1);
     expect(await setupOpen()).toBe(false);
   });
@@ -324,8 +330,11 @@ describe('administrator protection + reserved admin role (security review, real 
     expect(admin2.is_admin).toBe(false);
     expect(admin2.role_id).toBe('staff');
 
-    // the owner is now the last active admin: demoting them is refused
-    const last = await request(port, 'PUT', '/api/users/owner', { user: await claims('admin2'), body: { roleId: 'staff' } });
+    // the owner is now the last active admin: demoting them is refused — by the demoted admin2
+    // (no longer an admin: 403) and by the owner themselves (last-admin guard: 409)
+    const byFormerAdmin = await request(port, 'PUT', '/api/users/owner', { user: await claims('admin2'), body: { roleId: 'staff' } });
+    expect(byFormerAdmin.status).toBe(403);
+    const last = await request(port, 'PUT', '/api/users/owner', { user: await claims('owner'), body: { roleId: 'staff' } });
     expect(last.status).toBe(409);
     expect((await user('owner')).is_admin).toBe(true);
   });
@@ -343,5 +352,144 @@ describe('administrator protection + reserved admin role (security review, real 
     expect(clerk.role_id).toBeNull();
     expect(clerk.is_admin).toBe(false);
     expect(clerk.name).toBe('clerk2');
+  });
+
+  // ═══ Final audit HIGH 1 — administrator accounts are admin-only ═══
+  describe('a non-admin users-holder cannot modify or delete an administrator account', () => {
+    let mgr;
+    beforeEach(async () => {
+      await seedOwner();
+      await seedOwner('admin2');
+      await seedRole('staff', ['users']);
+      await seedUser('mgr', { role_id: 'staff' });
+      mgr = await claims('mgr');
+    });
+
+    it('1. password: 403, and the owner\'s password hash is unchanged', async () => {
+      const before = await user('owner');
+      const res = await request(port, 'PUT', '/api/users/owner', { user: mgr, body: { password: 'attacker-pw' } });
+      expect(res.status).toBe(403);
+      expect((await user('owner')).password_hash).toBe(before.password_hash);
+    });
+
+    it('2. permissions: 403, the owner keeps their permissions', async () => {
+      const res = await request(port, 'PUT', '/api/users/owner', { user: mgr, body: { permissions: ['dashboard'] } });
+      expect(res.status).toBe(403);
+      expect((await user('owner')).permissions).toEqual(['users', 'dashboard']);
+    });
+
+    it('3. active status: cannot deactivate an active admin or reactivate an inactive one (403)', async () => {
+      expect((await request(port, 'PUT', '/api/users/admin2', { user: mgr, body: { active: false } })).status).toBe(403);
+      expect((await user('admin2')).active).toBe(true);
+
+      await client.users.create({ data: { id: 'oldAdmin', name: 'o', is_admin: true, active: false, permissions: ['users'] } });
+      const res = await request(port, 'PUT', '/api/users/oldAdmin', { user: mgr, body: { active: true, password: 'x-1234567' } });
+      expect(res.status).toBe(403);
+      expect((await user('oldAdmin')).active).toBe(false);
+    });
+
+    it('4. role: cannot demote an admin (403), even with another active admin remaining', async () => {
+      expect((await request(port, 'PUT', '/api/users/admin2', { user: mgr, body: { roleId: 'staff' } })).status).toBe(403);
+      const admin2 = await user('admin2');
+      expect(admin2.is_admin).toBe(true);
+      expect(admin2.role_id).toBeNull();
+    });
+
+    it('5. delete: cannot delete an active or an inactive admin (403)', async () => {
+      expect((await request(port, 'DELETE', '/api/users/admin2', { user: mgr })).status).toBe(403);
+      expect(await user('admin2')).not.toBeNull();
+      await client.users.create({ data: { id: 'oldAdmin', name: 'o', is_admin: true, active: false } });
+      expect((await request(port, 'DELETE', '/api/users/oldAdmin', { user: mgr })).status).toBe(403);
+      expect(await user('oldAdmin')).not.toBeNull();
+    });
+
+    it('6. an active admin can still manage another admin (password, permissions, demote, delete)', async () => {
+      const { verifyPbkdf2 } = await import('../lib/passwordVerify.js');
+      const owner = await claims('owner');
+      expect((await request(port, 'PUT', '/api/users/admin2', { user: owner, body: { password: 'new-pass-123' } })).status).toBe(200);
+      expect(verifyPbkdf2('new-pass-123', (await user('admin2')).password_hash)).toBe(true);
+      expect((await request(port, 'PUT', '/api/users/admin2', { user: owner, body: { permissions: ['dashboard'] } })).status).toBe(200);
+      expect((await user('admin2')).permissions).toEqual(['dashboard']);
+      expect((await request(port, 'PUT', '/api/users/admin2', { user: owner, body: { roleId: 'staff' } })).status).toBe(200);
+      expect((await user('admin2')).is_admin).toBe(false);
+      expect((await request(port, 'DELETE', '/api/users/admin2', { user: owner })).status).toBe(200);
+      expect(await user('admin2')).toBeNull();
+      expect(await setupOpen()).toBe(false);
+    });
+
+    it('9. normal non-admin permission editing by the users-holder is unchanged', async () => {
+      await seedUser('clerk', { permissions: ['students'] });
+      expect((await request(port, 'PUT', '/api/users/clerk', { user: mgr, body: { permissions: ['students', 'payments'] } })).status).toBe(200);
+      expect((await user('clerk')).permissions).toEqual(['students', 'payments']);
+      expect((await request(port, 'PUT', '/api/users/clerk', { user: await claims('mgr'), body: { permissions: [] } })).status).toBe(200);
+      expect((await user('clerk')).permissions).toBeNull();
+    });
+  });
+
+  // ═══ Final audit MEDIUM 2 — the last admin keeps user management ═══
+  describe('the last active administrator cannot strip their own users-management access', () => {
+    it.each([[[]], [['dashboard']], [null]])('8. owner as the only admin: PUT self {permissions: %j} → 409, permissions unchanged', async (permissions) => {
+      await seedOwner();
+      const res = await request(port, 'PUT', '/api/users/owner', { user: await claims('owner'), body: { permissions } });
+      expect(res.status).toBe(409);
+      expect((await user('owner')).permissions).toEqual(['users', 'dashboard']);
+      // the owner's session still works for user management
+      expect((await request(port, 'GET', '/api/users', { user: await claims('owner') })).status).toBe(200);
+    });
+
+    it('another active admin who lacks users does not count; one who has users does', async () => {
+      await seedOwner();
+      await client.users.create({ data: { id: 'viewer', name: 'v', is_admin: true, active: true, permissions: ['dashboard'] } });
+      expect((await request(port, 'PUT', '/api/users/owner', { user: await claims('owner'), body: { permissions: ['dashboard'] } })).status).toBe(409);
+
+      await seedOwner('admin2');
+      expect((await request(port, 'PUT', '/api/users/owner', { user: await claims('owner'), body: { permissions: ['dashboard'] } })).status).toBe(200);
+      expect((await user('owner')).permissions).toEqual(['dashboard']);
+      expect((await user('owner')).is_admin).toBe(true);
+    });
+
+    it('an admin can still change their own permissions while keeping users', async () => {
+      await seedOwner();
+      const res = await request(port, 'PUT', '/api/users/owner', { user: await claims('owner'), body: { permissions: ['users', 'payments'] } });
+      expect(res.status).toBe(200);
+      expect((await user('owner')).permissions).toEqual(['users', 'payments']);
+    });
+  });
+
+  // ═══ Final audit LOW 4 — a password change ends earlier sessions ═══
+  describe('password changes invalidate previously issued sessions', () => {
+    it('10+11. the change succeeds, bumps auth_version, and the old session gets 401', async () => {
+      const { verifyPbkdf2 } = await import('../lib/passwordVerify.js');
+      await seedOwner();
+      await seedRole('staff', ['users']);
+      await seedUser('mgr', { role_id: 'staff' });
+      const oldMgr = await claims('mgr');
+      const before = await user('mgr');
+
+      const res = await request(port, 'PUT', '/api/users/mgr', { user: await claims('owner'), body: { password: 'fresh-pass-1' } });
+      expect(res.status).toBe(200);
+      const after = await user('mgr');
+      expect(verifyPbkdf2('fresh-pass-1', after.password_hash)).toBe(true);
+      expect(after.auth_version).toBe(before.auth_version + 1);
+
+      expect((await request(port, 'GET', '/api/users', { user: oldMgr })).status).toBe(401);
+      // a session issued after the change (a fresh login) works
+      expect((await request(port, 'GET', '/api/users', { user: await claims('mgr') })).status).toBe(200);
+    });
+
+    it('an administrator changing their own password also ends their older sessions', async () => {
+      await seedOwner();
+      const oldOwner = await claims('owner');
+      expect((await request(port, 'PUT', '/api/users/owner', { user: oldOwner, body: { password: 'fresh-pass-1' } })).status).toBe(200);
+      expect((await request(port, 'GET', '/api/users', { user: oldOwner })).status).toBe(401);
+    });
+
+    it('a profile edit without a password does not bump auth_version (no forced re-login)', async () => {
+      await seedOwner();
+      await seedUser('clerk');
+      const oldClerk = await claims('clerk');
+      expect((await request(port, 'PUT', '/api/users/clerk', { user: await claims('owner'), body: { name: 'c2', email: 'c@x.com', password: '' } })).status).toBe(200);
+      expect((await user('clerk')).auth_version).toBe(oldClerk.userAuthVersion);
+    });
   });
 });
