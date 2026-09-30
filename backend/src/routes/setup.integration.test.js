@@ -8,6 +8,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import express from 'express';
 import http from 'http';
+import process from 'node:process';
 import { checkPostgresReachable, setupScratchDb, teardownScratchDb } from '../test-helpers/scratchDb.js';
 
 const dbCheck = await checkPostgresReachable();
@@ -185,6 +186,41 @@ describe('routes/setup.js — real PostgreSQL + real HTTP integration', () => {
         headers: { Origin: 'http://localhost:5173' },
         body: { name: 'Admin', id: 'admin', password: 'correct-horse-battery-staple', confirmPassword: 'correct-horse-battery-staple' },
       });
+      expect(res.status).toBe(201);
+    });
+
+    // S1 — a production install (config file present) with no FRONTEND_ORIGIN configured trusts
+    // only the app's own origin; the Vite dev default must not leak into production.
+    async function inProductionWithoutFrontendOrigin(fn) {
+      const { configSource } = await import('../lib/config.js');
+      const savedMode = configSource.mode;
+      const savedOrigin = process.env.FRONTEND_ORIGIN;
+      configSource.mode = 'production';
+      delete process.env.FRONTEND_ORIGIN;
+      try {
+        return await fn();
+      } finally {
+        configSource.mode = savedMode;
+        if (savedOrigin === undefined) delete process.env.FRONTEND_ORIGIN; else process.env.FRONTEND_ORIGIN = savedOrigin;
+      }
+    }
+
+    it('production without FRONTEND_ORIGIN: rejects Origin http://localhost:5173 with 403, creates nothing', async () => {
+      const res = await inProductionWithoutFrontendOrigin(() => request(port, {
+        method: 'POST', path: '/api/setup',
+        headers: { Origin: 'http://localhost:5173' },
+        body: { name: 'Admin', id: 'admin', password: 'correct-horse-battery-staple', confirmPassword: 'correct-horse-battery-staple' },
+      }));
+      expect(res.status).toBe(403);
+      expect(await client.users.count()).toBe(0);
+    });
+
+    it('production without FRONTEND_ORIGIN: the packaged same-origin setup (Origin http://localhost:<PORT>) still succeeds', async () => {
+      const res = await inProductionWithoutFrontendOrigin(() => request(port, {
+        method: 'POST', path: '/api/setup',
+        headers: { Origin: `http://localhost:${port}` },
+        body: { name: 'Admin', id: 'admin', password: 'correct-horse-battery-staple', confirmPassword: 'correct-horse-battery-staple' },
+      }));
       expect(res.status).toBe(201);
     });
 

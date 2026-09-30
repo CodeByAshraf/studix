@@ -31,6 +31,7 @@
 // ─────────────────────────────────────────────────────────────
 import fs from 'fs';
 import path from 'path';
+import process from 'node:process';
 import dotenv from 'dotenv';
 
 export function resolveProductionConfigPath() {
@@ -59,3 +60,19 @@ export function loadEnvConfig({ existsSync = fs.existsSync, dotenvConfig = doten
 // above for why import ORDER (this must be first in server.js) matters, not just that it
 // eventually runs somewhere.
 export const configSource = loadEnvConfig();
+
+// The Vite dev server's origin — the only cross-origin frontend this app ever has by default.
+export const DEV_FRONTEND_ORIGIN = 'http://localhost:5173';
+
+// resolveFrontendOrigin: the one origin allowed to make credentialed cross-origin requests
+// (server.js CORS) and to pass setup.js's Origin guard besides the app's own origin.
+//   1. An explicit FRONTEND_ORIGIN always wins.
+//   2. Development mode (no production config file): the Vite dev server default.
+//   3. Production with nothing configured: null — the packaged app serves its own frontend
+//      (same-origin), so no other origin is trusted. A fallback here would let anything
+//      listening on localhost:5173 act with the logged-in user's session.
+// Read live on each call (not cached) so tests and a changed env are always honored.
+export function resolveFrontendOrigin(env = process.env, mode = configSource.mode) {
+  if (env.FRONTEND_ORIGIN) return env.FRONTEND_ORIGIN;
+  return mode === 'development' ? DEV_FRONTEND_ORIGIN : null;
+}

@@ -22,7 +22,7 @@
 // imports) always ran too late for those two modules — verified and fixed here, see
 // lib/config.js's own header comment for the full explanation. No signing/verification logic
 // changed anywhere; only when the secret becomes available.
-import './lib/config.js';
+import { resolveFrontendOrigin } from './lib/config.js';
 
 import express from 'express';
 import cors from 'cors';
@@ -147,8 +147,12 @@ const COLLECTION_PERMISSIONS = {
 const PRESERVE_CLIENT_ID_COLLECTIONS = new Set(['students', 'groups', 'admissions', 'cashboxes']);
 
 // أصل الفرونت-إند المحلي فقط — credentials:true مطلوب لإرسال/استقبال كوكي الجلسة HttpOnly
-const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'http://localhost:5173';
-app.use(cors({ origin: FRONTEND_ORIGIN, credentials: true }));
+// S1: credentialed CORS only for an explicitly configured origin (or the Vite dev default in
+// development — lib/config.js resolveFrontendOrigin). A production install serves its own
+// frontend same-origin, so with nothing configured the middleware is not mounted at all:
+// cors() without an `origin` key defaults to '*', so never call it without a real origin.
+const FRONTEND_ORIGIN = resolveFrontendOrigin();
+if (FRONTEND_ORIGIN) app.use(cors({ origin: FRONTEND_ORIGIN, credentials: true }));
 app.use(express.json({ limit: '5mb' }));
 
 // ── Phase 5b: Licensing enforcement — عالمياً، مبكراً، قبل أي شيء آخر تحت /api/ ──

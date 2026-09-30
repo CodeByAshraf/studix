@@ -6,7 +6,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { resolveProductionConfigPath, loadEnvConfig } from './config.js';
+import { resolveProductionConfigPath, loadEnvConfig, resolveFrontendOrigin, DEV_FRONTEND_ORIGIN } from './config.js';
 
 const ENV_KEYS_TO_RESTORE = ['STUDIX_CONFIG_PATH', 'ProgramData', 'STUDIX_TEST_PROBE_VALUE'];
 let savedEnv;
@@ -85,5 +85,25 @@ describe('loadEnvConfig — precedence', () => {
     expect(result.mode).toBe('production');
     expect(calls).toHaveLength(1);
     expect(calls[0]).toHaveProperty('path');
+  });
+});
+
+// S1 — which origin may make credentialed cross-origin requests (server.js CORS) and pass the
+// setup Origin guard. env and mode are passed explicitly: no dependence on this machine.
+describe('resolveFrontendOrigin', () => {
+  it('an explicit FRONTEND_ORIGIN always wins, in either mode', () => {
+    const env = { FRONTEND_ORIGIN: 'http://localhost:3000' };
+    expect(resolveFrontendOrigin(env, 'development')).toBe('http://localhost:3000');
+    expect(resolveFrontendOrigin(env, 'production')).toBe('http://localhost:3000');
+  });
+
+  it('development mode without FRONTEND_ORIGIN defaults to the Vite dev server origin', () => {
+    expect(resolveFrontendOrigin({}, 'development')).toBe(DEV_FRONTEND_ORIGIN);
+    expect(DEV_FRONTEND_ORIGIN).toBe('http://localhost:5173');
+  });
+
+  it('production mode without FRONTEND_ORIGIN trusts no extra origin (null), even an empty value', () => {
+    expect(resolveFrontendOrigin({}, 'production')).toBeNull();
+    expect(resolveFrontendOrigin({ FRONTEND_ORIGIN: '' }, 'production')).toBeNull();
   });
 });

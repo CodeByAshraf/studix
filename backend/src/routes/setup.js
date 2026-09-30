@@ -25,6 +25,7 @@ import { ensureFirstAdmin, isSetupOpen, FirstAdminError } from '../db/firstAdmin
 import { signSession, SESSION_COOKIE_NAME, SESSION_MAX_AGE_MS, getSessionCookieOptions } from '../lib/session.js';
 import { getAuthState } from '../lib/authCache.js';
 import { resolveEffectivePermissions } from '../middleware/permissions.js';
+import { resolveFrontendOrigin } from '../lib/config.js';
 
 const router = Router();
 
@@ -51,12 +52,15 @@ const setupLimiter = rateLimit({
 // frontend itself — or the dev Vite-on-a-different-port topology via FRONTEND_ORIGIN); Origin
 // is not required to be present at all (many legitimate non-browser/same-origin requests omit
 // it), matching this codebase's existing CORS posture rather than inventing a stricter one.
+// S1: the extra frontend origin comes from the same resolver as server.js's CORS
+// (lib/config.js) — in production with nothing configured, only the app's own origin passes.
 function setupOriginGuard(req, res, next) {
   const port = process.env.PORT || 4000;
+  const frontendOrigin = resolveFrontendOrigin();
   const allowedOrigins = new Set([
     `http://127.0.0.1:${port}`,
     `http://localhost:${port}`,
-    process.env.FRONTEND_ORIGIN || 'http://localhost:5173',
+    ...(frontendOrigin ? [frontendOrigin] : []),
   ]);
   const origin = req.headers.origin;
   if (origin && !allowedOrigins.has(origin)) {
