@@ -83,6 +83,10 @@ import { validateDatabaseUrl, describeStartupFailure } from './lib/startupErrors
 import { createGracefulShutdown, registerShutdownHandlers, registerFatalErrorHandlers } from './lib/shutdown.js';
 
 const app = express();
+// M1: route matching must be case-sensitive like requireActivation's path check — otherwise
+// '/API/students' is "not under /api/" (activation-exempt) yet still matches '/api/students'.
+// Must precede the first app.use(): Express builds its router lazily and ignores a later set().
+app.set('case sensitive routing', true);
 const PORT = process.env.PORT || 4000;
 
 // Desktop runtime preparation — تطبيق سطح مكتب محلي لكل معلّم (لا reverse proxy، لا
