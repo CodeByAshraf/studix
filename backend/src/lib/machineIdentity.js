@@ -65,9 +65,22 @@ export function getWindowsMachineGuid(io = {}, platform = process.platform) {
   return guid;
 }
 
+// The real machine's fingerprint, memoized for the life of the process. MachineGuid cannot
+// change under a running process (it changes only on an OS reinstall/sysprep, which restarts
+// the service), and reading it spawns reg.exe synchronously — ~14 ms of blocked event loop —
+// which license.js would otherwise pay on every licensed API request. Failures are never
+// cached: the next call retries, and callers keep failing closed until a read succeeds.
+let processMachineId = null;
+
 // computeCurrentMachineId: the only function license.js ever calls. Returns a stable,
 // non-reversible-to-the-raw-GUID fingerprint safe to embed in a signed license artifact.
-export function computeCurrentMachineId(io = {}, platform = process.platform) {
-  const guid = getWindowsMachineGuid(io, platform);
-  return crypto.createHash('sha256').update(`${MACHINE_ID_DOMAIN_PREFIX}${guid}`, 'utf8').digest('hex');
+// Called with no arguments (production), the result is memoized; any injected `io`/`platform`
+// (tests) always computes afresh and never reads or writes the memo.
+export function computeCurrentMachineId(io, platform) {
+  const isRealMachine = io === undefined && platform === undefined;
+  if (isRealMachine && processMachineId) return processMachineId;
+  const guid = getWindowsMachineGuid(io ?? {}, platform ?? process.platform);
+  const machineId = crypto.createHash('sha256').update(`${MACHINE_ID_DOMAIN_PREFIX}${guid}`, 'utf8').digest('hex');
+  if (isRealMachine) processMachineId = machineId;
+  return machineId;
 }

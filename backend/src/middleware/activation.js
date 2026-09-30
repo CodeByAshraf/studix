@@ -12,7 +12,7 @@
 // INSTALLATION, not of who is asking, so this can (and does) run before/independently of
 // authentication entirely.
 // ─────────────────────────────────────────────────────────────
-import { getLicenseStatus } from '../lib/license.js';
+import { getCachedLicenseStatus } from '../lib/license.js';
 
 // القائمة البيضاء قصيرة وصريحة عمداً — يجب أن تبقى كذلك.
 // INSTALL-04: /api/setup أُضيف لنفس السبب بالضبط الذي أُضيف له /api/license — لا يجوز أن
@@ -31,12 +31,14 @@ export function isActivationExempt(path) {
 
 // requireActivation: فشل مغلَق حتى في حالات الخطأ غير المتوقّعة — أي استثناء أثناء فحص
 // الحالة (قاعدة بيانات غير متاحة مثلاً) يُعامَل كـ "غير مُفعَّل"، لا كـ "تجاوز الفحص".
+// getCachedLicenseStatus: full verification at most once per LICENSE_STATUS_CACHE_TTL_MS
+// while activated (lib/license.js); never caches a failure.
 export async function requireActivation(req, res, next) {
   if (isActivationExempt(req.path)) return next();
 
   let status;
   try {
-    status = await getLicenseStatus();
+    status = await getCachedLicenseStatus();
   } catch {
     return res.status(402).json({ ok: false, error: 'تعذّر التحقّق من حالة التفعيل.', licenseRequired: true });
   }

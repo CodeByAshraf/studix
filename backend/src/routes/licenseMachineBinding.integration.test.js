@@ -52,7 +52,7 @@ describe('Machine binding — real enforcement pipeline (real scratch database)'
   let scratch;
   let owner;
   let PRODUCT_ID, buildLicenseArtifactPayload;
-  let getLicenseStatus, verifyAndActivateLicense;
+  let getLicenseStatus, verifyAndActivateLicense, invalidateLicenseStatusCache;
   let requireActivation;
 
   function signPayload(privateKeyPem, payloadB64) {
@@ -85,7 +85,7 @@ describe('Machine binding — real enforcement pipeline (real scratch database)'
     owner = makeOwnerKeyPair();
     trustAnchor.pem = owner.publicKey; // P1-3: this test's key is the release anchor
     ({ PRODUCT_ID, buildLicenseArtifactPayload } = await import('../lib/licenseArtifactFormat.js'));
-    ({ getLicenseStatus, verifyAndActivateLicense } = await import('../lib/license.js'));
+    ({ getLicenseStatus, verifyAndActivateLicense, invalidateLicenseStatusCache } = await import('../lib/license.js'));
     ({ requireActivation } = await import('../middleware/activation.js'));
   }, 60_000);
 
@@ -97,6 +97,7 @@ describe('Machine binding — real enforcement pipeline (real scratch database)'
     setMockMachineId('machine-A-fingerprint');
     await scratch.client.$executeRawUnsafe('DELETE FROM license_config');
     await scratch.client.$executeRawUnsafe('DELETE FROM support_access_config');
+    invalidateLicenseStatusCache(); // rows are rewritten directly — no cached status may carry over
   });
 
   async function seedInstallation() {
@@ -150,7 +151,11 @@ describe('Machine binding — real enforcement pipeline (real scratch database)'
     expect(onA.next).toHaveBeenCalledOnce();
     expect(onA.res.statusCode).toBeNull();
 
+    // A real machine change means a different process (the fingerprint is memoized per process,
+    // machineIdentity.js), which always starts with an empty gate cache. Swapping the injected
+    // fingerprint inside one process simulates that, so the cache is reset with it.
     setMockMachineId('machine-B-fingerprint');
+    invalidateLicenseStatusCache();
     const onB = mockReqRes({ path: '/api/students' });
     await requireActivation(onB.req, onB.res, onB.next);
     expect(onB.next).not.toHaveBeenCalled();
@@ -160,6 +165,7 @@ describe('Machine binding — real enforcement pipeline (real scratch database)'
     // proves this is a live, per-request check (not a one-time flag) — moving the same
     // database back to the original machine restores access without any reactivation.
     setMockMachineId('machine-A-fingerprint');
+    invalidateLicenseStatusCache();
     const backOnA = mockReqRes({ path: '/api/students' });
     await requireActivation(backOnA.req, backOnA.res, backOnA.next);
     expect(backOnA.next).toHaveBeenCalledOnce();

@@ -42,7 +42,7 @@ describe('Licensing — Phase 5e hardening (real scratch database)', () => {
   let scratch;
   let licensingKeyPair, supportAccessKeyPair;
   let PRODUCT_ID, buildLicenseArtifactPayload;
-  let getLicenseStatus, verifyAndActivateLicense;
+  let getLicenseStatus, verifyAndActivateLicense, invalidateLicenseStatusCache;
   let requireActivation;
 
   function signPayload(privateKeyPem, payloadB64) {
@@ -77,7 +77,7 @@ describe('Licensing — Phase 5e hardening (real scratch database)', () => {
     supportAccessKeyPair = makeKeyPair(); // structurally identical Ed25519 keypair, different trust namespace
 
     ({ PRODUCT_ID, buildLicenseArtifactPayload } = await import('../lib/licenseArtifactFormat.js'));
-    ({ getLicenseStatus, verifyAndActivateLicense } = await import('../lib/license.js'));
+    ({ getLicenseStatus, verifyAndActivateLicense, invalidateLicenseStatusCache } = await import('../lib/license.js'));
     ({ requireActivation } = await import('../middleware/activation.js'));
   }, 60_000);
 
@@ -88,6 +88,7 @@ describe('Licensing — Phase 5e hardening (real scratch database)', () => {
   beforeEach(async () => {
     await scratch.client.$executeRawUnsafe('DELETE FROM license_config');
     await scratch.client.$executeRawUnsafe('DELETE FROM support_access_config');
+    invalidateLicenseStatusCache(); // rows are rewritten directly — no cached status may carry over
   });
 
   async function seedInstallation() {

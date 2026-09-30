@@ -180,6 +180,50 @@ export async function getLicenseStatus({ machineIdentity = computeCurrentMachine
   };
 }
 
+// ── Activation-gate status cache (used only by middleware/activation.js) ──
+// requireActivation runs on every licensed API request; a full getLicenseStatus() costs ~4 DB
+// round trips, a signature verification and the clock-guard check. Only a SUCCESSFUL full
+// verification is cached, for at most LICENSE_STATUS_CACHE_TTL_MS, and a cached entry is
+// ignored the moment the license's own expiresAt passes or the clock is seen moving backwards
+// — so the gate still fails closed: "not activated" and errors are never cached, and a stale
+// positive lives no longer than the TTL. verifyAndActivateLicense() invalidates it at once.
+// GET /api/license/status (routes/license.js) keeps calling getLicenseStatus() uncached.
+export const LICENSE_STATUS_CACHE_TTL_MS = 30_000;
+
+let cachedStatus = null; // { status, checkedAt } — an activated status only
+let inFlight = null;     // one shared verification for concurrent cache misses
+let generation = 0;      // bumped by invalidation, so an in-flight result started before it is dropped
+
+function isUsableCachedStatus(entry, now) {
+  if (!entry) return false;
+  if (now < entry.checkedAt || now - entry.checkedAt >= LICENSE_STATUS_CACHE_TTL_MS) return false;
+  const { expiresAt } = entry.status;
+  return expiresAt === null || now < new Date(expiresAt).getTime();
+}
+
+export function invalidateLicenseStatusCache() {
+  generation += 1;
+  cachedStatus = null;
+  inFlight = null;
+}
+
+export async function getCachedLicenseStatus() {
+  if (isUsableCachedStatus(cachedStatus, Date.now())) return cachedStatus.status;
+  if (!inFlight) {
+    const startedIn = generation;
+    const verification = getLicenseStatus()
+      .then((status) => {
+        if (startedIn === generation) cachedStatus = status.activated ? { status, checkedAt: Date.now() } : null;
+        return status;
+      })
+      .finally(() => {
+        if (inFlight === verification) inFlight = null;
+      });
+    inFlight = verification;
+  }
+  return inFlight;
+}
+
 // requestActivationCode: يبني رمز طلب التفعيل المرتبط بهذا التثبيت وهذا الجهاز تحديداً (لا
 // يحتاج مفتاحاً عاماً مُهيَّأ — هذا الرمز لا يُتحقَّق منه محلياً إطلاقاً، فقط يُرسَل للمالك
 // ليضمّن machineId في الشهادة الموقَّعة التي سيُصدرها). فشل قراءة هوية الجهاز يمنع توليد
@@ -239,6 +283,7 @@ export async function verifyAndActivateLicense({ artifact }, { machineIdentity =
       activated_at: new Date(),
     },
   });
+  invalidateLicenseStatusCache(); // the gate must see the new artifact on its next request
 
   return { ok: true, reason: null, payload: check.payload };
 }

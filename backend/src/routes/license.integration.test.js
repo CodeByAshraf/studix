@@ -11,6 +11,7 @@
 // supertest dependency anywhere in this codebase).
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import crypto from 'crypto';
+import { setTimeout as sleep } from 'timers/promises';
 import { checkPostgresReachable, setupScratchDb, teardownScratchDb } from '../test-helpers/scratchDb.js';
 
 process.env.SESSION_SECRET = process.env.SESSION_SECRET || 'studix-test-session-secret-not-for-production';
@@ -53,7 +54,7 @@ describe('Licensing — Phase 5b backend core (real scratch database)', () => {
 
   // dynamically imported after globalThis.prisma injection — see setupScratchDb's own docs
   let PRODUCT_ID, buildLicenseArtifactPayload;
-  let getLicenseStatus, requestActivationCode, verifyAndActivateLicense;
+  let getLicenseStatus, requestActivationCode, verifyAndActivateLicense, invalidateLicenseStatusCache, getCachedLicenseStatus;
   let getLicenseStatusForActor, requestLicenseActivationCode, activateLicense;
   let requireActivation, isActivationExempt;
   let requireRole;
@@ -87,7 +88,9 @@ describe('Licensing — Phase 5b backend core (real scratch database)', () => {
     impostor = makeOwnerKeyPair();
 
     ({ PRODUCT_ID, buildLicenseArtifactPayload } = await import('../lib/licenseArtifactFormat.js'));
-    ({ getLicenseStatus, requestActivationCode, verifyAndActivateLicense } = await import('../lib/license.js'));
+    ({
+      getLicenseStatus, requestActivationCode, verifyAndActivateLicense, invalidateLicenseStatusCache, getCachedLicenseStatus,
+    } = await import('../lib/license.js'));
     ({ getLicenseStatusForActor, requestLicenseActivationCode, activateLicense } = await import('./license.js'));
     ({ requireActivation, isActivationExempt } = await import('../middleware/activation.js'));
     ({ requireRole } = await import('../middleware/auth.js'));
@@ -109,6 +112,9 @@ describe('Licensing — Phase 5b backend core (real scratch database)', () => {
     // user id reused across tests (e.g. 'admin1') could resolve against a stale cached
     // entry from a previous test's now-deleted row instead of a real, fresh DB lookup.
     clearAuthCache();
+    // Same reason for the activation gate's status cache: rows are rewritten directly here,
+    // so a previous test's cached "activated" must not carry over.
+    invalidateLicenseStatusCache();
   });
 
   async function seedInstallation() {
@@ -428,6 +434,93 @@ describe('Licensing — Phase 5b backend core (real scratch database)', () => {
       await requireActivation(req, res, next);
       expect(next).not.toHaveBeenCalled();
       expect(res.statusCode).toBe(402);
+    });
+  });
+
+  // P1 (review) — the gate caches a successful full verification for a short TTL instead of
+  // re-verifying on every request. These pin down exactly what may and may not be cached.
+  describe('requireActivation — status cache (fail-closed boundaries)', () => {
+    async function gate(path = '/api/students') {
+      const { req, res, next } = mockReqRes({ path });
+      await requireActivation(req, res, next);
+      return { passed: next.mock.calls.length === 1, status: res.statusCode };
+    }
+
+    async function activate(overrides) {
+      const installation = await seedInstallation();
+      await seedLicenseConfig();
+      const artifact = buildSignedArtifact({ privateKeyPem: owner.privateKey, installationId: installation.installation_id, overrides });
+      expect((await verifyAndActivateLicense({ artifact })).ok).toBe(true);
+      return artifact;
+    }
+
+    it('a verified activation is served from the cache: an out-of-band database change is seen after invalidation', async () => {
+      await activate();
+      expect(await gate()).toEqual({ passed: true, status: null });
+
+      // bypass the application entirely (e.g. a manual SQL edit) — the cached positive holds…
+      await client.$executeRawUnsafe('DELETE FROM license_config');
+      expect((await gate()).passed).toBe(true);
+
+      // …only until it is invalidated (or LICENSE_STATUS_CACHE_TTL_MS elapses)
+      invalidateLicenseStatusCache();
+      expect(await gate()).toEqual({ passed: false, status: 402 });
+    });
+
+    it('a failed check is never cached: an activation written straight to the database is seen on the next request', async () => {
+      const installation = await seedInstallation();
+      await seedLicenseConfig();
+      expect(await gate()).toEqual({ passed: false, status: 402 });
+      expect(await gate()).toEqual({ passed: false, status: 402 }); // still blocked: nothing was cached
+
+      const artifact = buildSignedArtifact({ privateKeyPem: owner.privateKey, installationId: installation.installation_id });
+      await client.license_config.update({ where: { id: 1 }, data: { license_artifact: artifact } }); // no invalidation
+      expect(await gate()).toEqual({ passed: true, status: null });
+    });
+
+    // Observed through getCachedLicenseStatus() itself (the gate's own source), never by spying
+    // on Prisma model delegates — restoring such a spy can leave the shared client broken.
+    it('verifyAndActivateLicense invalidates the cache, so a replacement license is re-verified on the next request', async () => {
+      await activate({ licenseId: 'lic_ORIGINAL' });
+      const warm = await getCachedLicenseStatus();
+      expect(warm.licenseId).toBe('lic_ORIGINAL');
+      expect(await getCachedLicenseStatus()).toBe(warm); // served from the cache (same object)
+
+      const installation = await client.support_access_config.findUnique({ where: { id: 1 } });
+      const renewed = buildSignedArtifact({ privateKeyPem: owner.privateKey, installationId: installation.installation_id, overrides: { licenseId: 'lic_RENEWED' } });
+      expect((await verifyAndActivateLicense({ artifact: renewed })).ok).toBe(true);
+
+      // without the invalidation this would still be the cached lic_ORIGINAL status
+      expect((await getCachedLicenseStatus()).licenseId).toBe('lic_RENEWED');
+    });
+
+    it('a cached activation still stops at the license\'s own expiresAt, without waiting for the TTL', async () => {
+      await activate({ issuedAt: Date.now() - 2000, expiresAt: Date.now() + 500 });
+      expect((await gate('/api/payments')).passed).toBe(true); // cached now
+      await sleep(700);
+      expect(await gate('/api/payments')).toEqual({ passed: false, status: 402 });
+    });
+
+    it('a clock moved backwards skips the cache and re-runs the full check, so the rollback guard still fires', async () => {
+      await activate();
+      expect((await gate()).passed).toBe(true); // cached, and the clock high-water mark is recorded
+      const realNow = Date.now();
+      const spy = vi.spyOn(Date, 'now').mockReturnValue(realNow - 7 * 60 * 60 * 1000); // > 6 h tolerance
+      try {
+        expect(await gate()).toEqual({ passed: false, status: 402 });
+        expect((await getLicenseStatus()).reason).toBe('clock_rollback_detected');
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('concurrent requests on a cold cache share one verification', async () => {
+      await activate();
+      const statuses = await Promise.all(Array.from({ length: 10 }, () => getCachedLicenseStatus()));
+      expect(statuses.every((s) => s.activated)).toBe(true);
+      // one shared verification → one status object; separate verifications would each build their own
+      expect(new Set(statuses).size).toBe(1);
+      expect((await Promise.all(Array.from({ length: 10 }, () => gate()))).every((r) => r.passed)).toBe(true);
     });
   });
 
