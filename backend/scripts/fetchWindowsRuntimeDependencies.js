@@ -87,6 +87,23 @@ async function fetchNssm(manifest, outDir, tmpDir) {
   console.log(`✅ NSSM ${cfg.version} -> ${targetExe}`);
 }
 
+// Installer B1 — Microsoft's VC++ 2015-2022 x64 redistributable, which the bundled PostgreSQL
+// binaries need. A single signed .exe (no archive): verified, then copied as-is next to nssm.exe.
+// installer/studix.iss runs it before firstInstall.js.
+async function fetchVcRedist(manifest, outDir, tmpDir) {
+  const cfg = manifest.vcredist;
+  const exePath = path.join(tmpDir, 'vc_redist.x64.exe');
+  await fetchAndVerify({
+    url: cfg.url, expectedSha256: cfg.sha256, label: `VC++ redistributable ${cfg.version}`,
+    destPath: exePath, downloadFn: realDownload,
+  });
+
+  const targetExe = path.join(outDir, cfg.extractTo);
+  fs.mkdirSync(path.dirname(targetExe), { recursive: true });
+  fs.copyFileSync(exePath, targetExe);
+  console.log(`✅ VC++ redistributable ${cfg.version} -> ${targetExe}`);
+}
+
 async function main() {
   const outDir = process.argv[2];
   if (!outDir) {
@@ -95,7 +112,7 @@ async function main() {
     return;
   }
 
-  console.log('\n=== Studix — تنزيل تبعيات وقت التشغيل المُثبَّتة (PostgreSQL + NSSM) ===\n');
+  console.log('\n=== Studix — تنزيل تبعيات وقت التشغيل المُثبَّتة (PostgreSQL + NSSM + VC++ runtime) ===\n');
 
   const manifest = loadManifest();
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'studix-deps-'));
@@ -105,6 +122,7 @@ async function main() {
   const jobs = [
     { name: 'PostgreSQL', run: () => fetchPostgres(manifest, outDir, tmpDir) },
     { name: 'NSSM', run: () => fetchNssm(manifest, outDir, tmpDir) },
+    { name: 'VC++ runtime', run: () => fetchVcRedist(manifest, outDir, tmpDir) },
   ];
   let anyFailed = false;
   try {

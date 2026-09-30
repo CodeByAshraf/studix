@@ -16,5 +16,15 @@
     "sha256": "99f5045fffbffb745d67fe3a065a953c4a3d9c253b868892d9b685b0ee7d07b8",
     "extractSourceSubpath": "nssm-2.24-101-g897c7ad/win64/nssm.exe",
     "extractTo": "tools/nssm.exe"
+  },
+  "vcredist": {
+    "version": "14.44.35211",
+    "_why": "Installer B1 — the bundled PostgreSQL binaries (initdb/pg_ctl/postgres/pg_dump/pg_restore/libpq, PE linker version 14.44) import vcruntime140.dll, vcruntime140_1.dll and msvcp140.dll. None ships with Windows or in the EDB binaries zip. installer/studix.iss runs this redistributable before firstInstall.js.",
+    "landingPage": "https://aka.ms/vs/17/release/vc_redist.x64.exe",
+    "_urlNote": "The landingPage permalink always serves Microsoft's latest build, so it cannot be pinned. The url below is the versioned download it redirected to (HTTP 301) on 2026-09-30. The path segment before the file name is the file's own SHA-256.",
+    "url": "https://download.visualstudio.microsoft.com/download/pr/bd1c8d9d-ba95-4eee-bc6e-df1fcc876373/CC0FF0EB1DC3F5188AE6300FAEF32BF5BEEBA4BDD6E8E445A9184072096B713B/VC_redist.x64.exe",
+    "_verifiedNote": "Downloaded for real on 2026-09-30 (25635768 bytes). Get-FileHash and sha256sum agreed, and both equal the hash in Microsoft's URL. Authenticode status Valid, signer CN=Microsoft Corporation, issuer Microsoft Code Signing PCA 2011. FileVersion 14.44.35211.0, ProductName 'Microsoft Visual C++ 2015-2022 Redistributable (x64) - 14.44.35211', which matches the 14.44 toolset the PostgreSQL binaries were linked with.",
+    "sha256": "cc0ff0eb1dc3f5188ae6300faef32bf5beeba4bdd6e8e445a9184072096b713b",
+    "extractTo": "tools/vc_redist.x64.exe"
   }
 }

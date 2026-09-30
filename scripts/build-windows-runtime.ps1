@@ -278,9 +278,20 @@ if ($SkipDependencyFetch) {
     Write-Host ""
     Write-Host "Skipping PostgreSQL/NSSM dependency fetch (-SkipDependencyFetch passed)." -ForegroundColor Yellow
 } else {
-    Step 'Fetching pinned PostgreSQL/NSSM binaries (INSTALL-06)'
+    Step 'Fetching pinned PostgreSQL/NSSM/VC++ runtime binaries (INSTALL-06, installer B1)'
     node (Join-Path $Backend 'scripts\fetchWindowsRuntimeDependencies.js') $OutDir
-    if ($LASTEXITCODE -ne 0) { Fail 'Fetching PostgreSQL/NSSM runtime dependencies failed.' }
+    if ($LASTEXITCODE -ne 0) { Fail 'Fetching PostgreSQL/NSSM/VC++ runtime dependencies failed.' }
+
+    # Installer B1: studix.iss runs {app}\tools\vc_redist.x64.exe before firstInstall.js (the
+    # bundled PostgreSQL needs the MSVC runtime). Re-check the packaged copy against the pinned hash.
+    $VcRedistOut = Join-Path $OutDir 'tools\vc_redist.x64.exe'
+    if (-not (Test-Path $VcRedistOut)) { Fail "tools\vc_redist.x64.exe is missing from the assembled package." }
+    $DepsManifest = Get-Content (Join-Path $Backend 'scripts\windows-runtime-dependencies.json') -Raw | ConvertFrom-Json
+    $VcRedistHash = (Get-FileHash -Algorithm SHA256 $VcRedistOut).Hash.ToLower()
+    if ($VcRedistHash -ne $DepsManifest.vcredist.sha256) {
+        Fail "tools\vc_redist.x64.exe SHA256 $VcRedistHash does not match the pinned $($DepsManifest.vcredist.sha256)."
+    }
+    Write-Host "VC++ redistributable $($DepsManifest.vcredist.version) packaged and verified ($VcRedistHash)." -ForegroundColor Green
 }
 
 # ── 9. Portability scan — no developer-machine paths baked into the package ──────────────

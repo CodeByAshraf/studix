@@ -60,6 +60,12 @@
 ; dedicated CLI (backend/scripts/manageScheduledTask.js), reusing the exact same Exec()-a-thin-
 ; Node-CLI mechanism as BestEffortUnregisterServiceForUninstall (INSTALL-09) — independent of,
 ; and without weakening, the existing fail-closed D1-D5 wipe/service-teardown protections.
+;
+; Installer B1 — the bundled PostgreSQL binaries need the Microsoft VC++ 2015-2022 x64 runtime
+; (vcruntime140.dll, vcruntime140_1.dll, msvcp140.dll), which Windows does not ship. The pinned,
+; SHA-256-verified redistributable is packaged as {app}\tools\vc_redist.x64.exe (see
+; backend/scripts/windows-runtime-dependencies.json) and EnsureVcRuntime runs it at
+; ssPostInstall, before RunFirstInstall. firstInstall.js never starts if it fails.
 ; ─────────────────────────────────────────────────────────────
 
 #define MyAppName "Studix"
@@ -218,10 +224,71 @@ begin
   end;
 end;
 
+// Installer B1 — the three MSVC runtime DLLs the bundled PostgreSQL binaries import. {sys} is the
+// native 64-bit System32 here because the install runs in 64-bit mode (ArchitecturesInstallIn64BitMode).
+function VcRuntimeDllsPresent(): Boolean;
+begin
+  Result := FileExists(ExpandConstant('{sys}\vcruntime140.dll')) and
+            FileExists(ExpandConstant('{sys}\vcruntime140_1.dll')) and
+            FileExists(ExpandConstant('{sys}\msvcp140.dll'));
+end;
+
+// EnsureVcRuntime: always runs the bundled, pinned redistributable — Microsoft's installer is
+// itself idempotent (same version: 0; a newer one already installed: 1638) — then confirms the
+// DLLs are really there. 3010 means installed with a reboot pending; /norestart means Setup never
+// reboots on its own. Any other result, or missing DLLs afterwards, is a hard failure: the
+// caller must not start firstInstall.js, whose first real work is running initdb/pg_ctl.
+function EnsureVcRuntime(): Boolean;
+var
+  RedistExe: String;
+  ResultCode: Integer;
+begin
+  Result := False;
+  RedistExe := ExpandConstant('{app}\tools\vc_redist.x64.exe');
+
+  if not FileExists(RedistExe) then
+  begin
+    MsgBox('ملف تثبيت Microsoft Visual C++ Runtime غير موجود (' + RedistExe + '). ' +
+           'لا يمكن تشغيل PostgreSQL بدونه — تم إيقاف إعداد Studix.', mbCriticalError, MB_OK);
+    Exit;
+  end;
+
+  if not Exec(RedistExe, '/install /quiet /norestart /log "' + ExpandConstant('{tmp}\vc_redist_x64.log') + '"',
+              '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  begin
+    MsgBox('تعذّر تشغيل مثبِّت Microsoft Visual C++ Runtime (' + SysErrorMessage(ResultCode) + '). ' +
+           'تم إيقاف إعداد Studix — أعد تشغيل المثبِّت.', mbCriticalError, MB_OK);
+    Exit;
+  end;
+
+  Log('Installer B1: vc_redist.x64.exe exited with code ' + IntToStr(ResultCode) +
+      ' (0 = installed, 1638 = same/newer already present, 3010 = installed, reboot pending).');
+  if (ResultCode <> 0) and (ResultCode <> 1638) and (ResultCode <> 3010) then
+  begin
+    MsgBox('فشل تثبيت Microsoft Visual C++ Runtime (رمز الخروج: ' + IntToStr(ResultCode) + '). ' +
+           'تم إيقاف إعداد Studix قبل تهيئة قاعدة البيانات — أعد تشغيل المثبِّت.', mbCriticalError, MB_OK);
+    Exit;
+  end;
+
+  if not VcRuntimeDllsPresent() then
+  begin
+    MsgBox('اكتمل مثبِّت Microsoft Visual C++ Runtime لكن ملفات التشغيل المطلوبة ما زالت غير موجودة ' +
+           '(vcruntime140.dll / vcruntime140_1.dll / msvcp140.dll). تم إيقاف إعداد Studix قبل ' +
+           'تهيئة قاعدة البيانات — أعد تشغيل الجهاز ثم أعد تشغيل المثبِّت.', mbCriticalError, MB_OK);
+    Exit;
+  end;
+
+  Result := True;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
+  begin
+    if not EnsureVcRuntime() then
+      Exit; // Installer B1: firstInstall.js (initdb/pg_ctl) never runs without the MSVC runtime
     RunFirstInstall();
+  end;
 end;
 
 // Explicit, in-code confirmation of decision #5 — NOT registered as an [UninstallDelete]
