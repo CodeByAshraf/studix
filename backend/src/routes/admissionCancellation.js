@@ -37,12 +37,23 @@ export async function cancelAdmissionWithRefund({ admissionId, reason } = {}, { 
     // محاولة إلغاء ثانية متزامنة لنفس السجل تُحجَب خلف قفل الصف الذي يفرضه هذا الـ
     // UPDATE، ثم تُعاد تقييم الشرط بعد أن تُثبَّت (commit) المعاملة الأولى — فتُطابِق
     // صفراً من الصفوف (الحالة أصبحت 'cancelled' فعلاً) وتُرفَض بدل أن تُكرِّر الاسترداد.
+    // M-02: activation (admissionActivation.js) sets stage='active' + student_id but leaves
+    // reservation_status as it was, so the reservation status alone cannot tell an activated
+    // admission apart — the guard also requires stage <> 'active' AND student_id IS NULL. Being
+    // part of this same UPDATE, it is re-evaluated against an activation that commits while this
+    // request waits on the row lock: a stale UI or a direct API call can never cancel (and
+    // refund) an admission that already has a student.
     const guard = await tx.admissions.updateMany({
-      where: { id: admissionId, reservation_status: { in: ['reserved', 'waiting'] } },
+      where: {
+        id: admissionId,
+        reservation_status: { in: ['reserved', 'waiting'] },
+        stage: { not: 'active' },
+        student_id: null,
+      },
       data:  { reservation_status: 'cancelled', stage: 'lead' },
     });
     if (guard.count !== 1) {
-      throw badRequest('لا يمكن إلغاء هذا السجل — قد يكون ملغياً بالفعل أو في حالة غير قابلة للإلغاء.');
+      throw badRequest('لا يمكن إلغاء هذا السجل — قد يكون ملغياً بالفعل، أو مفعَّلاً كطالب، أو في حالة غير قابلة للإلغاء.');
     }
 
     const admission = await tx.admissions.findUnique({ where: { id: admissionId } });

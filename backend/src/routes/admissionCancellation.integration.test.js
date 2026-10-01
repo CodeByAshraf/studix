@@ -14,6 +14,7 @@
 // is recorded instead of a silent skip or a hard failure.
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import crypto from 'crypto';
+import { setTimeout as sleep } from 'timers/promises';
 import { checkPostgresReachable, setupScratchDb, teardownScratchDb } from '../test-helpers/scratchDb.js';
 
 const dbCheck = await checkPostgresReachable();
@@ -28,6 +29,7 @@ describe('admissionCancellation.js — cancelAdmissionWithRefund real PostgreSQL
   let client;
   let createAdmissionPayment;
   let cancelAdmissionWithRefund;
+  let activateAdmission;
   let seq = 0;
 
   beforeAll(async () => {
@@ -35,6 +37,8 @@ describe('admissionCancellation.js — cancelAdmissionWithRefund real PostgreSQL
     client = scratch.client;
     ({ createAdmissionPayment } = await import('./admissionPayments.js'));
     ({ cancelAdmissionWithRefund } = await import('./admissionCancellation.js'));
+    ({ activateAdmission } = await import('./admissionActivation.js'));
+    await client.groups.create({ data: { id: 'g_cancel', name: 'مجموعة اختبار الإلغاء', price: 100 } });
   }, 60_000);
 
   afterAll(async () => {
@@ -227,6 +231,122 @@ describe('admissionCancellation.js — cancelAdmissionWithRefund real PostgreSQL
       // الحركة الأصلية والمصروف المُستنزِف فقط — لا حركة استرداد زائفة.
       expect(await client.treasury_txn.findMany({ where: { cashbox_id: cashbox.id } })).toHaveLength(2);
       expect((await client.treasury_txn.findUnique({ where: { id: originalTxn.id } }))).not.toBeNull();
+    });
+  });
+
+  // E. M-02 — an activated admission can never be cancelled/refunded ─────────────────────────
+  // Activation (admissionActivation.js) sets stage='active' + student_id but leaves
+  // reservation_status='reserved', so the guard must also require stage <> 'active' AND
+  // student_id IS NULL — inside the guarded UPDATE itself, so a stale UI or a direct API call is
+  // refused at write time and nothing is written.
+  describe('E. activated admissions are never cancelled or refunded (M-02)', () => {
+    const studentInput = () => ({ name: 'طالب مفعَّل', groupId: 'g_cancel', phone: '201000000001' });
+
+    async function seedPaidAdmission(amount = 300) {
+      const admission = await seedAdmission();
+      const cashbox = await seedCashbox({ opening_balance: 1000 });
+      const { payment } = await createAdmissionPayment({
+        admissionId: admission.id, type: 'deposit', amount, date: '2026-06-06', cashboxId: cashbox.id,
+      }, { userId: null });
+      return { admission, cashbox, payment };
+    }
+
+    async function snapshot(admissionId, cashboxId) {
+      return {
+        admission: await client.admissions.findUnique({ where: { id: admissionId } }),
+        payments: await client.admission_payments.findMany({ where: { admission_id: admissionId }, orderBy: { id: 'asc' } }),
+        treasury: await client.treasury_txn.findMany({ where: { cashbox_id: cashboxId }, orderBy: { id: 'asc' } }),
+        logs: await client.admission_system_log.findMany({ where: { admission_id: admissionId }, orderBy: { id: 'asc' } }),
+        balance: await liveBalance(cashboxId),
+      };
+    }
+
+    const refundCount = (admissionId) =>
+      client.treasury_txn.count({ where: { admission_id: admissionId, ref_type: 'admissionRefund' } });
+
+    it('a normal reserved (never activated) admission still cancels and refunds', async () => {
+      const { admission, cashbox } = await seedPaidAdmission(200);
+      const { admission: cancelled, refundTxns } = await cancelAdmissionWithRefund(
+        { admissionId: admission.id, reason: 'إلغاء عادي' }, { userId: null },
+      );
+      expect(cancelled.reservationStatus).toBe('cancelled');
+      expect(cancelled.stage).toBe('lead');
+      expect(cancelled.studentId).toBeNull();
+      expect(refundTxns).toHaveLength(1);
+      expect(await liveBalance(cashbox.id)).toBe(1000);
+    });
+
+    it('an admission activated through the real activation is rejected (400), with NO refund and NO state change', async () => {
+      const { admission, cashbox } = await seedPaidAdmission(300);
+      await activateAdmission({ admissionId: admission.id, student: studentInput() }, { userId: null });
+      const activated = await client.admissions.findUnique({ where: { id: admission.id } });
+      // The exact state a stale "reserved" list would still act on.
+      expect(activated.stage).toBe('active');
+      expect(activated.student_id).not.toBeNull();
+      expect(activated.reservation_status).toBe('reserved');
+
+      const before = await snapshot(admission.id, cashbox.id);
+      const err = await cancelAdmissionWithRefund({ admissionId: admission.id, reason: 'إلغاء قديم' }, { userId: null })
+        .catch((e) => e);
+      expect(err.status).toBe(400);
+      expect(err.message).toMatch(/لا يمكن إلغاء هذا السجل/);
+
+      expect(await snapshot(admission.id, cashbox.id)).toEqual(before);
+      expect(await refundCount(admission.id)).toBe(0);
+    });
+
+    it.each([
+      ['stage active + student_id (stale/direct request)', { stage: 'active' }],
+      ['inconsistent: student_id set while stage is not active', { stage: 'reserved' }],
+    ])('rejects %s and leaves admission/payment/treasury/log state unchanged', async (_label, stageOverride) => {
+      const { admission, cashbox } = await seedPaidAdmission(250);
+      const student = await client.students.create({ data: { id: nextId('st'), code: nextId('C'), name: 'طالب مرتبط', status: 'active' } });
+      await client.admissions.update({ where: { id: admission.id }, data: { ...stageOverride, student_id: student.id } });
+
+      const before = await snapshot(admission.id, cashbox.id);
+      await expect(cancelAdmissionWithRefund({ admissionId: admission.id, reason: 'طلب مباشر' }, { userId: null }))
+        .rejects.toMatchObject({ status: 400 });
+
+      expect(await snapshot(admission.id, cashbox.id)).toEqual(before);
+      expect(await refundCount(admission.id)).toBe(0);
+    });
+
+    it('an activation that commits while a cancellation is in flight wins: the cancellation re-checks at write time and refunds nothing', async () => {
+      const { admission, cashbox } = await seedPaidAdmission(300);
+      const student = await client.students.create({ data: { id: nextId('st'), code: nextId('C'), name: 'طالب متزامن', status: 'active' } });
+
+      // Hold an activation's own guarded write (same columns admissionActivation.js writes) open
+      // in a real transaction, so the cancellation's guarded UPDATE has to wait on the row lock.
+      let release;
+      const gate = new Promise((resolve) => { release = resolve; });
+      let locked;
+      const lockTaken = new Promise((resolve) => { locked = resolve; });
+      const activation = client.$transaction(async (tx) => {
+        const { count } = await tx.admissions.updateMany({
+          where: { id: admission.id, student_id: null },
+          data: { stage: 'active', student_id: student.id },
+        });
+        locked(count);
+        await gate;
+      }, { timeout: 20_000 });
+      expect(await lockTaken).toBe(1);
+
+      let settled = false;
+      const cancel = cancelAdmissionWithRefund({ admissionId: admission.id, reason: 'إلغاء متزامن' }, { userId: null })
+        .finally(() => { settled = true; });
+      await sleep(400);
+      expect(settled).toBe(false); // blocked behind the activation's row lock
+
+      release();
+      await activation;
+      await expect(cancel).rejects.toMatchObject({ status: 400 });
+
+      const after = await client.admissions.findUnique({ where: { id: admission.id } });
+      expect(after.stage).toBe('active');
+      expect(after.student_id).toBe(student.id);
+      expect(after.reservation_status).toBe('reserved');
+      expect(await refundCount(admission.id)).toBe(0);
+      expect(await liveBalance(cashbox.id)).toBe(1300);
     });
   });
 });
