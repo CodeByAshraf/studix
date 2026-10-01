@@ -274,13 +274,15 @@ describe('AdmissionsPage — confirm reservation with group options (M2 Group Op
     fireEvent.click(screen.getByText('📋 الحجز'));
     fireEvent.click(await screen.findByText('تأكيد الحجز'));
 
-    const g1 = await screen.findByText('مجموعة أ');
+    // M-03: the page's group filter now lists the real groups as <option>s, so the confirm
+    // picker's choices are located by their buttons (the filter options are not buttons).
+    const g1 = await screen.findByRole('button', { name: /مجموعة أ/ });
     expect(screen.getByText('3/10')).toBeInTheDocument();          // capacity from activeCount
     expect(screen.getByText('ممتلئة')).toBeInTheDocument();        // g-full is full…
-    expect(screen.getByText('مجموعة ممتلئة').closest('button')).toBeDisabled();
-    expect(screen.queryByText('مجموعة صف آخر')).toBeNull();        // other grade not offered
+    expect(screen.getByRole('button', { name: /مجموعة ممتلئة/ })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: /مجموعة صف آخر/ })).toBeNull(); // other grade not offered
 
-    fireEvent.click(g1.closest('button'));
+    fireEvent.click(g1);
     fireEvent.click(screen.getAllByRole('button').find((b) => /تأكيد/.test(b.textContent) && b.textContent !== 'تأكيد الحجز'));
 
     await waitFor(() => expect(useAppStore.getState().admissions[0].stage).toBe('confirmed'));

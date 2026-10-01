@@ -6,7 +6,7 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
 import {
   STAGES, LEAD_STATUS, RESERVATION_STATUS, LEAD_SOURCES,
-  FOLLOWUP_TYPES, ADMISSION_PAYMENT_TYPES, MOCK_GROUPS, nextAdmissionNumber, SYSTEM_EVENTS,
+  FOLLOWUP_TYPES, ADMISSION_PAYMENT_TYPES, nextAdmissionNumber, SYSTEM_EVENTS,
 } from './mockData';
 import {
   AdmissionStage, LeadStatus, ReservationStatus, PaymentType,
@@ -115,6 +115,11 @@ export default function AdmissionsPage() {
   // M2 (Group Options): groups come from GET /api/groups/options (with activeCount) — the
   // confirm picker and the activation-time lookup no longer need the Groups-only collection.
   const { groupOptions: realGroups } = useGroupOptions();
+  // M-03: an admission's only real group is its confirmed group (admissions.group_id →
+  // confirmedGroupId, set by the confirm-with-group flow). Its name is resolved from the same
+  // server group options — never a loose, unpersisted name string.
+  const groupNameById = useMemo(() => new Map(realGroups.map(g => [g.id, g.name])), [realGroups]);
+  const groupNameOf = (r) => (r?.confirmedGroupId && groupNameById.get(r.confirmedGroupId)) || null;
   const realStudents = useAppStore((s) => s.students);
   const addStudent   = useAppStore((s) => s.addStudent);
   // للربط بالمدفوعات الحقيقية والخزنة والمذكرات
@@ -149,7 +154,7 @@ export default function AdmissionsPage() {
       r.parentPhone.includes(q)
     )) return false;
     if (filterGrade && r.grade !== filterGrade) return false;
-    if (filterGroup && r.group !== filterGroup) return false;
+    if (filterGroup && r.confirmedGroupId !== filterGroup) return false;
     return true;
   };
 
@@ -198,7 +203,6 @@ export default function AdmissionsPage() {
       stage: AdmissionStage.CONFIRMED,
       reservationStatus: ReservationStatus.RESERVED,
       confirmedGroupId: groupId,
-      group: group?.name || rec.group,
       confirmedAt: new Date().toISOString().split('T')[0],
     });
     logEvent(rec.id, SystemActivityType.CONFIRMED, group?.name || '');
@@ -432,7 +436,7 @@ export default function AdmissionsPage() {
           </select>
           <select value={filterGroup} onChange={e => setFilterGroup(e.target.value)} style={{ ...inputStyle, flex: 1, minWidth: 130, cursor: 'pointer' }}>
             <option value="">كل المجموعات</option>
-            {MOCK_GROUPS.map(g => <option key={g} value={g}>{g}</option>)}
+            {realGroups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
           </select>
         </div>
 
@@ -455,14 +459,14 @@ export default function AdmissionsPage() {
         {/* محتوى التبويب */}
         <div style={{ animation: 'fadeIn .18s ease' }}>
           {tab === 'leads'    && <LeadsTab records={leadRecords} onSelect={setSelectedId} selectedId={selectedId} onConvert={convertToReservation} onAdd={(rec) => addRecord(rec, 'تمت إضافة العميل المحتمل')}/>}
-          {tab === 'reserved' && <ReservedTab records={reservedRecords} onSelect={setSelectedId} onConfirm={confirmReservation} onCancel={cancelReservation} onWaiting={moveToWaiting} onFromWaiting={moveFromWaiting} onFirstLesson={attendFirstLesson} onAdd={addReservation} onAddPayment={addPayment} materials={realMaterials} cashboxes={cashboxes} treasuryTxn={treasuryTxn}/>}
+          {tab === 'reserved' && <ReservedTab records={reservedRecords} onSelect={setSelectedId} onConfirm={confirmReservation} onCancel={cancelReservation} onWaiting={moveToWaiting} onFromWaiting={moveFromWaiting} onFirstLesson={attendFirstLesson} onAdd={addReservation} onAddPayment={addPayment} materials={realMaterials} cashboxes={cashboxes} treasuryTxn={treasuryTxn} groupNameOf={groupNameOf}/>}
           {tab === 'followup' && <FollowupTab records={followupRecords} allRecords={records} onSelect={setSelectedId} selectedId={selectedId} onAddFollowup={addFollowup}/>}
-          {tab === 'active'   && <ActiveTab records={activeRecords} onSelect={setSelectedId}/>}
+          {tab === 'active'   && <ActiveTab records={activeRecords} onSelect={setSelectedId} groupNameOf={groupNameOf}/>}
         </div>
       </div>
 
       {/* لوحة التفاصيل الجانبية */}
-      <DetailsPanel record={selected} onClose={() => setSelectedId(null)} profile={centerProfile} treasuryTxn={treasuryTxn}/>
+      <DetailsPanel record={selected} onClose={() => setSelectedId(null)} profile={centerProfile} treasuryTxn={treasuryTxn} groupName={groupNameOf(selected)}/>
 
       {/* مودال اختيار المجموعة عند تأكيد الحجز */}
       {confirmFor && (
@@ -588,7 +592,7 @@ function LeadsTab({ records, onSelect, selectedId, onConvert, onAdd }) {
 // ═══════════════════════════════════════════════════════════════════════════
 // تبويب 2: الحجز — كروت
 // ═══════════════════════════════════════════════════════════════════════════
-function ReservedTab({ records, onSelect, onConfirm, onCancel, onWaiting, onFromWaiting, onFirstLesson, onAdd, onAddPayment, materials, cashboxes, treasuryTxn }) {
+function ReservedTab({ records, onSelect, onConfirm, onCancel, onWaiting, onFromWaiting, onFirstLesson, onAdd, onAddPayment, materials, cashboxes, treasuryTxn, groupNameOf }) {
   const toast = useToast();
   const [showForm, setShowForm] = useState(false);
   const [payFor, setPayFor] = useState(null); // الطالب اللي بنسجّل له دفعة
@@ -608,7 +612,7 @@ function ReservedTab({ records, onSelect, onConfirm, onCancel, onWaiting, onFrom
   const activeCashboxes = (cashboxes || []).filter(cb => cb.active);
   // مذكرات سنة الطالب (تظهر عند اختيار نوع الدفع = مذكرات)
   const payMaterials = payFor ? (materials || []).filter(m => m.grade === payFor.grade) : [];
-  const empty = { name: '', parentName: '', phone: '', parentPhone: '', grade: GRADES[0], group: MOCK_GROUPS[0], reservationDate: new Date().toISOString().split('T')[0], reservationStatus: ReservationStatus.RESERVED, courseFee: '', notes: '' };
+  const empty = { name: '', parentName: '', phone: '', parentPhone: '', grade: GRADES[0], reservationDate: new Date().toISOString().split('T')[0], reservationStatus: ReservationStatus.RESERVED, courseFee: '', notes: '' };
   const [form, setForm] = useState(empty);
   const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
 
@@ -644,7 +648,6 @@ function ReservedTab({ records, onSelect, onConfirm, onCancel, onWaiting, onFrom
             <Field label="رقم الطالب" required><input value={form.phone} onChange={e => set('phone', e.target.value)} style={inputStyle}/></Field>
             <Field label="رقم ولي الأمر"><input value={form.parentPhone} onChange={e => set('parentPhone', e.target.value)} style={inputStyle}/></Field>
             <Field label="الصف الدراسي"><select value={form.grade} onChange={e => set('grade', e.target.value)} style={{ ...inputStyle, cursor: 'pointer' }}>{GRADES.map(g => <option key={g} value={g}>{g}</option>)}</select></Field>
-            <Field label="المجموعة"><select value={form.group} onChange={e => set('group', e.target.value)} style={{ ...inputStyle, cursor: 'pointer' }}>{MOCK_GROUPS.map(g => <option key={g} value={g}>{g}</option>)}</select></Field>
             <Field label="تاريخ الحجز"><input type="date" value={form.reservationDate} onChange={e => set('reservationDate', e.target.value)} style={inputStyle}/></Field>
             <Field label="حالة الحجز"><select value={form.reservationStatus} onChange={e => set('reservationStatus', e.target.value)} style={{ ...inputStyle, cursor: 'pointer' }}>{Object.entries(RESERVATION_STATUS).filter(([k]) => k !== 'cancelled').map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}</select></Field>
             <Field label="رسوم الدروس الشهرية (ج.م)"><input type="number" min="0" value={form.courseFee} onChange={e => set('courseFee', e.target.value)} placeholder="مثال: 500" style={inputStyle}/></Field>
@@ -674,7 +677,7 @@ function ReservedTab({ records, onSelect, onConfirm, onCancel, onWaiting, onFrom
                 <Badge label={isWaiting ? 'قائمة انتظار' : isConfirmed ? 'مؤكّد — بانتظار أول حصة' : st.label} color={isWaiting ? STAGES.waiting.color : isConfirmed ? STAGES.confirmed.color : st.color}/>
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: '0.8rem', marginBottom: 14 }}>
-                <Row label="المجموعة" value={r.group || '—'}/>
+                <Row label="المجموعة" value={groupNameOf(r) || '—'}/>
                 <Row label="تاريخ الحجز" value={r.reservationDate || '—'}/>
                 <Row label="الموظف" value={r.secretary}/>
                 {(r.payments || []).length > 0 && (() => {
@@ -894,7 +897,7 @@ function FollowupTab({ records, allRecords, onSelect, selectedId, onAddFollowup 
 // ═══════════════════════════════════════════════════════════════════════════
 // تبويب 4: الطلاب النشطون — كروت
 // ═══════════════════════════════════════════════════════════════════════════
-function ActiveTab({ records, onSelect }) {
+function ActiveTab({ records, onSelect, groupNameOf }) {
   if (records.length === 0) return <EmptyState text="لا يوجد طلاب نشطون"/>;
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 14 }}>
@@ -904,7 +907,7 @@ function ActiveTab({ records, onSelect }) {
             <Avatar name={r.name} size={46}/>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontWeight: 700, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.name}</div>
-              <div style={{ fontSize: '0.75rem', color: 'var(--text3)' }}>{r.group}</div>
+              <div style={{ fontSize: '0.75rem', color: 'var(--text3)' }}>{groupNameOf(r)}</div>
             </div>
             <Badge label="نشط" color={STAGES.active.color}/>
           </div>
@@ -922,7 +925,7 @@ function ActiveTab({ records, onSelect }) {
 // ═══════════════════════════════════════════════════════════════════════════
 // لوحة التفاصيل الجانبية
 // ═══════════════════════════════════════════════════════════════════════════
-function DetailsPanel({ record, onClose, profile, treasuryTxn }) {
+function DetailsPanel({ record, onClose, profile, treasuryTxn, groupName }) {
   if (!record) {
     return (
       <div style={{ width: 320, flexShrink: 0, background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 14, padding: '40px 24px', textAlign: 'center', position: 'sticky', top: 16 }}>
@@ -954,7 +957,7 @@ function DetailsPanel({ record, onClose, profile, treasuryTxn }) {
             <div style={{ fontSize: '0.78rem', color: 'var(--text3)', marginTop: 2 }}>{record.grade}</div>
           </div>
           <Badge label={`${stage.icon} ${stage.label}`} color={stage.color}/>
-          <button onClick={() => openAdmissionReport({ record, profile, treasuryTxn })} style={{
+          <button onClick={() => openAdmissionReport({ record, profile, treasuryTxn, groupName })} style={{
             marginTop: 4, padding: '8px 16px', borderRadius: 9, border: '1px solid var(--accent)',
             background: 'transparent', color: 'var(--accent)', fontFamily: 'Cairo,sans-serif',
             fontSize: '0.8rem', fontWeight: 700, cursor: 'pointer',
@@ -972,9 +975,9 @@ function DetailsPanel({ record, onClose, profile, treasuryTxn }) {
       </PanelSection>
 
       {/* المجموعة الحالية */}
-      {record.group && (
+      {groupName && (
         <PanelSection title="المجموعة الحالية">
-          <PanelRow label="المجموعة" value={record.group}/>
+          <PanelRow label="المجموعة" value={groupName}/>
           {record.reservationDate && <PanelRow label="تاريخ الحجز" value={record.reservationDate}/>}
         </PanelSection>
       )}

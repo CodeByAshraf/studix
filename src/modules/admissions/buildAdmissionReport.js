@@ -14,7 +14,9 @@ import {
 import { STAGES, LEAD_STATUS, FOLLOWUP_TYPES, ADMISSION_PAYMENT_TYPES } from './mockData';
 import { getAdmissionTreasuryTotals } from '../../services/treasuryService';
 
-export function openAdmissionReport({ record, profile, treasuryTxn = [] }) {
+// groupName (M-03): the admission's real confirmed group, resolved by the caller from
+// confirmedGroupId — the record carries no persisted group-name field.
+export function openAdmissionReport({ record, profile, treasuryTxn = [], groupName = null }) {
   if (!record) return;
 
   const stage = STAGES[record.stage] || STAGES.lead;
@@ -82,7 +84,7 @@ export function openAdmissionReport({ record, profile, treasuryTxn = [] }) {
           <tr><th>الصف الدراسي</th><td>${esc(record.grade || '—')}</td></tr>
           <tr><th>المدرسة</th><td>${esc(record.school || '—')}</td></tr>
           <tr><th>مصدر التعارف</th><td>${esc(record.source || '—')}</td></tr>
-          ${record.group ? `<tr><th>المجموعة</th><td>${esc(record.group)}</td></tr>` : ''}
+          ${groupName ? `<tr><th>المجموعة</th><td>${esc(groupName)}</td></tr>` : ''}
           ${record.reservationDate ? `<tr><th>تاريخ الحجز</th><td>${fmtDate(record.reservationDate)}</td></tr>` : ''}
           ${record.activatedAt ? `<tr><th>تاريخ التفعيل</th><td>${fmtDate(record.activatedAt)}</td></tr>` : ''}
           <tr><th>الموظف المسؤول</th><td>${esc(record.secretary || '—')}</td></tr>
