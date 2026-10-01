@@ -72,10 +72,6 @@ export const INITIAL_TREASURY_META = {
   currency: 'ج.م',
 };
 
-// ── Teachers ────────────────────────────────────────────────
-export const INITIAL_TEACHERS = [
-];
-
 // ── Extended roles with full permissions ────────────────────
 export const INITIAL_ROLES = {
   admin: {

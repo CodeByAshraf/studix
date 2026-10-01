@@ -126,8 +126,6 @@ export function useApp() {
     isLoggedIn:   auth.isLoggedIn,
     currentUser:  auth.currentUser,
     isAdmin:      auth.isAdmin,
-    teachers:     auth.teachers,
-    setTeachers:  auth.setTeachers,
     login,
     logout,
     canAccess:    auth.canAccess,

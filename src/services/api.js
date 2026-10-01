@@ -276,6 +276,79 @@ export async function pgDeleteGroup(id) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// M-04 — Teachers CRUD through PostgreSQL (GET/POST/PUT/DELETE /api/teachers, the generic
+// CRUD under the 'users' permission) — the single source of truth for teacher records. The
+// table stores name/phone/subject/active only; the UI's status ('active'/'inactive') maps to
+// `active`. The id is the table's BigInt sequence, serialized as a string. The teacher-account
+// link is users.teacher_id (pgCreateUser/pgUpdateUser `teacherId`), not a field on the teacher.
+// ═══════════════════════════════════════════════════════════════════════════
+function normalizeTeacherResponse(row) {
+  return {
+    id:      String(row.id),
+    name:    row.name,
+    phone:   row.phone ?? '',
+    subject: row.subject ?? '',
+    status:  row.active === false ? 'inactive' : 'active',
+  };
+}
+
+function buildTeacherRequestBody(data) {
+  return {
+    name:    data.name,
+    phone:   data.phone || null,
+    subject: data.subject || null,
+    active:  data.status !== 'inactive',
+  };
+}
+
+export async function pgGetTeachers() {
+  const res = await fetch(`${PG_API_BASE}/api/teachers`, { credentials: 'include' });
+  const json = await res.json().catch(() => null);
+  if (!res.ok || !Array.isArray(json?.data)) throw new Error(json?.error || `PG GET /teachers → ${res.status}`);
+  return json.data.map(normalizeTeacherResponse);
+}
+
+export async function pgCreateTeacher(data) {
+  const res = await fetch(`${PG_API_BASE}/api/teachers`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(buildTeacherRequestBody(data)),
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG POST /teachers → ${res.status}`);
+  return normalizeTeacherResponse(json.data);
+}
+
+export async function pgUpdateTeacher(id, data) {
+  const res = await fetch(`${PG_API_BASE}/api/teachers/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(buildTeacherRequestBody(data)),
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(json?.error || `PG PUT /teachers/${id} → ${res.status}`);
+  return normalizeTeacherResponse(json.data);
+}
+
+// The server refuses (409) to delete a teacher still referenced by an account
+// (users.teacher_id) or a group (groups.teacher_id) — surfaced as the thrown error.
+export async function pgDeleteTeacher(id) {
+  const res = await fetch(`${PG_API_BASE}/api/teachers/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) {
+    const err = new Error(json?.error || `PG DELETE /teachers/${id} → ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
+  return true;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Phase 3B-14A — Cashboxes CRUD عبر PostgreSQL (المصدر الوحيد للحقيقة لهذه العملية).
 // أول collection مالية تُفعَّل — لا FK لها، لا trigger، فعبر الـ CRUD العام مباشرة (لا
 // مسار ذرّي مخصّص، بخلاف treasury_txn/payments/admission_payments لاحقاً). cashboxes

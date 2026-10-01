@@ -31,37 +31,30 @@ export const PAGE_GROUPS = ['عام','العمليات','المالية','الأ
 export const ROLE_COLORS = ['#7c3aed','#0d9488','#10b981','#3b82f6','#f59e0b','#ef4444','#ec4899','#06b6d4'];
 
 // ── Validate teacher ─────────────────────────────────────────
+// M-04: a teacher is a PostgreSQL record (teachers table: name/phone/subject/active) — only the
+// fields the table stores are collected. The id is assigned by the server.
 export function validateTeacher(data) {
   const errors = {};
   if (!data.name?.trim())     errors.name     = 'اسم المدرس مطلوب';
   if (!data.phone?.trim())    errors.phone    = 'رقم الهاتف مطلوب';
   if (!data.subject)          errors.subject  = 'اختر المادة';
-  if (!data.hireDate)         errors.hireDate = 'تاريخ التعيين مطلوب';
-  if (data.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email)) errors.email = 'بريد إلكتروني غير صحيح';
   return errors;
 }
 
+// Validated payload for pgCreateTeacher/pgUpdateTeacher (no id — the server assigns it).
 export function createTeacher(data) {
   const errors = validateTeacher(data);
   if (Object.keys(errors).length) throw { type:'VALIDATION', errors };
   return {
-    id:       `tc${Date.now()}`,
-    name:     data.name.trim(),
-    phone:    data.phone.trim(),
-    subject:  data.subject,
-    address:  data.address?.trim() || '',
-    email:    data.email?.trim()   || '',
-    hireDate: data.hireDate,
-    status:   data.status || 'active',
-    userId:   null,
-    notes:    data.notes?.trim()   || '',
+    name:    data.name.trim(),
+    phone:   data.phone.trim(),
+    subject: data.subject,
+    status:  data.status === 'inactive' ? 'inactive' : 'active',
   };
 }
 
 export function updateTeacher(id, data) {
-  const errors = validateTeacher(data);
-  if (Object.keys(errors).length) throw { type:'VALIDATION', errors };
-  return { id, name:data.name.trim(), phone:data.phone.trim(), subject:data.subject, address:data.address?.trim()||'', email:data.email?.trim()||'', hireDate:data.hireDate, status:data.status||'active', notes:data.notes?.trim()||'', updatedAt:new Date().toISOString() };
+  return { id, ...createTeacher(data) };
 }
 
 // ── Validate user ─────────────────────────────────────────────

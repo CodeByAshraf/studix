@@ -1,8 +1,7 @@
 // src/store/auth.context.jsx
 import {
-  createContext, useContext, useState, useCallback, useMemo, useEffect,
+  createContext, useContext, useState, useCallback, useMemo,
 } from 'react';
-import { INITIAL_TEACHERS } from '../data/initialData';
 import { pgLogin, pgLogout, pgGetDatabaseIdentity, BackendUnreachableError } from '../services/api';
 import { AUTH_CONFIG } from '../config/app.config';
 import { storage } from '../hooks/useErrorHandler';
@@ -14,7 +13,8 @@ import { checkDatabaseIdentityAndInvalidate } from './dbIdentity';
 // هو مصدر الحقيقة الوحيد لـ users/roles/permissions الآن. لا مزيد من
 // localStorage['studix-auth-users']/['studix-auth-roles'] — أُزيلا بالكامل، لا
 // fallback محلي/offline للدخول بعد الآن (كان يعتمد على نفس البيانات المُزالة).
-// 'teachers' يبقى محلياً تماماً كما كان (نطاق مدرّسين منفصل، خارج هذه المرحلة).
+// M-04: teachers are no longer held here at all — they are PostgreSQL records managed by
+// UsersPage through /api/teachers (localStorage['studix-auth-teachers'] is not read or written).
 const MAX_ATTEMPTS = AUTH_CONFIG.MAX_LOGIN_ATTEMPTS;
 const LOCKOUT_MS   = AUTH_CONFIG.LOCKOUT_MS;
 const ATTEMPTS_KEY = AUTH_CONFIG.ATTEMPTS_STORAGE_KEY;
@@ -60,13 +60,6 @@ export function AuthProvider({ children, onLogin }) {
 
   const [isLoggedIn,  setIsLoggedIn]  = useState(!!savedSession);
   const [currentUser, setCurrentUser] = useState(savedSession);
-  // Teachers فقط يبقى محلياً — نطاق منفصل (Teachers domain)، لا علاقة له بهذه المرحلة.
-  const [teachers, setTeachers] = useState(() => {
-    try {
-      const saved = localStorage.getItem('studix-auth-teachers');
-      return saved ? JSON.parse(saved) : INITIAL_TEACHERS;
-    } catch { return INITIAL_TEACHERS; }
-  });
 
   const isAdmin = useMemo(
     () => !!(currentUser?.role === 'admin' || currentUser?.isAdmin),
@@ -83,10 +76,6 @@ export function AuthProvider({ children, onLogin }) {
     return Array.isArray(currentUser.permissions) && currentUser.permissions.includes(pageId);
   }, [currentUser]);
 
-  // ── Persist teachers فقط (users/roles أُزيلا — انظر التعليق أعلى الملف) ──
-  useEffect(() => {
-    try { localStorage.setItem('studix-auth-teachers', JSON.stringify(teachers)); } catch {}
-  }, [teachers]);
 
   const login = useCallback(async (userId, password) => {
     const attempts = getAttempts(userId);
@@ -176,12 +165,9 @@ export function AuthProvider({ children, onLogin }) {
     login,
     logout,
     loading: false,
-    teachers,
-    setTeachers,
   }), [
     isLoggedIn, currentUser, isAdmin, canAccess,
     login, logout,
-    teachers,
   ]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

@@ -1,16 +1,17 @@
 // src/modules/users/UsersPage.jsx
 // Stabilization phase — Users/Roles أصبحا PostgreSQL-backed (server-truth-first)
-// عبر pgGetUsers/pgCreateUser/pgUpdateUser/pgDeleteUser وما يقابلها للأدوار. Teachers
-// يبقى محلياً تماماً كما كان (نطاق منفصل، خارج هذه المرحلة) — لا تغيير على ربط
-// المدرّس بحساب مستخدم (userId على سجل teacher محلي)، ولا يُرسَل teacherId إطلاقاً
-// لمسارات users الجديدة (عمود teacher_id بالخادم يشير لجدول teachers الحقيقي
-// الفارغ حالياً — إرساله سيفشل بخرق مفتاح خارجي، عمداً غير مستخدَم هنا).
+// عبر pgGetUsers/pgCreateUser/pgUpdateUser/pgDeleteUser وما يقابلها للأدوار.
+// M-04: teachers are PostgreSQL records too (pgGetTeachers/pgCreateTeacher/pgUpdateTeacher/
+// pgDeleteTeacher → /api/teachers; name/phone/subject/status only), loaded with users/roles and
+// saved server-first. A teacher's account is the user whose teacherId (users.teacher_id) points
+// at it — sent through pgCreateUser/pgUpdateUser, never stored on the teacher record.
 import { useState, useMemo, useCallback, useEffect } from 'react';
 import { useAppStore } from '../../store/app.store';
 import { useAuth }     from '../../store/auth.context';
 import {
   pgGetUsers, pgCreateUser, pgUpdateUser, pgDeleteUser,
   pgGetRoles, pgCreateRole, pgUpdateRole, pgDeleteRole,
+  pgGetTeachers, pgCreateTeacher, pgUpdateTeacher, pgDeleteTeacher,
 } from '../../services/api';
 import { SectionBoundary } from '../../components/ErrorBoundary';
 import { Modal, ConfirmModal } from '../../components/ui/Modal';
@@ -56,7 +57,7 @@ function F({ label, required, error, children }) {
 // ════════════════════════════════════════════════════════════
 // ── Teacher Form ─────────────────────────────────────────────
 function TeacherForm({ initial, editId, onSave, onClose, loading }) {
-  const [form, setForm] = useState(initial || { name:'', phone:'', subject:'', address:'', email:'', hireDate:new Date().toISOString().split('T')[0], status:'active', notes:'' });
+  const [form, setForm] = useState(initial || { name:'', phone:'', subject:'', status:'active' });
   const [errors, setErrors] = useState({});
   const set = (k,v) => setForm(p=>({...p,[k]:v}));
   const ch  = e => set(e.target.name, e.target.value);
@@ -74,11 +75,7 @@ function TeacherForm({ initial, editId, onSave, onClose, loading }) {
       <div style={{ gridColumn:'1/-1' }}><F label="اسم المدرس" required error={err('name')}><I name="name" value={form.name} onChange={ch} placeholder="الاسم الكامل" invalid={isEr('name')}/></F></div>
       <F label="رقم الهاتف" required error={err('phone')}><I name="phone" value={form.phone} onChange={ch} placeholder="01xxxxxxxxx" invalid={isEr('phone')}/></F>
       <F label="المادة" required error={err('subject')}><S name="subject" value={form.subject} onChange={ch} invalid={isEr('subject')}><option value="">اختر...</option>{SUBJECTS.map(s=><option key={s} value={s}>{s}</option>)}</S></F>
-      <F label="العنوان"><I name="address" value={form.address} onChange={ch} placeholder="المدينة أو الحي"/></F>
-      <F label="البريد الإلكتروني" error={err('email')}><I name="email" value={form.email} onChange={ch} type="email" placeholder="example@mail.com" invalid={isEr('email')}/></F>
-      <F label="تاريخ التعيين" required error={err('hireDate')}><I name="hireDate" value={form.hireDate} onChange={ch} type="date" invalid={isEr('hireDate')}/></F>
       <F label="الحالة"><S name="status" value={form.status} onChange={ch}><option value="active">نشط</option><option value="inactive">غير نشط</option></S></F>
-      <div style={{ gridColumn:'1/-1' }}><F label="ملاحظات"><textarea name="notes" value={form.notes} onChange={ch} rows={2} style={{...BASE, resize:'vertical', minHeight:56}} onFocus={fo} onBlur={e=>{e.target.style.borderColor='var(--border)';e.target.style.boxShadow='none';}}/></F></div>
       <div style={{ gridColumn:'1/-1', display:'flex', justifyContent:'flex-end', gap:10, paddingTop:12, borderTop:'1px solid var(--border)' }}>
         <Button variant="secondary" onClick={onClose}>إلغاء</Button>
         <Button variant="primary" loading={loading} onClick={handleSave}>💾 {editId ? 'حفظ' : 'إضافة المدرس'}</Button>
@@ -104,7 +101,7 @@ function UserForm({ initial, editId, onSave, onClose, loading, roles, teachers, 
   // Auto-fill from teacher
   const handleTeacherChange = (e) => {
     const tc = teachers.find(t=>t.id===e.target.value);
-    setForm(p=>({ ...p, teacherId:e.target.value, name:tc?tc.name:p.name, email:tc?tc.email:p.email }));
+    setForm(p=>({ ...p, teacherId:e.target.value, name:tc?tc.name:p.name }));
   };
 
   const handleSave = () => {
@@ -122,7 +119,7 @@ function UserForm({ initial, editId, onSave, onClose, loading, roles, teachers, 
 
   return (
     <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:14 }}>
-      <F label="ربط بمدرس (اختياري)"><S name="teacherId" value={form.teacherId} onChange={handleTeacherChange}><option value="">بدون ربط</option>{teachers.map(t=><option key={t.id} value={t.id}>{t.name} — {t.subject}</option>)}</S></F>
+      <F label="ربط بمدرس (اختياري)"><S name="teacherId" value={form.teacherId || ''} onChange={handleTeacherChange}><option value="">بدون ربط</option>{teachers.map(t=><option key={t.id} value={t.id}>{t.name} — {t.subject}</option>)}</S></F>
       <F label="الاسم الكامل" required error={err('name')}><I name="name" value={form.name} onChange={ch} placeholder="اسم المستخدم الكامل" invalid={isEr('name')}/></F>
       <F label="اسم الدخول (ID)" required error={err('id')}><I name="id" value={form.id} onChange={ch} placeholder="user_name" invalid={isEr('id')} disabled={!!editId}/></F>
       <F label="الدور" required error={err('roleId')}><S name="roleId" value={isEditingSelf ? 'admin' : form.roleId} onChange={ch} invalid={isEr('roleId')} disabled={isEditingSelf}><option value="">اختر الدور...</option>{Object.values(roles).map(r=><option key={r.id} value={r.id}>{r.label}</option>)}</S></F>
@@ -256,7 +253,7 @@ function RoleForm({ initial, editId, onSave, onClose, loading }) {
 // ════════════════════════════════════════════════════════════
 export default function UsersPage() {
   const addLog               = useAppStore((s) => s.addLog);
-  const { currentUser, setTeachers, teachers } = useAuth();
+  const { currentUser } = useAuth();
   const toast = useToast();
   const { loading, run } = useErrorHandler(toast);
 
@@ -265,6 +262,9 @@ export default function UsersPage() {
   // roles يبقى object مفهرَس بالـ id محلياً (نفس شكل الاستهلاك القديم في هذا الملف).
   const [users, setUsersState] = useState([]);
   const [roles, setRolesState] = useState({});
+  // M-04: teachers come from PostgreSQL (GET /api/teachers) — this page's own state, never
+  // localStorage. Every change is written to the server first; only its response is applied.
+  const [teachers, setTeachers] = useState([]);
 
   const loadUsersAndRoles = useCallback(async () => {
     await run(async () => {
@@ -274,7 +274,13 @@ export default function UsersPage() {
     }, { errorMsg: 'فشل تحميل المستخدمين/الأدوار' });
   }, [run]);
 
+  // Loaded on its own, so a teachers failure never blocks account management.
+  const loadTeachers = useCallback(async () => {
+    await run(async () => { setTeachers(await pgGetTeachers()); }, { errorMsg: 'فشل تحميل المدرسين' });
+  }, [run]);
+
   useEffect(() => { loadUsersAndRoles(); }, [loadUsersAndRoles]);
+  useEffect(() => { loadTeachers(); }, [loadTeachers]);
 
   const [view,     setView]    = useState('teachers');
   const [modal,    setModal]   = useState({ type:null, data:null });
@@ -293,30 +299,34 @@ export default function UsersPage() {
   const saveTeacher = useCallback(async (formData) => {
     await run(async () => {
       if (modal.data?.id) {
-        const updated = updateTeacher(modal.data.id, formData);
-        setTeachers(prev => prev.map(t => t.id===modal.data.id ? {...modal.data,...updated} : t));
-        toast.success(`تم تعديل بيانات ${updated.name} ✓`);
+        const saved = await pgUpdateTeacher(modal.data.id, updateTeacher(modal.data.id, formData));
+        setTeachers(prev => prev.map(t => t.id===saved.id ? saved : t));
+        toast.success(`تم تعديل بيانات ${saved.name} ✓`);
       } else {
-        const nt = createTeacher(formData);
-        setTeachers(prev => [...prev, nt]);
-        addLog({ action:'create', module:'users', entityType:'teacher', entityId:nt.id, description:`إضافة مدرس: ${nt.name}` })
+        const saved = await pgCreateTeacher(createTeacher(formData));
+        setTeachers(prev => [...prev, saved]);
+        addLog({ action:'create', module:'users', entityType:'teacher', entityId:saved.id, description:`إضافة مدرس: ${saved.name}` })
           .catch((e) => toast.error(e.message || 'تعذّر تسجيل الحدث في سجل النشاط'));
-        toast.success(`تمت إضافة ${nt.name} ✓`);
+        toast.success(`تمت إضافة ${saved.name} ✓`);
       }
       closeModal();
-    }, { errorMsg:'فشل حفظ بيانات المدرس' });
-  }, [modal, setTeachers, run, toast, addLog, currentUser, closeModal]);
+    }, { errorMsg: (e) => e.message || 'فشل حفظ بيانات المدرس' });
+  }, [modal, run, toast, addLog, closeModal]);
 
   const deleteTeacher = useCallback(async () => {
     const tc = delModal.item;
     await run(async () => {
+      await pgDeleteTeacher(tc.id);
       setTeachers(prev => prev.filter(t=>t.id!==tc.id));
-      // لا حاجة لإلغاء ربط أي مستخدم — حسابات PostgreSQL لا تحمل teacherId إطلاقاً
-      // (Teachers domain خارج نطاق هذه المرحلة، انظر التعليق أعلى الملف).
       toast.info(`تم حذف ${tc.name}`);
       setDelModal({open:false,item:null,what:''});
-    }, { errorMsg:'فشل حذف المدرس' });
-  }, [delModal.item, setTeachers, run, toast]);
+    }, {
+      // 409: the server refuses to delete a teacher still linked to an account or a group.
+      errorMsg: (e) => (e.status === 409
+        ? `لا يمكن حذف ${tc.name} — مرتبط بحساب مستخدم أو بمجموعة. ألغِ الربط أولاً أو اجعله "غير نشط".`
+        : e.message || 'فشل حذف المدرس'),
+    });
+  }, [delModal.item, run, toast]);
 
   // ── Users CRUD ────────────────────────────────────────────
   const filteredUsers = useMemo(() => {
@@ -330,8 +340,9 @@ export default function UsersPage() {
       // الصلاحيات الفعلية عبر هذا المسار (الواجهة تعطّل الحقل أيضاً). إرسال 'admin' سابقاً كان
       // يُرفَض بـ 400 على تثبيت جديد (لا صفوف في roles، والخادم يتحقّق من وجود أي roleId مُرسَل)
       // فيتعذّر على المدير تعديل اسمه/بريده/كلمة مروره. تعديل مستخدم آخر يُرسِل roleId كما هو.
-      // ملاحظة: teacherId لا يُرسَل أبداً لمسارات users الجديدة — عمود teacher_id بالخادم
-      // يشير لجدول teachers الحقيقي الفارغ حالياً (Teachers domain خارج النطاق).
+      // M-04: the teacher link is users.teacher_id — sent as teacherId only when it changes
+      // (null unlinks), so an ordinary account edit never touches it.
+      const teacherId = formData.teacherId || null;
       if (modal.data?.id) {
         const isSelfSave = modal.data.id === currentUser?.id;
         const payload = {
@@ -339,14 +350,11 @@ export default function UsersPage() {
           email:  formData.email?.trim() || '',
           active: formData.active !== false,
         };
+        if (teacherId !== (modal.data.teacherId || null)) payload.teacherId = teacherId;
         if (!isSelfSave) payload.roleId = formData.roleId;
         if (formData.password?.trim()) payload.password = formData.password.trim();
         const updated = await pgUpdateUser(modal.data.id, payload);
         setUsersState(prev => prev.map(u => u.id === modal.data.id ? updated : u));
-        // ربط المدرّس محلي بحت — على سجل teacher نفسه فقط، لا على حساب المستخدم.
-        if (formData.teacherId) {
-          setTeachers(prev => prev.map(t => t.id===formData.teacherId ? {...t, userId:modal.data.id} : t));
-        }
         toast.success('تم تعديل الحساب ✓');
       } else {
         const nu = await pgCreateUser({
@@ -356,18 +364,16 @@ export default function UsersPage() {
           email: formData.email?.trim() || '',
           active: formData.active !== false,
           password: formData.password.trim(),
+          ...(teacherId ? { teacherId } : {}),
         });
         setUsersState(prev => [...prev, nu]);
-        if (formData.teacherId) {
-          setTeachers(prev => prev.map(t => t.id===formData.teacherId ? {...t, userId:nu.id} : t));
-        }
         addLog({ action:'create', module:'users', entityType:'user', entityId:nu.id, description:`إنشاء حساب: ${nu.name} (${nu.roleId})` })
           .catch((e) => toast.error(e.message || 'تعذّر تسجيل الحدث في سجل النشاط'));
         toast.success(`تم إنشاء حساب ${nu.name} ✓`);
       }
       closeModal();
     }, { errorMsg:'فشل حفظ حسابات المستخدمين' });
-  }, [modal, setTeachers, run, toast, addLog, currentUser, closeModal]);
+  }, [modal, run, toast, addLog, currentUser, closeModal]);
 
   const toggleUserActive = useCallback((user) => {
     run(async () => {
@@ -474,20 +480,21 @@ export default function UsersPage() {
                 <table style={{ width:'100%', borderCollapse:'collapse', fontSize:'0.82rem' }}>
                   <thead>
                     <tr style={{ background:'var(--surface2)' }}>
-                      {['المدرس','المادة','رقم الهاتف','البريد','تاريخ التعيين','الحالة','حساب',''].map(h=>(
+                      {['المدرس','المادة','رقم الهاتف','الحالة','حساب',''].map(h=>(
                         <th key={h} style={{ padding:'10px 14px', fontSize:'0.65rem', fontWeight:700, color:'var(--text3)', textAlign:'right', borderBottom:'1px solid var(--border)', textTransform:'uppercase', letterSpacing:'0.07em', whiteSpace:'nowrap' }}>{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
                     {filteredTeachers.length===0 ? (
-                      <tr><td colSpan={8} style={{ padding:'40px', textAlign:'center', color:'var(--text3)' }}>
+                      <tr><td colSpan={6} style={{ padding:'40px', textAlign:'center', color:'var(--text3)' }}>
                         <div style={{ fontSize:36, opacity:.3, marginBottom:8 }}>👨‍🏫</div>لا يوجد مدرسون
                       </td></tr>
                     ) : filteredTeachers.map(tc => {
                       const { bg, color } = av(tc.name);
                       const letters = tc.name.split(' ').map(w=>w[0]).slice(0,2).join('');
-                      const user = users.find(u=>u.id===tc.userId);
+                      // M-04: the linked account is the user whose teacherId (users.teacher_id) is this teacher.
+                      const user = users.find(u=>u.teacherId===tc.id);
                       return (
                         <tr key={tc.id} style={{ transition:'background .12s' }}
                           onMouseOver={e=>Array.from(e.currentTarget.cells).forEach(td=>td.style.background='var(--surface2)')}
@@ -498,14 +505,11 @@ export default function UsersPage() {
                               <div style={{ width:34, height:34, borderRadius:'50%', background:bg, color, display:'flex', alignItems:'center', justifyContent:'center', fontSize:'0.78rem', fontWeight:700, flexShrink:0 }}>{letters}</div>
                               <div>
                                 <div style={{ fontWeight:700 }}>{tc.name}</div>
-                                {tc.address && <div style={{ fontSize:'0.68rem', color:'var(--text3)' }}>📍 {tc.address}</div>}
                               </div>
                             </div>
                           </td>
                           <td style={{ padding:'11px 14px', borderBottom:'1px solid var(--border)', fontSize:'0.78rem', color:'var(--text2)' }}>{tc.subject}</td>
                           <td style={{ padding:'11px 14px', borderBottom:'1px solid var(--border)', fontFamily:'Cairo,sans-serif', fontSize:'0.78rem' }}>{tc.phone}</td>
-                          <td style={{ padding:'11px 14px', borderBottom:'1px solid var(--border)', fontSize:'0.72rem', color:'var(--text3)' }}>{tc.email||'—'}</td>
-                          <td style={{ padding:'11px 14px', borderBottom:'1px solid var(--border)', fontSize:'0.78rem', color:'var(--text3)' }}>{formatDate(tc.hireDate)}</td>
                           <td style={{ padding:'11px 14px', borderBottom:'1px solid var(--border)' }}>
                             <span style={{ display:'inline-flex', alignItems:'center', gap:4, padding:'3px 9px', borderRadius:99, fontSize:'0.68rem', fontWeight:700,
                               background:tc.status==='active'?'rgba(16,185,129,.1)':'rgba(239,68,68,.1)',
@@ -519,7 +523,7 @@ export default function UsersPage() {
                                 🔑 {user.id}
                               </span>
                             ) : isAdmin ? (
-                              <button onClick={()=>setModal({type:'add_users', data:{teacherId:tc.id, name:tc.name, email:tc.email}})}
+                              <button onClick={()=>setModal({type:'add_users', data:{teacherId:tc.id, name:tc.name, email:''}})}
                                 style={{ padding:'3px 10px', borderRadius:7, border:'1px dashed var(--border)', background:'transparent', fontSize:'0.68rem', color:'var(--text3)', cursor:'pointer', fontFamily:'Cairo,sans-serif' }}
                                 onMouseOver={e=>{e.currentTarget.style.borderColor='var(--accent)';e.currentTarget.style.color='var(--accent)';}}
                                 onMouseOut={e =>{e.currentTarget.style.borderColor='var(--border)';e.currentTarget.style.color='var(--text3)';}}>

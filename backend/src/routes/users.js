@@ -98,6 +98,19 @@ function toClient(user) {
   return serializeBigInt(snakeToCamel(user));
 }
 
+// M-04 — optional teacher link (users.teacher_id → teachers.id). Not auth-affecting: it grants
+// nothing, so it never bumps auth_version. undefined = leave as is; null/'' = unlink; anything
+// else must be the id of an existing teacher, otherwise the request is refused (400).
+async function resolveTeacherId(raw) {
+  if (raw === undefined) return { ok: true, provided: false };
+  if (raw === null || raw === '') return { ok: true, provided: true, value: null };
+  const text = String(raw).trim();
+  if (!/^\d+$/.test(text)) return { ok: false };
+  const teacher = await prisma.teachers.findUnique({ where: { id: BigInt(text) }, select: { id: true } });
+  return teacher ? { ok: true, provided: true, value: teacher.id } : { ok: false };
+}
+const INVALID_TEACHER = { ok: false, error: 'المدرّس المحدَّد غير موجود.' };
+
 router.get('/', asyncHandler(async (req, res) => {
   const users = await prisma.users.findMany({ select: PUBLIC_FIELDS, orderBy: { id: 'asc' } });
   res.json({ ok: true, users: users.map(toClient) });
@@ -110,7 +123,7 @@ router.get('/:id', asyncHandler(async (req, res) => {
 }));
 
 router.post('/', asyncHandler(async (req, res) => {
-  const { id, name, roleId, active, email, password, permissions } = req.body || {};
+  const { id, name, roleId, active, email, password, permissions, teacherId } = req.body || {};
   if (!id?.trim() || !name?.trim()) {
     return res.status(400).json({ ok: false, error: 'المعرّف والاسم مطلوبان.' });
   }
@@ -124,6 +137,8 @@ router.post('/', asyncHandler(async (req, res) => {
     const role = await prisma.roles.findUnique({ where: { id: roleId } });
     if (!role) return res.status(400).json({ ok: false, error: 'الدور المحدَّد غير موجود.' });
   }
+  const teacher = await resolveTeacherId(teacherId);
+  if (!teacher.ok) return res.status(400).json(INVALID_TEACHER);
   const existing = await prisma.users.findUnique({ where: { id: id.trim() } });
   if (existing) return res.status(409).json({ ok: false, error: 'اسم المستخدم مستخدم بالفعل.' });
 
@@ -131,6 +146,7 @@ router.post('/', asyncHandler(async (req, res) => {
     data: {
       id: id.trim(),
       name: name.trim(),
+      ...(teacher.provided ? { teacher_id: teacher.value } : {}),
       role_id: roleId || null,
       is_admin: roleId === 'admin', // يُشتَقّ حصراً من roleId — لا يُقبَل من العميل مباشرة
       active: active !== false,
@@ -145,7 +161,7 @@ router.post('/', asyncHandler(async (req, res) => {
 
 router.put('/:id', asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const { name, roleId: requestedRoleId, active, email, password, permissions } = req.body || {};
+  const { name, roleId: requestedRoleId, active, email, password, permissions, teacherId } = req.body || {};
 
   const existing = await prisma.users.findUnique({ where: { id } });
   if (!existing) return res.status(404).json({ ok: false, error: 'المستخدم غير موجود.' });
@@ -156,6 +172,9 @@ router.put('/:id', asyncHandler(async (req, res) => {
   if (existing.is_admin && !(await isActiveAdminRequester(req))) {
     return res.status(403).json({ ok: false, error: 'تعديل حساب مدير النظام متاح لمدير النظام فقط.' });
   }
+
+  const teacher = await resolveTeacherId(teacherId);
+  if (!teacher.ok) return res.status(400).json(INVALID_TEACHER);
 
   // An empty/null roleId on an administrator's account means "no role change": a profile edit
   // must never silently clear is_admin (the setup-created owner has role_id NULL, so the form
@@ -197,6 +216,7 @@ router.put('/:id', asyncHandler(async (req, res) => {
   if (roleId !== undefined) { data.role_id = roleId || null; data.is_admin = roleId === 'admin'; }
   if (active !== undefined) data.active = !!active;
   if (email !== undefined) data.email = email?.trim() || null;
+  if (teacher.provided) data.teacher_id = teacher.value; // not auth-affecting (M-04)
   if (permissions !== undefined) {
     data.permissions = Array.isArray(permissions) && permissions.length > 0 ? permissions : null;
   }
