@@ -1,7 +1,7 @@
 // src/modules/payments/UnpaidStudents.jsx
 import { useAppStore } from '../../store/app.store';
 import { useEffect, useState, useMemo } from 'react';
-import { MONTHS_AR, getUnpaidStudents, getPartialStudents, getStudentFee, getNetRevenue } from '../../services/paymentService';
+import { MONTHS_AR, getUnpaidStudents, getPartialStudents, getStudentFee, getSubscriptionNet } from '../../services/paymentService';
 import { pgGetPayments } from '../../services/api';
 import { useAsyncData } from '../../hooks/useAsyncData';
 import { useToast } from '../../components/Toast';
@@ -44,16 +44,17 @@ export default function UnpaidStudents({ onQuickPay }) {
   }, [paymentsError]);
 
   const unpaid = useMemo(() => {
-    let list = getUnpaidStudents(students, monthPayments, month, year);
+    // M-01: month state derived from net subscription money (getStudentMonthState), not status.
+    let list = getUnpaidStudents(students, monthPayments, month, year, { groups, treasuryTxn });
     if (filterGroup) list = list.filter(s => s.groupId === filterGroup);
     return list;
-  }, [students, monthPayments, month, year, filterGroup]);
+  }, [students, groups, treasuryTxn, monthPayments, month, year, filterGroup]);
 
   const partial = useMemo(() => {
-    let list = getPartialStudents(students, monthPayments, month, year);
+    let list = getPartialStudents(students, monthPayments, month, year, { groups, treasuryTxn });
     if (filterGroup) list = list.filter(s => s.groupId === filterGroup);
     return list;
-  }, [students, monthPayments, month, year, filterGroup]);
+  }, [students, groups, treasuryTxn, monthPayments, month, year, filterGroup]);
 
   const activeList = tab === 'unpaid' ? unpaid : partial;
 
@@ -67,7 +68,7 @@ export default function UnpaidStudents({ onQuickPay }) {
   // أقل مما هو فعلاً. getNetRevenue تطرح أي استرداد فعّال (treasury_txn) لكل دفعة.
   const partialRemaining = partial.reduce((sum, s) => {
     const g = groups.find(g => g.id === s.groupId);
-    const paid = getNetRevenue(monthPayments.filter(p => p.studentId === s.id), treasuryTxn);
+    const paid = getSubscriptionNet(monthPayments, s.id, month, year, treasuryTxn);
     return sum + Math.max(0, getStudentFee(s, g) - paid);
   }, 0);
 
@@ -130,7 +131,7 @@ export default function UnpaidStudents({ onQuickPay }) {
             const { bg, color } = av(student.name);
             const letters = student.name.split(' ').map(w=>w[0]).slice(0,2).join('');
             // BUG-02: صافي بعد طرح أي استرداد فعّال — نفس منطق partialRemaining أعلاه.
-            const paidSoFar = getNetRevenue(monthPayments.filter(p => p.studentId === student.id), treasuryTxn);
+            const paidSoFar = getSubscriptionNet(monthPayments, student.id, month, year, treasuryTxn);
             const remaining = group ? Math.max(0, getStudentFee(student, group) - paidSoFar) : 0;
 
             return (

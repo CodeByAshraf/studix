@@ -146,16 +146,54 @@ export function getNetRevenue(payments, treasuryTxn = []) {
   return payments.reduce((sum, p) => sum + (p.amount - getRefundedAmount(p.id, treasuryTxn)), 0);
 }
 
-export function getUnpaidStudents(students, payments, month, year = new Date().getFullYear()) {
-  return students.filter((s) => {
-    if (s.status !== 'active') return false;
-    const paid = payments.some(
-      (p) => p.studentId === s.id && p.month === month &&
-             (p.status === 'paid') &&
-             (!year || p.year === year || p.date?.startsWith(`${year}`))
-    );
-    return !paid;
-  });
+// ── M-01 — monthly subscription state ─────────────────────────────────────────────────────
+// A month's state is ALWAYS derived from money, never read from payments.status (that column is
+// a record-level snapshot written once at insert). Mirror of backend/src/lib/subscriptionMonth.js
+// — keep both identical:
+//   fee > 0 : net <= 0 -> unpaid, 0 < net < fee -> partial, net >= fee -> paid
+//   fee <= 0 (zero/unset): nothing positive is due, so never 'paid' — partial once something
+//            was paid, otherwise unpaid (same convention as buildPaymentsReport.js).
+export const MONTH_STATE = Object.freeze({ PAID: 'paid', PARTIAL: 'partial', UNPAID: 'unpaid' });
+
+export function deriveMonthState(fee, net) {
+  const f = Number(fee);
+  const n = Number(net);
+  if (!Number.isFinite(n) || n <= 0) return MONTH_STATE.UNPAID;
+  if (Number.isFinite(f) && f > 0 && n >= f) return MONTH_STATE.PAID;
+  return MONTH_STATE.PARTIAL;
+}
+
+// Same month/year predicate the month-scoped consumers already use (year fallback kept as is).
+function isInMonth(p, month, year) {
+  return p.month === month && (!year || p.year === year || p.date?.startsWith(`${year}`));
+}
+
+// Net subscription money of one student/month: payType === 'subscription' payments only, minus
+// their active refunds (getRefundedAmount — the existing refund model).
+export function getSubscriptionNet(payments, studentId, month, year, treasuryTxn = []) {
+  return getNetRevenue(
+    (payments || []).filter((p) => p.studentId === studentId && p.payType === 'subscription' && isInMonth(p, month, year)),
+    treasuryTxn,
+  );
+}
+
+// { fee, net, remaining, state } for one student/month. `group` is the student's own group.
+export function getStudentMonthState(student, group, payments, month, year, treasuryTxn = []) {
+  const fee = getStudentFee(student, group);
+  const net = getSubscriptionNet(payments, student?.id, month, year, treasuryTxn);
+  return { fee, net, remaining: Math.max(0, fee - net), state: deriveMonthState(fee, net) };
+}
+
+function studentsInMonthState(students, payments, month, year, { groups = [], treasuryTxn = [] }, wanted) {
+  const groupById = new Map((groups || []).map((g) => [g.id, g]));
+  return students.filter((s) => s.status === 'active'
+    && getStudentMonthState(s, groupById.get(s.groupId), payments, month, year, treasuryTxn).state === wanted);
+}
+
+// Active students whose subscription month is unpaid. `options.groups` resolves each student's
+// fee (group price fallback); `options.treasuryTxn` nets active refunds.
+export function getUnpaidStudents(students, payments, month, year = new Date().getFullYear(), options = {}) {
+  return studentsInMonthState(students, payments, month, year, options, MONTH_STATE.UNPAID);
 }
 // ── Refund derivation (Phase 3B-14C) ───────────────────────────────────────────
 // الدفعة ثابتة (immutable) — لا حقل refunded/refundedAmount عليها إطلاقاً (لا عمود
@@ -172,15 +210,8 @@ export function getRemainingRefundable(payment, treasuryTxn) {
   return Math.max(0, Number(payment.amount) - getRefundedAmount(payment.id, treasuryTxn));
 }
 
-export function getPartialStudents(students, payments, month, year = new Date().getFullYear()) {
-  return students.filter((s) => {
-    if (s.status !== 'active') return false;
-    return payments.some(
-      (p) => p.studentId === s.id &&
-             p.month === month &&
-             p.status === 'partial' &&
-             (!year || p.year === year || p.date?.startsWith(`${year}`))
-    );
-  });
+// Active students whose subscription month is partially paid (same options as above).
+export function getPartialStudents(students, payments, month, year = new Date().getFullYear(), options = {}) {
+  return studentsInMonthState(students, payments, month, year, options, MONTH_STATE.PARTIAL);
 }
 

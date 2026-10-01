@@ -57,8 +57,8 @@ describe('GroupStatistics — group revenue comes from a scoped fetch, matches g
       treasuryTxn: [{ paymentId: 'p1', refType: 'refund', status: 'active', amount: 200 }],
     });
     mockPaymentsFetch([
-      { id: 'p1', studentId: 's1', groupId: 'g1', month: MONTH, year: YEAR, status: 'paid', amount: 1000 },
-      { id: 'p-old', studentId: 's1', groupId: 'g1', month: MONTH, year: YEAR - 1, status: 'paid', amount: 500 },
+      { id: 'p1', studentId: 's1', groupId: 'g1', month: MONTH, year: YEAR, payType: 'subscription', status: 'paid', amount: 1000 },
+      { id: 'p-old', studentId: 's1', groupId: 'g1', month: MONTH, year: YEAR - 1, payType: 'subscription', status: 'paid', amount: 500 },
     ]);
 
     renderPage();

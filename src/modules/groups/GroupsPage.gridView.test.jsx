@@ -80,7 +80,7 @@ describe('GroupsPage grid view (GroupCard) — payments now fetched, not read fr
       admissions: [], communications: [], homeworks: [],
     });
     mockFetch({
-      payments: [{ id: 'p1', studentId: 's1', groupId: 'g1', month: MONTH, year: YEAR, status: 'paid', amount: 1000 }],
+      payments: [{ id: 'p1', studentId: 's1', groupId: 'g1', month: MONTH, year: YEAR, payType: 'subscription', status: 'paid', amount: 1000 }],
       groupAggregate: [{ key: 'g1', count: 1, revenue: 1000 }],
     });
 
@@ -98,7 +98,7 @@ describe('GroupsPage grid view (GroupCard) — payments now fetched, not read fr
       admissions: [], communications: [], homeworks: [],
     });
     mockFetch({
-      payments: [{ id: 'p1', studentId: 's1', groupId: 'g1', month: MONTH, year: YEAR, status: 'paid', amount: 1000 }],
+      payments: [{ id: 'p1', studentId: 's1', groupId: 'g1', month: MONTH, year: YEAR, payType: 'subscription', status: 'paid', amount: 1000 }],
       groupAggregate: [{ key: 'g1', count: 1, revenue: 500 }],
     });
 
@@ -178,7 +178,7 @@ describe('GroupsPage grid view — an Additional member does not add a second fe
       admissions: [], communications: [], homeworks: [],
     });
     mockFetch({
-      payments: [{ id: 'p2', studentId: 's2', groupId: 'g2', month: MONTH, year: YEAR, status: 'paid', amount: 1000 }],
+      payments: [{ id: 'p2', studentId: 's2', groupId: 'g2', month: MONTH, year: YEAR, payType: 'subscription', status: 'paid', amount: 1000 }],
       groupAggregate: [{ key: 'g2', count: 1, revenue: 1000 }],
       // s1 (Primary: g1, fee 1000) also attends g2 as an Additional Group
       extraEnrollments: [{ id: 'e-s1-g2', studentId: 's1', groupId: 'g2', role: 'additional', status: 'active' }],

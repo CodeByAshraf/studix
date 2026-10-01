@@ -4,7 +4,7 @@ import { useAppStore } from '../../store/app.store';
 import { formatCurrency, formatDate } from '../../utils/helpers';
 import { MetricCard, BarChart, DonutChart, AnalyticsCard, SparkLine, StatRow } from './components/ChartComponents';
 import {
-  MONTHS_AR, PAYMENT_METHODS, PAYMENT_STATUS, getNetRevenue,
+  MONTHS_AR, PAYMENT_METHODS, PAYMENT_STATUS, getNetRevenue, getStudentMonthState, MONTH_STATE,
   zeroFillMonthlyAggregate, zeroFillGroupAggregate,
 } from '../../services/paymentService';
 import { pgGetPayments, pgGetPaymentAggregates } from '../../services/api';
@@ -99,14 +99,17 @@ export default function FinancialAnalytics() {
 
     // Unpaid count
     const activeStudents = students.filter(s=>s.status==='active');
-    const paidThisMonth  = new Set(currentMonthPayments.filter(p=>p.status==='paid').map(p=>p.studentId));
-    const unpaidCount    = activeStudents.filter(s=>!paidThisMonth.has(s.id)).length;
+    // M-01: "paid" is the derived month state (net subscription money >= fee), not payments.status.
+    const groupById      = new Map(groups.map(g => [g.id, g]));
+    const unpaidCount    = activeStudents.filter(s =>
+      getStudentMonthState(s, groupById.get(s.groupId), currentMonthPayments, currentMonth, currentYear, treasuryTxn).state !== MONTH_STATE.PAID
+    ).length;
     const collectRate    = activeStudents.length ? Math.round((activeStudents.length-unpaidCount)/activeStudents.length*100) : null;
 
     return { total, totalCount, monthRev, lastMonthRev, growth, monthly, byMethod, byStatus, byGroup, todayRev, recent, unpaidCount, collectRate };
   }, [
     totalAgg, currentMonthPayments, lastMonthAgg, monthlyAggRows, methodAggRows, statusAggRows,
-    groupAggRows, groups, todayPayments, recentPayments, students, treasuryTxn, currentMonth,
+    groupAggRows, groups, todayPayments, recentPayments, students, treasuryTxn, currentMonth, currentYear,
   ]);
 
   const PALETTE = [

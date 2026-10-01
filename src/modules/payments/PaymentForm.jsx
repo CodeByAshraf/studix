@@ -1,11 +1,11 @@
 // src/modules/payments/PaymentForm.jsx
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAppStore } from '../../store/app.store';
 import useForm     from '../../hooks/useForm';
 import { useAsyncData } from '../../hooks/useAsyncData';
 import { useCashboxOptions } from '../../hooks/useCashboxOptions';
 import { pgGetPayments } from '../../services/api';
-import { validatePayment, PAYMENT_METHODS, PAYMENT_TYPES, MONTHS_AR, getStudentFee, getNetRevenue } from '../../services/paymentService';
+import { validatePayment, PAYMENT_METHODS, PAYMENT_TYPES, MONTHS_AR, getStudentFee, getNetRevenue, deriveMonthState, MONTH_STATE } from '../../services/paymentService';
 import Button      from '../../components/ui/Button';
 import { ConfirmModal } from '../../components/ui/Modal';
 import StudentSearchSelect from '../../components/ui/StudentSearchSelect';
@@ -83,10 +83,6 @@ export default function PaymentForm({ onSubmit, onCancel, loading, prefilledStud
   const selectedStudent = students.find(s => s.id === values.studentId);
   const selectedGroup   = groups.find(g => g.id === selectedStudent?.groupId);
 
-  useEffect(() => {
-    if (selectedStudent && getStudentFee(selectedStudent, selectedGroup) && !values.amount) setField('amount', String(getStudentFee(selectedStudent, selectedGroup)));
-  }, [selectedGroup?.id]);
-
   // Scalability Architecture Phase 4 Cutover 1: بدل الاعتماد على مصفوفة payments
   // الكاملة من الـ store، يُجلَب تاريخ هذا الطالب فقط من GET /api/payments?studentId=
   // (نفس النطاق المستخدَم سابقاً محلياً عبر .filter(p=>p.studentId===...)، مُتحقَّق
@@ -116,9 +112,12 @@ export default function PaymentForm({ onSubmit, onCancel, loading, prefilledStud
     return (materials || []).filter(m => m.grade === selectedStudent.grade);
   }, [materials, selectedStudent]);
 
-  // هل دفع الطالب اشتراك هذا الشهر من قبل؟ (يوقف العملية)
-  const alreadyPaidSubscription = useMemo(() =>
-    monthPayments.some(p => (p.payType || 'subscription') === 'subscription'),
+  // M-01: the month's subscription state is derived from money — this month's payType ===
+  // 'subscription' payments net of active refunds, against the student's fee — never from
+  // payments.status. Top-ups are allowed up to the remaining amount; only a fully-paid month
+  // (fee > 0) blocks another subscription payment. The server enforces the same rule (409).
+  const subscriptionMonthPayments = useMemo(() =>
+    monthPayments.filter(p => p.payType === 'subscription'),
   [monthPayments]);
 
   // هل دفع الطالب هذه المذكرة تحديداً من قبل؟ (تحذير فقط)
@@ -131,8 +130,21 @@ export default function PaymentForm({ onSubmit, onCancel, loading, prefilledStud
 
   // BUG-02: صافي بعد طرح أي استرداد فعّال على دفعات هذا الشهر — دفعة استُرِدَّت
   // جزئياً/كلياً لا يجب أن تُحتسَب ضمن "متبقي هذا الشهر" وكأنها لا تزال مسدَّدة بالكامل.
-  const totalPaid = getNetRevenue(monthPayments, treasuryTxn);
-  const remaining = selectedStudent ? Math.max(0, getStudentFee(selectedStudent, selectedGroup) - totalPaid) : null;
+  const monthlyFee = getStudentFee(selectedStudent, selectedGroup);
+  const totalPaid = getNetRevenue(subscriptionMonthPayments, treasuryTxn);
+  const remaining = selectedStudent ? Math.max(0, monthlyFee - totalPaid) : null;
+  const monthFullyPaid = !!selectedStudent && deriveMonthState(monthlyFee, totalPaid) === MONTH_STATE.PAID;
+
+  // Suggest the remaining amount (not the full fee) once this student's month is known. Only an
+  // empty or previously auto-filled amount is replaced — never a value the user typed.
+  const autoAmountRef = useRef('');
+  useEffect(() => {
+    if (!selectedStudent || studentPaymentsLoading || values.payType !== 'subscription') return;
+    if (values.amount !== '' && values.amount !== autoAmountRef.current) return;
+    const suggested = monthlyFee > 0 && remaining > 0 ? String(remaining) : '';
+    autoAmountRef.current = suggested;
+    if (values.amount !== suggested) setField('amount', suggested);
+  }, [values.studentId, values.month, values.year, values.payType, studentPaymentsLoading, remaining, monthlyFee]);
 
   const err  = f => touched[f] && errors[f];
   const isEr = f => !!(touched[f] && errors[f]);
@@ -174,10 +186,10 @@ export default function PaymentForm({ onSubmit, onCancel, loading, prefilledStud
       )}
 
       <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:14 }}>
-        {/* تحذير: اشتراك هذا الشهر مدفوع من قبل (يوقف العملية) */}
-        {values.payType === 'subscription' && alreadyPaidSubscription && selectedStudent && (
+        {/* تحذير: اشتراك هذا الشهر مسدَّد بالكامل (يوقف العملية) — M-01 */}
+        {values.payType === 'subscription' && monthFullyPaid && (
           <div style={{ gridColumn:'1/-1', padding:'11px 14px', background:'rgba(239,68,68,.1)', border:'1px solid rgba(239,68,68,.3)', borderRadius:9, fontSize:'0.82rem', color:'#dc2626', display:'flex', alignItems:'center', gap:8 }}>
-            ❌ هذا الطالب دفع اشتراك {MONTHS_AR[Number(values.month)] || 'هذا الشهر'} من قبل — لا يمكن تسجيل دفعة اشتراك أخرى لنفس الشهر.
+            ❌ اشتراك {MONTHS_AR[Number(values.month)] || 'هذا الشهر'} مسدَّد بالكامل لهذا الطالب — لا يمكن تسجيل دفعة اشتراك أخرى لنفس الشهر.
           </div>
         )}
         <div style={{ gridColumn:'1/-1' }}>
@@ -283,10 +295,15 @@ export default function PaymentForm({ onSubmit, onCancel, loading, prefilledStud
           // (سباق حالة حقيقي مُحتمَل بعد الانتقال من مصفوفة محلية إلى جلب شبكة).
           if (studentPaymentsLoading) return;
 
-          // اشتراك مكرر لنفس الشهر → أوقف العملية تماماً (toast بدل alert)
-          if (values.payType === 'subscription' && alreadyPaidSubscription) {
+          // M-01: a fully-paid month refuses another subscription payment; a partial month accepts
+          // a top-up up to the remaining amount (same rule as the server, which answers 409).
+          if (values.payType === 'subscription' && monthFullyPaid) {
             const monthName = MONTHS_AR[Number(values.month)] || `شهر ${values.month}`;
-            toast.error(`الطالب "${selectedStudent?.name}" دفع اشتراك ${monthName} من قبل — لا يمكن تسجيل دفعة أخرى.`);
+            toast.error(`اشتراك ${monthName} للطالب "${selectedStudent?.name}" مسدَّد بالكامل — لا يمكن تسجيل دفعة أخرى.`);
+            return;
+          }
+          if (values.payType === 'subscription' && monthlyFee > 0 && Number(values.amount) > remaining) {
+            toast.error(`المبلغ أكبر من المتبقي من اشتراك هذا الشهر (المتبقي: ${remaining} ج.م).`);
             return;
           }
 

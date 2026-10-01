@@ -1,6 +1,6 @@
 // src/services/groupService.js — Backend API version
 import { validate, hasErrors, sanitizeFormData, groupSchema, validators } from '../utils/validation';
-import { getRefundedAmount } from './paymentService';
+import { getNetRevenue } from './paymentService';
 
 export const DAYS_AR = {
   sat:'السبت', sun:'الأحد', mon:'الاثنين', tue:'الثلاثاء',
@@ -131,7 +131,9 @@ export function getGroupStats(group, students, payments, attendanceStats = {}, t
   const monthlyPayments = payments.filter(p => p.groupId === group.id && p.month === month && (!p.year || p.year === year || p.date?.startsWith(`${year}`)));
   // BUG-02: كانت تجمع payments.amount الخام — دفعة استُرِدَّت جزئياً/كلياً تبقى محسوبة
   // ضمن "المحصَّل" بكامل مبلغها، فتُضخِّم totalRevenue/collectionRate المُشتقّين منها.
-  const collected = monthlyPayments.filter(p => p.status === 'paid').reduce((s,p) => s + (p.amount - getRefundedAmount(p.id, treasuryTxn)), 0);
+  // M-01: collected = the month's net SUBSCRIPTION money (instalments included, active refunds
+  // netted) — never filtered by payments.status, which is only a record-level snapshot.
+  const collected = getNetRevenue(monthlyPayments.filter(p => p.payType === 'subscription'), treasuryTxn);
   // الإيراد المتوقع = مجموع رسوم كل طالب (رسوم الطالب الفردية أو سعر المجموعة احتياطياً)
   // The monthly fee is student-level and is billed/collected in the student's PRIMARY group
   // (payments carry the Primary groupId — paymentService.js), so with enrollment membership

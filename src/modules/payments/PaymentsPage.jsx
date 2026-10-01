@@ -99,11 +99,12 @@ export default function PaymentsPage() {
   const kpi = useMemo(() => {
     const monthRevenue = getNetRevenue(currentMonthPayments, treasuryTxn);
     const totalRevenue = totalAgg[0]?.revenue ?? 0;
-    const unpaidCount  = getUnpaidStudents(students, currentMonthPayments, currentMonth, currentYear).length;
+    // M-01: derived month state (net subscription money vs fee), not payments.status.
+    const unpaidCount  = getUnpaidStudents(students, currentMonthPayments, currentMonth, currentYear, { groups, treasuryTxn }).length;
     const todayRevenue = getNetRevenue(todayPayments, treasuryTxn);
     const thisMonthCount = currentMonthPayments.length;
     return { monthRevenue, totalRevenue, unpaidCount, todayRevenue, thisMonthCount };
-  }, [currentMonthPayments, totalAgg, todayPayments, students, currentMonth, currentYear, treasuryTxn]);
+  }, [currentMonthPayments, totalAgg, todayPayments, students, groups, currentMonth, currentYear, treasuryTxn]);
 
   // ── Add payment ───────────────────────────────────────────
   // P2-2 — one idempotency key per "add payment" dialog session: every submission of this

@@ -146,3 +146,44 @@ describe('FinancialAnalytics — revenue KPIs are net of active refunds (BUG-02,
     expect(await valueFor('الإيراد الكلي')).toBe(formatCurrency(300));
   });
 });
+
+// M-01 — "paid this month" is the derived month state (net subscription money >= the student's
+// fee), never payments.status: instalments recorded as "partial" that reach the fee count as paid;
+// a material payment, however large, never pays the subscription.
+describe('FinancialAnalytics — unpaidCount/collectRate use the derived month state (M-01)', () => {
+  async function valueFor(labelText) {
+    const label = await screen.findByText(labelText);
+    return label.closest('div').nextElementSibling;
+  }
+
+  it('instalments 300 + 200 of 500 -> paid; 300 of 500 -> not paid; material only -> not paid', async () => {
+    const now = new Date();
+    const month = now.getMonth() + 1;
+    const year  = now.getFullYear();
+    const date  = `${year}-${String(month).padStart(2, '0')}-05`;
+    const pay = (id, studentId, amount, extra = {}) => ({
+      id, studentId, amount, month, year, date, method: 'cash', payType: 'subscription', status: 'partial', ...extra,
+    });
+    useAppStore.setState({
+      groups: [],
+      treasuryTxn: [],
+      students: [
+        { id: 's1', name: 'أقساط', status: 'active', monthlyFee: 500 },
+        { id: 's2', name: 'جزئي', status: 'active', monthlyFee: 500 },
+        { id: 's3', name: 'مذكرة', status: 'active', monthlyFee: 500 },
+        { id: 's4', name: 'كامل', status: 'active', monthlyFee: 500 },
+      ],
+    });
+    mockPaymentsBackend([
+      pay('a', 's1', 300), pay('b', 's1', 200),
+      pay('c', 's2', 300),
+      pay('d', 's3', 900, { payType: 'material', status: 'paid' }),
+      pay('e', 's4', 500, { status: 'paid' }),
+    ], []);
+
+    renderPage();
+
+    await waitFor(async () => expect(await valueFor('لم يدفعوا هذا الشهر')).toHaveTextContent('2'));
+    await waitFor(async () => expect(await valueFor('معدل التحصيل')).toHaveTextContent('50%'));
+  });
+});

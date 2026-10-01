@@ -151,3 +151,34 @@ describe('Dashboard — "إيراد هذا الشهر" is net of active refunds 
     expect(screen.queryByText(formatCurrency(1000))).not.toBeInTheDocument();
   });
 });
+
+// M-01 — "N طالب دفع" counts students whose month is FULLY paid by net subscription money
+// (derived month state), never payments.status: instalments reaching the fee count, a partial
+// month, a fully refunded "paid" record and a material payment do not.
+describe('Dashboard — "طالب دفع" uses the derived month state (M-01)', () => {
+  it('instalments 300 + 200 of 500 count; partial, fully-refunded and material-only do not', async () => {
+    const { month, year } = currentMonthYear();
+    const date = `${year}-${String(month).padStart(2, '0')}-05`;
+    const pay = (id, studentId, amount, extra = {}) => ({
+      id, studentId, amount, month, year, date, payType: 'subscription', status: 'partial', ...extra,
+    });
+    const refunds = [{ paymentId: 'e', refType: 'refund', status: 'active', amount: 500 }];
+    seed([
+      pay('a', 's1', 300), pay('b', 's1', 200),
+      pay('c', 's2', 300),
+      pay('d', 's3', 900, { payType: 'material', status: 'paid' }),
+      pay('e', 's4', 500, { status: 'paid' }),
+    ], refunds);
+    useAppStore.setState({
+      students: ['s1', 's2', 's3', 's4'].map((id) => ({ id, name: id, status: 'active', monthlyFee: 500 })),
+    });
+    const paymentsFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn((url) => (String(url).includes('/api/attendance')
+      ? Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true, data: [] }) })
+      : paymentsFetch(url)));
+
+    renderDashboard();
+
+    expect(await screen.findByText('1 طالب دفع')).toBeInTheDocument();
+  });
+});

@@ -6,7 +6,7 @@ import { SectionBoundary } from '../components/ErrorBoundary';
 import { PageHeader } from '../components/shared';
 import { KpiCard, KpiGrid } from '../components/ui';
 import { formatCurrency } from '../utils/helpers';
-import { getNetRevenue } from '../services/paymentService';
+import { getNetRevenue, getStudentMonthState, MONTH_STATE } from '../services/paymentService';
 import { pgGetPayments, pgGetPaymentAggregates, pgGetActivityLogs, pgGetAttendance } from '../services/api';
 import { useAsyncData } from '../hooks/useAsyncData';
 import { useToast } from '../components/Toast';
@@ -219,7 +219,11 @@ export default function Dashboard() {
   // بالضبط) بدل نص "+12%" ثابت.
   const stats = useMemo(() => {
     const activeStudents = students.filter(s => s.status === 'active').length;
-    const monthPaid      = [...new Set(monthPayments.filter(p => p.status === 'paid').map(p => p.studentId))].length;
+    // M-01: students whose month is fully paid by net subscription money (not payments.status).
+    const groupById      = new Map(groups.map(g => [g.id, g]));
+    const monthPaid      = students.filter(s =>
+      getStudentMonthState(s, groupById.get(s.groupId), monthPayments, currentMonth, currentYear, treasuryTxn).state === MONTH_STATE.PAID
+    ).length;
     const monthRev       = getNetRevenue(monthPayments, treasuryTxn);
     const lastMonthRev   = lastMonthAgg[0]?.revenue ?? 0;
     const revGrowth      = lastMonthRev > 0 ? Math.round(((monthRev - lastMonthRev) / lastMonthRev) * 100) : null;
@@ -234,7 +238,7 @@ export default function Dashboard() {
     const attPct         = attRecs.length ? Math.round(attRecs.filter(a => a.status === 'present').length / attRecs.length * 100) : null;
     const unread         = notifications.filter(n => !n.read).length;
     return { activeStudents, monthPaid, monthRev, revGrowth, attPct, unread };
-  }, [students, monthPayments, lastMonthAgg, treasuryTxn, attendance, notifications]);
+  }, [students, groups, monthPayments, lastMonthAgg, treasuryTxn, attendance, notifications, currentMonth, currentYear]);
 
   const QUICK_ACTIONS = [
     { icon:'👤', label:'تسجيل طالب',   sub:'إضافة جديد',      bg:'rgba(59,130,246,.1)',  color:'#3b82f6',  page:'students'      },

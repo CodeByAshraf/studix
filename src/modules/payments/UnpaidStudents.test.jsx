@@ -48,8 +48,8 @@ describe('UnpaidStudents — partial-payment remaining balance is year-aware (ME
     const thisYear  = now.getFullYear();
 
     const payments = [
-      { id: 'p-partial', studentId: 's1', month: thisMonth, year: thisYear, status: 'partial', amount: 100, date: `${thisYear}-01-05` },
-      { id: 'p-old',     studentId: 's1', month: thisMonth, year: thisYear - 1, status: 'paid', amount: 250, date: `${thisYear - 1}-01-05` },
+      { id: 'p-partial', studentId: 's1', month: thisMonth, year: thisYear, payType: 'subscription', status: 'partial', amount: 100, date: `${thisYear}-01-05` },
+      { id: 'p-old',     studentId: 's1', month: thisMonth, year: thisYear - 1, payType: 'subscription', status: 'paid', amount: 250, date: `${thisYear - 1}-01-05` },
     ];
     useAppStore.setState({
       groups: [{ id: 'g1', name: 'مجموعة أ', price: 300 }],
@@ -83,7 +83,7 @@ describe('UnpaidStudents — paidSoFar/partialRemaining are net of active refund
       groups: [GROUP], students: [STUDENT],
       treasuryTxn: [{ paymentId: 'p1', refType: 'refund', status: 'active', amount: 300 }],
     });
-    mockPaymentsFetch([{ id: 'p1', studentId: 's1', groupId: 'g1', month: MONTH, year: YEAR, status: 'partial', amount: 500 }]);
+    mockPaymentsFetch([{ id: 'p1', studentId: 's1', groupId: 'g1', month: MONTH, year: YEAR, payType: 'subscription', status: 'partial', amount: 500 }]);
 
     renderComponent();
     fireEvent.click(screen.getByRole('button', { name: /جزئي/ }));
@@ -100,7 +100,7 @@ describe('UnpaidStudents — paidSoFar/partialRemaining are net of active refund
       groups: [GROUP], students: [STUDENT],
       treasuryTxn: [{ paymentId: 'p1', refType: 'refund', status: 'cancelled', amount: 300 }],
     });
-    mockPaymentsFetch([{ id: 'p1', studentId: 's1', groupId: 'g1', month: MONTH, year: YEAR, status: 'partial', amount: 500 }]);
+    mockPaymentsFetch([{ id: 'p1', studentId: 's1', groupId: 'g1', month: MONTH, year: YEAR, payType: 'subscription', status: 'partial', amount: 500 }]);
 
     renderComponent();
     fireEvent.click(screen.getByRole('button', { name: /جزئي/ }));

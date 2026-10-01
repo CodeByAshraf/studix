@@ -19,7 +19,7 @@ function studentsFor(ids) {
 
 function paymentFor(id, studentId, amount) {
   const now = new Date();
-  return { id, studentId, groupId: 'g1', amount, status: 'paid', month: now.getMonth() + 1, year: now.getFullYear() };
+  return { id, studentId, groupId: 'g1', amount, payType: 'subscription', status: 'paid', month: now.getMonth() + 1, year: now.getFullYear() };
 }
 
 describe('getGroupStats — collected/totalRevenue/collectionRate net out active refunds (BUG-02, remaining part)', () => {
@@ -86,7 +86,7 @@ describe('getGroupStats — monthly figures are year-aware (BUG-06)', () => {
   it('a payment from the current month AND current year is included', () => {
     const now = new Date();
     const students = studentsFor(['s1']);
-    const payments = [{ id: 'p1', studentId: 's1', groupId: 'g1', amount: 1000, status: 'paid', month: now.getMonth() + 1, year: now.getFullYear() }];
+    const payments = [{ id: 'p1', studentId: 's1', groupId: 'g1', amount: 1000, payType: 'subscription', status: 'paid', month: now.getMonth() + 1, year: now.getFullYear() }];
     const stats = getGroupStats(GROUP, students, payments, [], []);
     expect(stats.monthlyCollected).toBe(1000);
     expect(stats.totalRevenue).toBe(1000);
@@ -96,7 +96,7 @@ describe('getGroupStats — monthly figures are year-aware (BUG-06)', () => {
   it('a payment from the same month number but a PAST year is excluded', () => {
     const now = new Date();
     const students = studentsFor(['s1']);
-    const payments = [{ id: 'p1', studentId: 's1', groupId: 'g1', amount: 1000, status: 'paid', month: now.getMonth() + 1, year: now.getFullYear() - 1 }];
+    const payments = [{ id: 'p1', studentId: 's1', groupId: 'g1', amount: 1000, payType: 'subscription', status: 'paid', month: now.getMonth() + 1, year: now.getFullYear() - 1 }];
     const stats = getGroupStats(GROUP, students, payments, [], []);
     expect(stats.monthlyCollected).toBe(0);
     expect(stats.totalRevenue).toBe(0);
@@ -106,7 +106,7 @@ describe('getGroupStats — monthly figures are year-aware (BUG-06)', () => {
   it('an active refund is still deducted from the year-filtered total', () => {
     const now = new Date();
     const students = studentsFor(['s1']);
-    const payments = [{ id: 'p1', studentId: 's1', groupId: 'g1', amount: 1000, status: 'paid', month: now.getMonth() + 1, year: now.getFullYear() }];
+    const payments = [{ id: 'p1', studentId: 's1', groupId: 'g1', amount: 1000, payType: 'subscription', status: 'paid', month: now.getMonth() + 1, year: now.getFullYear() }];
     const treasuryTxn = [{ paymentId: 'p1', refType: 'refund', status: 'active', amount: 300 }];
     const stats = getGroupStats(GROUP, students, payments, [], treasuryTxn);
     expect(stats.monthlyCollected).toBe(700);
@@ -116,7 +116,7 @@ describe('getGroupStats — monthly figures are year-aware (BUG-06)', () => {
   it('a cancelled (inactive) refund is not deducted from the year-filtered total', () => {
     const now = new Date();
     const students = studentsFor(['s1']);
-    const payments = [{ id: 'p1', studentId: 's1', groupId: 'g1', amount: 1000, status: 'paid', month: now.getMonth() + 1, year: now.getFullYear() }];
+    const payments = [{ id: 'p1', studentId: 's1', groupId: 'g1', amount: 1000, payType: 'subscription', status: 'paid', month: now.getMonth() + 1, year: now.getFullYear() }];
     const treasuryTxn = [{ paymentId: 'p1', refType: 'refund', status: 'cancelled', amount: 300 }];
     const stats = getGroupStats(GROUP, students, payments, [], treasuryTxn);
     expect(stats.monthlyCollected).toBe(1000);
@@ -128,6 +128,37 @@ describe('getGroupStats — monthly figures are year-aware (BUG-06)', () => {
     expect(stats.monthlyCollected).toBe(0);
     expect(stats.totalRevenue).toBe(0);
     expect(stats.collectionRate).toBe(0);
+  });
+});
+
+// M-01 — collected is the month's net SUBSCRIPTION money, never filtered by payments.status.
+describe('getGroupStats — collected counts subscription money regardless of record status (M-01)', () => {
+  it('instalments recorded as "partial" are collected: 600 + 400 of 1000 -> 1000, 100%', () => {
+    const students = studentsFor(['s1']);
+    const payments = [
+      { ...paymentFor('p1', 's1', 600), status: 'partial' },
+      { ...paymentFor('p2', 's1', 400), status: 'partial' },
+    ];
+    const stats = getGroupStats(GROUP, students, payments, [], []);
+    expect(stats.monthlyCollected).toBe(1000);
+    expect(stats.collectionRate).toBe(100);
+  });
+
+  it('a single partial payment counts toward collected: 300 of 1000 -> 30%', () => {
+    const stats = getGroupStats(GROUP, studentsFor(['s1']), [{ ...paymentFor('p1', 's1', 300), status: 'partial' }], [], []);
+    expect(stats.monthlyCollected).toBe(300);
+    expect(stats.collectionRate).toBe(30);
+  });
+
+  it('material/other payments in the same month are not subscription collection', () => {
+    const payments = [
+      paymentFor('p1', 's1', 500),
+      { ...paymentFor('m1', 's1', 900), payType: 'material' },
+      { ...paymentFor('x1', 's1', 900), payType: 'extra' },
+    ];
+    const stats = getGroupStats(GROUP, studentsFor(['s1']), payments, [], []);
+    expect(stats.monthlyCollected).toBe(500);
+    expect(stats.collectionRate).toBe(50);
   });
 });
 
@@ -162,7 +193,7 @@ describe('getGroupStats with enrollment membership — each student contributes 
   const GC = { id: 'gC', name: 'ج', price: 1000, max: 30 };
   const S1 = { id: 's1', name: 's1', groupId: 'gA', status: 'active', monthlyFee: 500 };
   const now = new Date();
-  const pay = (id, groupId, amount) => ({ id, studentId: 's1', groupId, amount, status: 'paid', month: now.getMonth() + 1, year: now.getFullYear() });
+  const pay = (id, groupId, amount) => ({ id, studentId: 's1', groupId, amount, payType: 'subscription', status: 'paid', month: now.getMonth() + 1, year: now.getFullYear() });
   const members = (role) => new Map([['s1', role]]);
 
   it('1. a student in one Primary Group contributes their monthly fee once', () => {

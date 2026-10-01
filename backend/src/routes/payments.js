@@ -34,6 +34,8 @@ import { asyncHandler } from '../middleware/errorHandler.js';
 import { snakeToCamel } from '../lib/caseMapper.js';
 import { parseTreasuryDate } from './treasuryTxn.js';
 import { prisma } from '../prisma.js';
+import { Prisma } from '@prisma/client';
+import { deriveMonthState, resolveMonthlyFee, MONTH_STATE } from '../lib/subscriptionMonth.js';
 
 function badRequest(message) {
   const err = new Error(message);
@@ -182,6 +184,42 @@ export function validatePaymentInput(input) {
   return { studentId, groupId, materialIdBig, m, y, amt, method, payType, parsedDate, notes, cashboxId };
 }
 
+// ── M-01 — monthly subscription state ─────────────────────────────────────────────────────
+// Net subscription amount of one student/month: subscription payments minus their ACTIVE
+// refunds (the only refund representation — payment-linked treasury rows can never be
+// reversed, see reverseTreasuryTxn). Never reads payments.status. `db` is the Prisma client or
+// a transaction client.
+export async function getSubscriptionMonthNet(db, { studentId, year, month }) {
+  const [{ net }] = await db.$queryRaw`
+    SELECT (
+      COALESCE((SELECT SUM(p.amount) FROM public.payments p
+                WHERE p.student_id = ${studentId} AND p.year = ${year} AND p.month = ${month}
+                  AND p.pay_type = 'subscription'), 0)
+      -
+      COALESCE((SELECT SUM(t.amount) FROM public.treasury_txn t
+                JOIN public.payments p ON p.id = t.payment_id
+                WHERE p.student_id = ${studentId} AND p.year = ${year} AND p.month = ${month}
+                  AND p.pay_type = 'subscription'
+                  AND t.ref_type = 'refund' AND t.status = 'active'), 0)
+    )::numeric AS net`;
+  return Number(net);
+}
+
+export const SUBSCRIPTION_OVERPAYMENT = 'SUBSCRIPTION_OVERPAYMENT';
+
+function subscriptionOverpayment(remaining) {
+  const err = new Error(`المبلغ يتجاوز المتبقي من اشتراك هذا الشهر — المتبقي: ${remaining} ج.م. لم تُسجَّل أي دفعة.`);
+  err.status = 409;
+  err.expose = true;
+  err.code = SUBSCRIPTION_OVERPAYMENT;
+  err.remaining = remaining;
+  return err;
+}
+
+// Thrown inside the transaction when the clientRequestId was committed by a concurrent request
+// while this one waited for the month lock — createPayment answers it as a replay/conflict.
+const DUPLICATE_CLIENT_REQUEST = 'DUPLICATE_CLIENT_REQUEST';
+
 // جسم معاملة إنشاء الدفعة، مُستخرَج من createPayment ليقبل tx خارجياً — يسمح لمستهلك
 // آخر (materialDistribution.js) بتركيبه داخل معاملة Prisma أكبر (دفعة + حركة خزنة +
 // تسوية inventory_txn معاً، ذرّياً بالكامل)، بلا أي تغيير على سلوك createPayment نفسها.
@@ -189,11 +227,24 @@ export function validatePaymentInput(input) {
 // key enforces idempotency; omitted -> a fresh UUID (unchanged behavior).
 export async function createPaymentInTx(tx, normalized, { userId = null, paymentId: requestedPaymentId = null } = {}) {
   const { studentId, groupId, materialIdBig, m, y, amt, method, payType, parsedDate, notes, cashboxId } = normalized;
+  const isSubscription = payType === 'subscription';
+
+  // M-01: one subscription write per student/month at a time. The lock is taken first and held
+  // until commit, so the net computed below cannot go stale before this payment is written —
+  // two concurrent top-ups are serialized and the second one sees the first one's row.
+  if (isSubscription) {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`subpay:${studentId}:${y}:${m}`}))`;
+    // Idempotency under the lock: a concurrent request with the same key may have committed
+    // while this one waited — answer it as a replay, never as an overpayment.
+    if (requestedPaymentId && await tx.payments.findUnique({ where: { id: requestedPaymentId }, select: { id: true } })) {
+      const dup = new Error('clientRequestId already committed');
+      dup.code = DUPLICATE_CLIENT_REQUEST;
+      throw dup;
+    }
+  }
 
   const student = await tx.students.findUnique({ where: { id: studentId } });
   if (!student) throw badRequest('الطالب غير موجود.');
-
-  const group = groupId ? await tx.groups.findUnique({ where: { id: groupId } }) : null;
 
   // القراءة الحاسمة داخل المعاملة (tx) — لا تجاوز ضمنياً لغياب/تعطّل الخزنة.
   const cashbox = await tx.cashboxes.findUnique({ where: { id: cashboxId } });
@@ -207,10 +258,27 @@ export async function createPaymentInTx(tx, normalized, { userId = null, payment
     if (!material) throw badRequest('المذكرة غير موجودة.');
   }
 
-  // status مُحتسَبة من جهة الخادم دائماً من بيانات رسوم حقيقية (monthly_fee/price) —
-  // لا تُقرَأ أبداً من العميل، بنفس مبدأ computeNextStudentCode في admissionActivation.js.
-  const fee = Number(student.monthly_fee) || Number(group?.price) || 0;
-  const status = fee === 0 ? 'paid' : amt >= fee ? 'paid' : 'partial';
+  // M-01: payments.status is a record-level snapshot, always server-derived:
+  //   * subscription — the month's state right after this payment (deriveMonthState over the
+  //     month's net), with the payment refused when it would exceed the remaining amount;
+  //   * any other pay type — 'paid': the record is never compared with the monthly fee.
+  // Month-level consumers never read this column; they derive the state from the net.
+  let status = MONTH_STATE.PAID;
+  if (isSubscription) {
+    // Fee from the student's own primary group, never from a client-sent groupId.
+    const primaryGroup = student.group_id
+      ? await tx.groups.findUnique({ where: { id: student.group_id }, select: { price: true } })
+      : null;
+    const fee = resolveMonthlyFee(student, primaryGroup);
+    const netBefore = await getSubscriptionMonthNet(tx, { studentId, year: y, month: m });
+    if (fee > 0) {
+      const remaining = new Prisma.Decimal(fee).minus(new Prisma.Decimal(netBefore));
+      if (new Prisma.Decimal(amt).greaterThan(remaining)) {
+        throw subscriptionOverpayment(Math.max(0, remaining.toNumber()));
+      }
+    }
+    status = deriveMonthState(fee, new Prisma.Decimal(netBefore).plus(new Prisma.Decimal(amt)).toNumber());
+  }
 
   const meta = PAY_TYPE_TO_CATEGORY[payType] || PAY_TYPE_TO_CATEGORY.subscription;
   const paymentId      = requestedPaymentId || crypto.randomUUID();
@@ -290,9 +358,10 @@ export async function createPayment(input, { userId = null, requireKey = false }
   try {
     result = await runInTransaction((tx) => createPaymentInTx(tx, normalized, { userId, paymentId: clientRequestId }));
   } catch (err) {
-    // Concurrent request with the same key: this transaction lost the primary-key race and was
-    // rolled back entirely (its treasury_txn included) — answer with the committed winner.
-    if (clientRequestId && err.code === 'P2002') {
+    // Concurrent request with the same key: this transaction lost the primary-key race (or, for
+    // a subscription, found the key committed after waiting for the month lock) and was rolled
+    // back entirely (its treasury_txn included) — answer with the committed winner.
+    if (clientRequestId && (err.code === 'P2002' || err.code === DUPLICATE_CLIENT_REQUEST)) {
       const existing = await findPaymentByClientRequestId(prisma, clientRequestId);
       if (existing) return replayOrConflict(existing);
     }
@@ -605,7 +674,16 @@ router.get('/search', asyncHandler(async (req, res) => {
 }));
 
 router.post('/', asyncHandler(async (req, res) => {
-  const data = await createPayment(req.body, { userId: req.user?.id ?? null, requireKey: true });
+  let data;
+  try {
+    data = await createPayment(req.body, { userId: req.user?.id ?? null, requireKey: true });
+  } catch (err) {
+    // M-01: the refused-overpayment answer carries the remaining amount for the client.
+    if (err.code === SUBSCRIPTION_OVERPAYMENT) {
+      return res.status(409).json({ ok: false, error: err.message, code: err.code, remaining: err.remaining });
+    }
+    throw err;
+  }
   // A replay returns the original result (same body shape, `replay: true`), 200 instead of 201.
   res.status(data.replay ? 200 : 201).json({ ok: true, data });
 }));

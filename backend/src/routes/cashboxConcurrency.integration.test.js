@@ -67,9 +67,9 @@ describe('cashbox balance concurrency (P2-3, real PostgreSQL integration)', () =
   async function seedCashbox(opening) {
     return client.cashboxes.create({ data: { id: nextId('cb'), name: 'خزنة', active: true, opening_balance: opening } });
   }
-  async function seedStudent() {
+  async function seedStudent(monthlyFee = 100) {
     const id = nextId('s');
-    return client.students.create({ data: { id, code: id, name: 'طالب', status: 'active', monthly_fee: 100 } });
+    return client.students.create({ data: { id, code: id, name: 'طالب', status: 'active', monthly_fee: monthlyFee } });
   }
   async function seedAdmission() {
     const id = nextId('adm');
@@ -90,7 +90,8 @@ describe('cashbox balance concurrency (P2-3, real PostgreSQL integration)', () =
   }
 
   async function payInto(cashbox, amount, extra = {}) {
-    const student = await seedStudent();
+    // M-01: a subscription payment may not exceed the month's fee, so each payer's fee covers it.
+    const student = await seedStudent(amount);
     return createPayment({
       studentId: student.id, month: 4, year: 2026, amount, method: 'cash',
       payType: 'subscription', date: '2026-04-05', cashboxId: cashbox.id, ...extra,
@@ -466,7 +467,7 @@ describe('cashbox balance concurrency (P2-3, real PostgreSQL integration)', () =
   describe('payment idempotency still holds', () => {
     it('a retried payment with the same clientRequestId has one financial effect', async () => {
       const cashbox = await seedCashbox(0);
-      const student = await seedStudent();
+      const student = await seedStudent(120);
       const input = {
         studentId: student.id, month: 5, year: 2026, amount: 120, method: 'cash',
         payType: 'subscription', date: '2026-05-01', cashboxId: cashbox.id, clientRequestId: crypto.randomUUID(),

@@ -403,26 +403,71 @@ describe('PaymentsPage — payments write flows (Phase 3B-14C)', () => {
     expect(anyDeleteCalls()).toHaveLength(0);
   });
 
-  // MEDIUM-A Finding 1: "alreadyPaidSubscription" (PaymentForm.jsx) كان يقارن الشهر فقط
-  // بلا سنة — طالب دفع اشتراك شهر رقم N في سنة سابقة كان يُمنَع من دفع نفس رقم الشهر في
-  // سنة جديدة. هذان الاختباران يثبتان: يُمنَع فعلاً لنفس السنة، ولا يُمنَع لسنة مختلفة.
-  describe('duplicate-subscription guard is year-aware (MEDIUM-A Finding 1)', () => {
-    it('blocks a second subscription payment for the same student/month/year', async () => {
-      const now = new Date();
-      const thisMonth = now.getMonth() + 1;
-      const thisYear  = now.getFullYear();
-      const SAME_YEAR_PAYMENT = {
-        id: 'p-same', studentId: 's1', groupId: 'g1', materialId: null, month: thisMonth, year: thisYear,
-        amount: 300, method: 'cash', payType: 'subscription', date: `${thisYear}-01-05`, status: 'paid',
-        notes: null, treasuryTxnId: 'tx-same', createdAt: `${thisYear}-01-05T00:00:00.000Z`,
-      };
-      seedStore({ payments: [SAME_YEAR_PAYMENT] });
+  // M-01 (replaces "blocks a second subscription payment"): the month's state is derived from net
+  // subscription money vs the fee (GROUP1.price = 300). Only a FULLY paid month blocks another
+  // subscription payment; a partial month accepts a top-up up to the remaining amount, and a
+  // fully refunded month can be paid again. Still year-aware (MEDIUM-A Finding 1).
+  describe('subscription month guard — derived from net money, year-aware (M-01, MEDIUM-A Finding 1)', () => {
+    const now = new Date();
+    const thisMonth = now.getMonth() + 1;
+    const thisYear  = now.getFullYear();
+    const subPayment = (id, amount, status) => ({
+      id, studentId: 's1', groupId: 'g1', materialId: null, month: thisMonth, year: thisYear,
+      amount, method: 'cash', payType: 'subscription', date: `${thisYear}-01-05`, status,
+      notes: null, treasuryTxnId: `tx-${id}`, createdAt: `${thisYear}-01-05T00:00:00.000Z`,
+    });
+
+    it('blocks a further subscription payment once the same student/month/year is fully paid', async () => {
+      seedStore({ payments: [subPayment('p-same', 300, 'paid')] });
       renderPage();
       fireEvent.click(screen.getByText('+ تسجيل دفعة'));
       selectStudent('أحمد', /أحمد/);
 
-      expect(await screen.findByText(/دفع اشتراك.*من قبل/)).toBeInTheDocument();
+      expect(await screen.findByText(/مسدَّد بالكامل/)).toBeInTheDocument();
       expect(postPaymentCalls()).toHaveLength(0);
+    });
+
+    it('allows a top-up after a partial payment (300 fee, 100 paid -> 200 accepted)', async () => {
+      seedStore({ payments: [subPayment('p-part', 100, 'partial')] });
+      renderPage();
+      await fillAddForm({ amount: '200' });
+
+      expect(screen.queryByText(/مسدَّد بالكامل/)).not.toBeInTheDocument();
+      fireEvent.click(screen.getByText('💰 تسجيل الدفعة'));
+      await waitFor(() => expect(postPaymentCalls()).toHaveLength(1));
+      expect(JSON.parse(postPaymentCalls()[0][1].body).amount).toBe(200);
+    });
+
+    it('rejects a top-up above the remaining amount (300 fee, 100 paid -> 250 refused, no request)', async () => {
+      seedStore({ payments: [subPayment('p-part', 100, 'partial')] });
+      renderPage();
+      await fillAddForm({ amount: '250' });
+
+      fireEvent.click(screen.getByText('💰 تسجيل الدفعة'));
+      expect(await screen.findByText(/المبلغ أكبر من المتبقي/)).toBeInTheDocument();
+      expect(postPaymentCalls()).toHaveLength(0);
+    });
+
+    it('allows paying again after the month was fully refunded (a "paid" record no longer counts)', async () => {
+      seedStore({
+        payments: [subPayment('p-ref', 300, 'paid')],
+        treasuryTxn: [{ id: 'r1', paymentId: 'p-ref', refType: 'refund', status: 'active', amount: 300, type: 'expense', cashboxId: 'cb1', date: `${thisYear}-01-06` }],
+      });
+      renderPage();
+      await fillAddForm({ amount: '300' });
+
+      expect(screen.queryByText(/مسدَّد بالكامل/)).not.toBeInTheDocument();
+      fireEvent.click(screen.getByText('💰 تسجيل الدفعة'));
+      await waitFor(() => expect(postPaymentCalls()).toHaveLength(1));
+    });
+
+    it('suggests the remaining amount (not the full fee) for a partially paid month', async () => {
+      seedStore({ payments: [subPayment('p-part', 100, 'partial')] });
+      renderPage();
+      fireEvent.click(screen.getByText('+ تسجيل دفعة'));
+      selectStudent('أحمد', /أحمد/);
+
+      await waitFor(() => expect(screen.getByPlaceholderText('300').value).toBe('200'));
     });
 
     it('does NOT block a subscription payment for the same month number in a different year', async () => {
@@ -438,7 +483,7 @@ describe('PaymentsPage — payments write flows (Phase 3B-14C)', () => {
       renderPage();
       await fillAddForm();
 
-      expect(screen.queryByText(/دفع اشتراك.*من قبل/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/مسدَّد بالكامل/)).not.toBeInTheDocument();
       fireEvent.click(screen.getByText('💰 تسجيل الدفعة'));
 
       await waitFor(() => expect(postPaymentCalls()).toHaveLength(1));
