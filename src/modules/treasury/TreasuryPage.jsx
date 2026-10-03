@@ -19,7 +19,7 @@ import {
   INCOME_CATEGORIES, EXPENSE_CATEGORIES, ALL_CATEGORIES, PAYMENT_METHODS,
 } from '../../services/treasuryService';
 import {
-  pgCreateCashbox, pgUpdateCashbox,
+  PG_API_BASE, pgCreateCashbox, pgUpdateCashbox,
   pgCreateTreasuryTxn, pgReverseTreasuryTxn, pgTransferBetweenCashboxes,
 } from '../../services/api';
 
@@ -451,23 +451,51 @@ function LedgerTable({ txns, onReverse }) {
 // Module-level (not component-state) guard: survives every remount as the user navigates
 // away from/back to Treasury within the same session, so the attempt fires at most once
 // per app load — a plain per-mount effect would refire the POST on every visit. A fresh
-// page reload resets it, which is safe: pgCreateCashbox's 409-on-conflict is treated as
-// success below, so a repeat attempt after reload never creates a duplicate row.
+// page reload resets it, which is safe: the row is looked up first (GET /api/cashboxes/
+// cb_main) and only POSTed when the server answers 404, so the normal steady state (row
+// already synced) never sends a duplicate POST.
+//
+// A failed sync is reported (console.warn) and the guard is released so the next Treasury
+// visit retries — never counted as synced. It still never toasts: the existing "no active
+// cashbox" empty state in PaymentForm.jsx remains the honest user-facing fallback.
 let cashboxSyncAttempted = false;
+
+// 'exists' (200) | 'missing' (404) | 'failed' (anything else: network, 401/402/403, 5xx).
+async function lookupCashbox(id) {
+  try {
+    const res = await fetch(`${PG_API_BASE}/api/cashboxes/${encodeURIComponent(id)}`, { credentials: 'include' });
+    if (res.ok) return { state: 'exists' };
+    if (res.status === 404) return { state: 'missing' };
+    const json = await res.json().catch(() => null);
+    return { state: 'failed', error: json?.error || `PG GET /cashboxes/${id} → ${res.status}` };
+  } catch (err) {
+    return { state: 'failed', error: err.message };
+  }
+}
+
+function reportSeedSyncFailure(error) {
+  cashboxSyncAttempted = false;
+  console.warn(`[PG] تعذّرت مزامنة الخزنة الافتراضية (cb_main) — ستُعاد المحاولة لاحقاً: ${error}`);
+}
 
 async function syncSeedCashboxOnce() {
   if (cashboxSyncAttempted) return;
   cashboxSyncAttempted = true;
   const seed = INITIAL_CASHBOXES.find((cb) => cb.id === 'cb_main');
   if (!seed) return;
+
+  const found = await lookupCashbox(seed.id);
+  if (found.state === 'exists') return;
+  if (found.state === 'failed') { reportSeedSyncFailure(found.error); return; }
+
   try {
     await pgCreateCashbox(seed);
-  } catch {
-    // 409 (already exists — a prior sync, or another browser, won) is the expected steady
-    // state and is treated as success. Any other failure (network, etc.) is swallowed too,
-    // by design (Issue 2, Option A) — the existing "no active cashbox" empty-state message
-    // in PaymentForm.jsx remains the correct, honest fallback; this background step must
-    // never surface a confusing error of its own.
+  } catch (err) {
+    // Two clients can both see 404 and race the POST; the loser gets 409 (primary key). The
+    // row then exists, which is the outcome wanted — confirmed by re-reading it rather than
+    // trusting the error, so an unrelated POST failure is never mistaken for success.
+    const recheck = await lookupCashbox(seed.id);
+    if (recheck.state !== 'exists') reportSeedSyncFailure(err.message);
   }
 }
 
