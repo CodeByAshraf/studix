@@ -18,9 +18,9 @@ import { ToastProvider } from '../../components/Toast';
 
 vi.mock('../../services/api', async () => {
   const actual = await vi.importActual('../../services/api');
-  return { ...actual, pgSaveAttendanceSession: vi.fn(), pgGetSessionRoster: vi.fn(), pgGetAttendance: vi.fn(), pgGetGroupOptions: vi.fn() };
+  return { ...actual, pgSaveAttendanceSession: vi.fn(), pgCompleteAttendanceSession: vi.fn(), pgGetSessionRoster: vi.fn(), pgGetAttendance: vi.fn(), pgGetGroupOptions: vi.fn() };
 });
-import { pgSaveAttendanceSession, pgGetSessionRoster, pgGetAttendance, pgGetGroupOptions } from '../../services/api';
+import { pgSaveAttendanceSession, pgCompleteAttendanceSession, pgGetSessionRoster, pgGetAttendance, pgGetGroupOptions } from '../../services/api';
 
 const GROUP_ID = 'g1';
 const S1 = 's1';
@@ -277,5 +277,68 @@ describe('SessionMarking — existing-session detection (C4 Attendance migration
 
     resolveExisting([]);
     await waitFor(() => expect(screen.getByRole('button', { name: /بدء تسجيل الحضور/ })).not.toBeDisabled());
+  });
+});
+
+// Recitation workflow — a saved session stays 'draft', and only a COMPLETED session is listed by
+// GET /api/recitation-sessions. The saved screen therefore offers the existing completion
+// endpoint (PUT /api/attendance-sessions/:groupId/:date/complete) as the normal next step.
+describe('SessionMarking — completing a saved session (Attendance → Recitation)', () => {
+  const serverRecords = [
+    { id: 'srv-1', studentId: S1, groupId: GROUP_ID, date: TODAY, status: 'present', sessionTime: '09:00', createdAt: '2026-01-01T00:00:00.000Z' },
+    { id: 'srv-2', studentId: S2, groupId: GROUP_ID, date: TODAY, status: 'absent',  sessionTime: '09:00', createdAt: '2026-01-01T00:00:00.000Z' },
+  ];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    seedStore();
+    pgSaveAttendanceSession.mockResolvedValue({ groupId: GROUP_ID, date: TODAY, sessionTime: '09:00', records: serverRecords });
+  });
+
+  it('is not offered before the session is saved', async () => {
+    renderPage();
+    await selectGroupAndWaitForRoster();
+    fireEvent.click(screen.getByRole('button', { name: /بدء تسجيل الحضور/ }));
+    await screen.findByRole('button', { name: /حفظ الجلسة/ });
+    expect(screen.queryByRole('button', { name: /إكمال الجلسة/ })).toBeNull();
+  });
+
+  it('after saving, completes the same group/date once and shows the session as available for recitation, leaving attendance untouched', async () => {
+    pgCompleteAttendanceSession.mockResolvedValue({ id: 'sess-1', groupId: GROUP_ID, date: TODAY, status: 'completed' });
+    renderPage();
+    await startSessionAndSave();
+
+    fireEvent.click(await screen.findByRole('button', { name: /إكمال الجلسة/ }));
+
+    expect(await screen.findByText(/متاحة الآن في صفحة التسميع/)).toBeInTheDocument();
+    expect(pgCompleteAttendanceSession).toHaveBeenCalledTimes(1);
+    expect(pgCompleteAttendanceSession).toHaveBeenCalledWith(GROUP_ID, TODAY);
+    expect(pgSaveAttendanceSession).toHaveBeenCalledTimes(1); // completing never re-saves
+    expect(useAppStore.getState().attendance).toEqual(serverRecords);
+    expect(screen.queryByRole('button', { name: /إكمال الجلسة/ })).toBeNull(); // no double completion
+  });
+
+  it('a failed completion shows the error and keeps the action available', async () => {
+    pgCompleteAttendanceSession.mockRejectedValue(Object.assign(new Error('تعذّر الاتصال بالخادم'), { status: 500 }));
+    renderPage();
+    await startSessionAndSave();
+
+    fireEvent.click(await screen.findByRole('button', { name: /إكمال الجلسة/ }));
+
+    expect(await screen.findByText(/تعذّر الاتصال بالخادم/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('button', { name: /إكمال الجلسة/ })).not.toBeDisabled());
+    expect(screen.queryByText(/متاحة الآن في صفحة التسميع/)).toBeNull();
+    expect(useAppStore.getState().attendance).toEqual(serverRecords);
+  });
+
+  it('a session that is already completed (409) is shown as completed rather than as a failure', async () => {
+    pgCompleteAttendanceSession.mockRejectedValue(Object.assign(new Error('الجلسة مكتملة بالفعل.'), { status: 409 }));
+    renderPage();
+    await startSessionAndSave();
+
+    fireEvent.click(await screen.findByRole('button', { name: /إكمال الجلسة/ }));
+
+    expect(await screen.findByText(/متاحة الآن في صفحة التسميع/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /إكمال الجلسة/ })).toBeNull();
   });
 });

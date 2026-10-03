@@ -8,7 +8,7 @@ import Button        from '../../components/ui/Button';
 import StatusToggle, { StatusQuickBtn } from './components/StatusToggle';
 import AttendanceStats from './components/AttendanceStats';
 import { STATUS_META } from '../../services/attendanceService';
-import { pgSaveAttendanceSession, pgGetSessionRoster, pgGetAttendance } from '../../services/api';
+import { pgSaveAttendanceSession, pgCompleteAttendanceSession, pgGetSessionRoster, pgGetAttendance } from '../../services/api';
 import { useAsyncData } from '../../hooks/useAsyncData';
 import { useGroupOptions } from '../../hooks/useGroupOptions';
 import { useAvatarStyle } from '../students/components/StudentAvatar';
@@ -86,6 +86,8 @@ export default function SessionMarking({ onDone }) {
   const [sessionTime,  setSessionTime]  = useState('09:00');
   const [marks,        setMarks]        = useState({});       // { [studentId]: status }
   const [saving,       setSaving]       = useState(false);
+  const [completing,   setCompleting]   = useState(false);
+  const [completed,    setCompleted]    = useState(false);
   const [search,       setSearch]       = useState('');
 
   // M2 (Group Options): the session group picker comes from GET /api/groups/options (with
@@ -210,8 +212,38 @@ export default function SessionMarking({ onDone }) {
     }
   }, [marks, selectedGroup, sessionDate, sessionTime, setAttendance, addLog, currentUser, group, stats, toast]);
 
+  // ── Complete session ──────────────────────────────────────
+  // A saved session stays 'draft'; Recitation lists only COMPLETED sessions. Completing reuses
+  // the server's completion endpoint, which changes the session's status only — attendance
+  // rows and enrollments are untouched, so local state is not modified here. A 409 means the
+  // session is already completed, which is the state the user wanted.
+  const handleComplete = useCallback(async () => {
+    setCompleting(true);
+    try {
+      await pgCompleteAttendanceSession(selectedGroup, sessionDate);
+      setCompleted(true);
+      addLog({
+        action:      'update',
+        module:      'attendance',
+        entityType:  'attendance',
+        entityId:    selectedGroup,
+        description: `إكمال حصة ${group?.name} — ${sessionDate}`,
+      }).catch((e) => toast.error(e.message || 'تعذّر تسجيل الحدث في سجل النشاط'));
+      toast.success('تم إكمال الجلسة ✓ — أصبحت متاحة في صفحة التسميع');
+    } catch (err) {
+      if (err.status === 409) {
+        setCompleted(true);
+        toast.info('الجلسة مكتملة بالفعل');
+      } else {
+        toast.error(err.message || 'فشل إكمال الجلسة — حاول مرة أخرى');
+      }
+    } finally {
+      setCompleting(false);
+    }
+  }, [selectedGroup, sessionDate, group, addLog, toast]);
+
   const reset = useCallback(() => {
-    setStep('setup'); setSelectedGroup(''); setMarks({});
+    setStep('setup'); setSelectedGroup(''); setMarks({}); setCompleted(false);
     setSessionDate(new Date().toISOString().split('T')[0]);
     setSearch('');
   }, []);
@@ -318,6 +350,20 @@ export default function SessionMarking({ onDone }) {
             </div>
           ))}
         </div>
+        {completed ? (
+          <div style={{ padding:'12px 16px', marginBottom:20, background:'rgba(16,185,129,.1)', border:'1px solid rgba(16,185,129,.25)', borderRadius:10, color:'#10b981', fontSize:'0.82rem', fontWeight:700 }}>
+            🔒 الجلسة مكتملة — متاحة الآن في صفحة التسميع
+          </div>
+        ) : (
+          <div style={{ padding:'14px 16px', marginBottom:20, background:'var(--surface)', border:'1px solid var(--border)', borderRadius:10 }}>
+            <div style={{ fontSize:'0.78rem', color:'var(--text3)', marginBottom:10 }}>
+              إكمال الجلسة يُتيحها في صفحة التسميع للطلاب الحاضرين، ولا يمكن تعديل الحضور بعد ذلك.
+            </div>
+            <Button variant="primary" loading={completing} onClick={handleComplete}>
+              🔒 إكمال الجلسة
+            </Button>
+          </div>
+        )}
         <div style={{ display:'flex', gap:10, justifyContent:'center' }}>
           <Button variant="secondary" onClick={reset}>حصة جديدة</Button>
           <Button variant="ghost" onClick={onDone}>← العودة للتقارير</Button>

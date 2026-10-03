@@ -680,6 +680,24 @@ export async function pgSaveAttendanceSession(groupId, date, sessionTime, record
   return json.data; // { groupId, date, sessionTime, records: [...] }
 }
 
+// pgCompleteAttendanceSession: PUT /api/attendance-sessions/:groupId/:date/complete — locks a
+// saved (draft) session; only completed sessions are listed by GET /api/recitation-sessions.
+// It changes the session's status only (never attendance rows or enrollments). An already
+// completed session answers 409 — the status is carried on the thrown error.
+export async function pgCompleteAttendanceSession(groupId, date) {
+  const res = await fetch(`${PG_API_BASE}/api/attendance-sessions/${encodeURIComponent(groupId)}/${encodeURIComponent(date)}/complete`, {
+    method: 'PUT',
+    credentials: 'include',
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) {
+    const err = new Error(json?.error || `PG PUT /attendance-sessions/${groupId}/${date}/complete → ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
+  return json.data; // the session row: { id, groupId, date, status: 'completed', completedAt, ... }
+}
+
 // P1-2 — pgCheckInAttendance: POST /api/attendance-sessions/:groupId/:date/check-in. Records
 // ONE student's attendance (QR check-in) under the same server rules as a full session save,
 // without replacing the rest of the session. A duplicate answers 409 with
