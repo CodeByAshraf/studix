@@ -145,9 +145,27 @@ describe('activateAdmission — BUG-05: atomic guard on the final admissions wri
 
     expect(mockTx.admissions.updateMany).toHaveBeenCalledTimes(1);
     const call = mockTx.admissions.updateMany.mock.calls[0][0];
-    expect(call.where).toEqual({ id: 'a8', student_id: null });
+    // N-01: the same guarded UPDATE also refuses a cancelled admission (NULL allowed explicitly).
+    expect(call.where).toEqual({
+      id: 'a8',
+      student_id: null,
+      OR: [{ reservation_status: null }, { reservation_status: { not: 'cancelled' } }],
+    });
     const createdStudent = await mockTx.students.create.mock.results[0].value;
     expect(call.data.student_id).toBe(createdStudent.id);
     expect(call.data.stage).toBe('active');
+  });
+
+  it('N-01: when the guard misses because the admission is cancelled, rejects with the cancelled message and writes no log', async () => {
+    mockTx.admissions.findUnique
+      .mockResolvedValueOnce({ id: 'a9', stage: 'lead', student_id: null, reservation_status: 'cancelled' })
+      .mockResolvedValueOnce({ reservation_status: 'cancelled' });
+    mockTx.students.create.mockImplementation(({ data }) => Promise.resolve({ ...data }));
+    mockTx.admissions.updateMany.mockResolvedValue({ count: 0 });
+
+    await expect(
+      activateAdmission({ admissionId: 'a9', student: baseStudentInput() }, { userId: 'u1' })
+    ).rejects.toThrow('لا يمكن تفعيل سجل قبول ملغى — تحقّق من حالته الحالية.');
+    expect(mockTx.admission_system_log.create).not.toHaveBeenCalled();
   });
 });

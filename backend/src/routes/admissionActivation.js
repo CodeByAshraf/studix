@@ -167,11 +167,24 @@ export async function activateAdmission({ admissionId, student: studentInput }, 
     // أُنشئ للتو أعلاه (tx.students.create) لم يُثبَّت بعد بالقاعدة — رمي استثناء هنا
     // يُلغي المعاملة التفاعلية بأكملها تلقائياً (Prisma $transaction rollback)، فلا طالب
     // يتيم يصل القاعدة إطلاقاً؛ نفس ضمان عدم-اليُتم المُثبَت فعلياً في reverseTreasuryTxn.
+    // N-01: a cancelled admission (cancelAdmissionWithRefund sets reservation_status='cancelled'
+    // and refunds its payments) can never be activated. The condition lives in this same guarded
+    // UPDATE, so a cancellation that commits while this request waits on the row lock is seen
+    // too. reservation_status is nullable (leads never had a reservation), and SQL `<>` never
+    // matches NULL, so NULL is allowed explicitly.
     const { count } = await tx.admissions.updateMany({
-      where: { id: admissionId, student_id: null },
+      where: {
+        id: admissionId,
+        student_id: null,
+        OR: [{ reservation_status: null }, { reservation_status: { not: 'cancelled' } }],
+      },
       data:  { stage: 'active', student_id: student.id, last_modified_by: userId, last_modified_at: new Date() },
     });
     if (count !== 1) {
+      const current = await tx.admissions.findUnique({ where: { id: admissionId }, select: { reservation_status: true } });
+      if (current?.reservation_status === 'cancelled') {
+        throw badRequest('لا يمكن تفعيل سجل قبول ملغى — تحقّق من حالته الحالية.');
+      }
       throw badRequest('سجل القبول تم تفعيله للتو من طلب آخر متزامن — تحقّق من حالته الحالية.');
     }
     const updatedAdmission = await tx.admissions.findUnique({ where: { id: admissionId } });

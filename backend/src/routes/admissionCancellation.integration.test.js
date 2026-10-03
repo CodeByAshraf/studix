@@ -349,4 +349,117 @@ describe('admissionCancellation.js — cancelAdmissionWithRefund real PostgreSQL
       expect(await liveBalance(cashbox.id)).toBe(1300);
     });
   });
+
+  // F. N-01 — a cancelled admission is never activated ───────────────────────────────────────
+  // The reverse order of E: once cancelAdmissionWithRefund has committed (reservation_status=
+  // 'cancelled', payments refunded), activateAdmission's guarded UPDATE also requires
+  // reservation_status <> 'cancelled', so a stale UI or a direct API call creates no student and
+  // leaves the cancelled admission and its refunds exactly as they were.
+  describe('F. cancelled admissions are never activated (N-01)', () => {
+    const studentInput = () => ({ name: 'طالب ملغى', groupId: 'g_cancel', phone: '201000000002' });
+
+    async function seedPaidAdmission(amount = 300, overrides = {}) {
+      const admission = await seedAdmission(overrides);
+      const cashbox = await seedCashbox({ opening_balance: 1000 });
+      await createAdmissionPayment({
+        admissionId: admission.id, type: 'deposit', amount, date: '2026-06-07', cashboxId: cashbox.id,
+      }, { userId: null });
+      return { admission, cashbox };
+    }
+
+    async function snapshot(admissionId, cashboxId) {
+      return {
+        admission: await client.admissions.findUnique({ where: { id: admissionId } }),
+        treasury: await client.treasury_txn.findMany({ where: { cashbox_id: cashboxId }, orderBy: { id: 'asc' } }),
+        logs: await client.admission_system_log.findMany({ where: { admission_id: admissionId }, orderBy: { id: 'asc' } }),
+        students: await client.students.count(),
+        balance: await liveBalance(cashboxId),
+      };
+    }
+
+    const activeRefunds = (admissionId) =>
+      client.treasury_txn.findMany({ where: { admission_id: admissionId, ref_type: 'admissionRefund', status: 'active' } });
+
+    it('cancel with refund, then activate: rejected (400), no student, admission and refund unchanged', async () => {
+      const { admission, cashbox } = await seedPaidAdmission(300);
+      await cancelAdmissionWithRefund({ admissionId: admission.id, reason: 'إلغاء ثم تفعيل' }, { userId: null });
+      const refundsBefore = await activeRefunds(admission.id);
+      expect(refundsBefore).toHaveLength(1);
+
+      const before = await snapshot(admission.id, cashbox.id);
+      const err = await activateAdmission({ admissionId: admission.id, student: studentInput() }, { userId: null })
+        .catch((e) => e);
+      expect(err.status).toBe(400);
+      expect(err.message).toMatch(/لا يمكن تفعيل سجل قبول ملغى/);
+
+      expect(await snapshot(admission.id, cashbox.id)).toEqual(before);
+      const after = await client.admissions.findUnique({ where: { id: admission.id } });
+      expect(after.reservation_status).toBe('cancelled');
+      expect(after.student_id).toBeNull();
+      expect(await activeRefunds(admission.id)).toEqual(refundsBefore);
+      expect(await liveBalance(cashbox.id)).toBe(1000);
+    });
+
+    it('a cancelled admission with no payments (nothing refunded) is rejected too', async () => {
+      const admission = await seedAdmission();
+      await cancelAdmissionWithRefund({ admissionId: admission.id, reason: 'إلغاء بلا دفعات' }, { userId: null });
+      const studentsBefore = await client.students.count();
+
+      await expect(activateAdmission({ admissionId: admission.id, student: studentInput() }, { userId: null }))
+        .rejects.toMatchObject({ status: 400 });
+
+      const after = await client.admissions.findUnique({ where: { id: admission.id } });
+      expect(after.reservation_status).toBe('cancelled');
+      expect(after.student_id).toBeNull();
+      expect(await client.students.count()).toBe(studentsBefore);
+    });
+
+    it('a waiting admission still activates exactly as before', async () => {
+      const admission = await seedAdmission({ reservation_status: 'waiting' });
+      const { admission: activated, student } = await activateAdmission(
+        { admissionId: admission.id, student: studentInput() }, { userId: null },
+      );
+      expect(activated.stage).toBe('active');
+      expect(activated.studentId).toBe(student.id);
+      expect(activated.reservationStatus).toBe('waiting');
+    });
+
+    it('a cancellation that commits while an activation is in flight wins: the activation re-checks at write time and creates no student', async () => {
+      const { admission, cashbox } = await seedPaidAdmission(300);
+      const studentsBefore = await client.students.count();
+
+      // Hold the cancellation's own guarded write (same columns cancelAdmissionWithRefund writes)
+      // open in a real transaction, so the activation's guarded UPDATE has to wait on the row lock.
+      let release;
+      const gate = new Promise((resolve) => { release = resolve; });
+      let locked;
+      const lockTaken = new Promise((resolve) => { locked = resolve; });
+      const cancellation = client.$transaction(async (tx) => {
+        const { count } = await tx.admissions.updateMany({
+          where: { id: admission.id, reservation_status: { in: ['reserved', 'waiting'] }, student_id: null },
+          data: { reservation_status: 'cancelled', stage: 'lead' },
+        });
+        locked(count);
+        await gate;
+      }, { timeout: 20_000 });
+      expect(await lockTaken).toBe(1);
+
+      let settled = false;
+      const activation = activateAdmission({ admissionId: admission.id, student: studentInput() }, { userId: null })
+        .finally(() => { settled = true; });
+      await sleep(400);
+      expect(settled).toBe(false); // blocked behind the cancellation's row lock
+
+      release();
+      await cancellation;
+      await expect(activation).rejects.toMatchObject({ status: 400 });
+
+      const after = await client.admissions.findUnique({ where: { id: admission.id } });
+      expect(after.reservation_status).toBe('cancelled');
+      expect(after.stage).toBe('lead');
+      expect(after.student_id).toBeNull();
+      expect(await client.students.count()).toBe(studentsBefore);
+      expect(await liveBalance(cashbox.id)).toBe(1300);
+    });
+  });
 });
